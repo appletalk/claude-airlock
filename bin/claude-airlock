@@ -498,7 +498,9 @@ _airlock_cleanup() {
   [ "$AIRLOCK_SHELL" = 1 ] || rm -f "$LOCK"
   local p
   for p in "${ARTIFACT_CLEANUP[@]:-}"; do
-    [ -d "$p" ] && rmdir "$p" 2>/dev/null || true
+    # rmdir only removes it if the session left it empty, which is what we want —
+    # never delete an artifact dir the box actually populated.
+    if [ -d "$p" ]; then rmdir "$p" 2>/dev/null || true; fi
   done
   # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
   # so we don't litter /tmp with empties but never delete a kept artifact.

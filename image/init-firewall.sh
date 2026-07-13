@@ -76,7 +76,9 @@ for dom in "${DOMAINS[@]}"; do
   ips="$(dig +short A "$dom" | grep -E "$IP_REGEX" || true)"
   if [ -z "$ips" ]; then log "WARN: could not resolve $dom"; continue; fi
   while read -r ip; do
-    [ -n "$ip" ] && ipset add allowed-domains "$ip" 2>/dev/null || true
+    # A duplicate IP (two allowlisted names resolving to the same host) makes `ipset add`
+    # fail; that is benign, so it must not abort the run under errexit.
+    if [ -n "$ip" ]; then ipset add allowed-domains "$ip" 2>/dev/null || true; fi
   done <<< "$ips"
 done
 
@@ -88,7 +90,9 @@ if group_active github; then
   gh_meta="$(curl -fsS https://api.github.com/meta || true)"
   if echo "$gh_meta" | jq -e '.git and .api and .web' >/dev/null 2>&1; then
     while read -r cidr; do
-      [[ "$cidr" =~ $CIDR_REGEX ]] && ipset add github-ranges "$cidr" 2>/dev/null || true
+      # Skip anything that isn't a v4 CIDR, and tolerate a duplicate/overlapping range
+      # (`aggregate` should collapse those, but a failed add must not abort under errexit).
+      if [[ "$cidr" =~ $CIDR_REGEX ]]; then ipset add github-ranges "$cidr" 2>/dev/null || true; fi
     done < <(echo "$gh_meta" | jq -r '(.git + .api + .web)[]' | grep -v ':' | aggregate -q 2>/dev/null || true)
     log "github ranges loaded"
   else
