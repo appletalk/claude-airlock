@@ -73,39 +73,41 @@ else
   echo; exit 1
 fi
 
-# The real test: containment must hold in a live box. We assert BOTH directions,
-# because a firewall that blocks everything would pass a block-only check while
-# being useless, and one that allows everything would pass a reachability check
-# while containing nothing.
+# The real test: containment must hold in a live box.
+#
+# init-firewall.sh already self-verifies in BOTH directions and on EVERY address family
+# the box can use — a denied host must be unreachable and an allowed host reachable, over
+# IPv4 and (where present) IPv6. So we simply run it and report what it says.
+#
+# We deliberately do NOT swallow its output. An earlier version redirected it to
+# /dev/null, caught the non-zero exit, and printed "the firewall could not start" with a
+# guess that the netfilter modules were missing — while the modules check directly above
+# had just passed, and the true cause was an IPv6 egress leak the firewall had correctly
+# detected and reported. A diagnostic that hides the error and then guesses is worse than
+# no diagnostic: it sends you off fixing the wrong thing. Show the real message.
 hdr "live containment test (throwaway box)"
-out="$("$ENGINE" run --rm \
+if fw_out="$("$ENGINE" run --rm \
   --cap-drop=ALL \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \
   --security-opt=no-new-privileges \
   -e AIRLOCK_EGRESS_GROUPS="" \
-  --entrypoint /bin/bash "$IMAGE" -c '
-    /usr/local/bin/init-firewall.sh >/dev/null 2>&1 || { echo "FIREWALL_FAILED"; exit 1; }
-    curl -sS --connect-timeout 5 https://example.com      >/dev/null 2>&1 && echo "LEAK"    || echo "BLOCKED"
-    curl -sS --connect-timeout 5 https://api.anthropic.com >/dev/null 2>&1 && echo "REACHED" || echo "UNREACHABLE"
-  ' 2>&1)"
-
-case "$out" in
-  *FIREWALL_FAILED*)
-    bad "the firewall could not start inside the box"
-    [ "$ENGINE" = podman ] && warn "     usually means the netfilter modules above are not resident"
-    ;;
-  *LEAK*)
-    bad "EGRESS NOT CONTAINED — the box reached example.com"
-    ;;
-  *BLOCKED*)
-    ok "denied host (example.com) is blocked"
-    case "$out" in
-      *REACHED*)      ok "allowed host (api.anthropic.com) is reachable" ;;
-      *UNREACHABLE*)  bad "api.anthropic.com unreachable — Claude will not work" ;;
+  --entrypoint /bin/bash "$IMAGE" -c '/usr/local/bin/init-firewall.sh' 2>&1)"; then
+  # Surface each thing the firewall proved, rather than a bare "passed".
+  while IFS= read -r line; do
+    case "$line" in
+      *"OK: "*)   ok   "${line#*OK: }" ;;
+      *"WARN: "*) warn "${line#*WARN: }" ;;
     esac
-    ;;
-  *) bad "unexpected result from the containment test:"; printf '%s\n' "$out" | sed 's/^/        /' ;;
-esac
+  done <<< "$fw_out"
+else
+  bad "the box FAILED its containment check — it is NOT safe to run the agent in it"
+  echo
+  printf '%s\n' "$fw_out" | sed 's/^/        /'
+  echo
+  warn "     read the ERROR line above — that is the real cause."
+  warn "     'egress NOT contained' means traffic escaped: the box could reach the"
+  warn "     internet despite the firewall. Do not use the sandbox until it is fixed."
+fi
 
 hdr ""
 if [ "$fail" -eq 0 ]; then
