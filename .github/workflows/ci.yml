@@ -25,7 +25,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - run: make lint
@@ -37,7 +37,7 @@ jobs:
       matrix:
         engine: [podman, docker]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats
       # The engines are stubbed here, so neither needs to be installed — this exercises
@@ -52,7 +52,7 @@ jobs:
       matrix:
         engine: [podman, docker]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install podman
         if: matrix.engine == 'podman'
