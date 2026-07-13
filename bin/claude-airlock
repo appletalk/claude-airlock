@@ -24,6 +24,8 @@ AIRLOCK_SHARE_BASE="${AIRLOCK_SHARE_BASE:-$HOME/development}"  # base for relati
 AIRLOCK_SHARE_HISTORY="${AIRLOCK_SHARE_HISTORY:-1}"   # 1 = share sessions+memory in/out
 AIRLOCK_MODEL="${AIRLOCK_MODEL:-opus}"                # default model in the box ("" = Claude's default)
 AIRLOCK_ARTIFACT_DIRS="${AIRLOCK_ARTIFACT_DIRS:-.venv node_modules}"  # env-built dirs kept container-local
+AIRLOCK_PIDS_LIMIT="${AIRLOCK_PIDS_LIMIT:-4096}"     # cap in-box process count (fork-bomb guard); 0/"" = engine default
+AIRLOCK_MEMORY="${AIRLOCK_MEMORY:-}"                 # host RAM cap, e.g. 8g; empty = no limit (too low breaks real builds)
 
 # Container engine. Rootless podman is the DEFAULT and the recommended posture:
 # belonging to the `docker` group is root-equivalent on the host (`docker run -v /:/host`
@@ -348,6 +350,17 @@ slug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
 STATE_DIR="$HOME/.config/claude-airlock/state/$slug"
 mkdir -p "$STATE_DIR/dot-claude"
 
+# Sensitive env (the OAuth token + any injected secrets) goes in a mode-0600 --env-file,
+# NOT on the engine command line. `-e KEY=VALUE` is visible in the host process table
+# (/proc/<pid>/cmdline, `ps auxe`) for the container's whole lifetime, and can be readable
+# by other users depending on /proc's hidepid — so `podman run -e SECRET=...` discloses
+# exactly what the per-project secret store went to lengths to keep private. The file
+# lives in STATE_DIR (never mounted into the box), is created 0600 before a byte is
+# written, and is removed on exit. Non-sensitive env stays on `-e` (below).
+ENV_FILE="$STATE_DIR/engine-env"
+(umask 077; : > "$ENV_FILE")
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$OAUTH_TOKEN" >> "$ENV_FILE"
+
 # Per-project persistent scratch. The box's own /tmp dies with the container (--rm),
 # which silently loses derived artifacts (a dedup index, a cache) between sessions.
 # Give each project a host dir bind-mounted at the SAME path, so host and box name the
@@ -496,6 +509,7 @@ fi
 ARTIFACT_CLEANUP=()
 _airlock_cleanup() {
   [ "$AIRLOCK_SHELL" = 1 ] || rm -f "$LOCK"
+  rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
   local p
   for p in "${ARTIFACT_CLEANUP[@]:-}"; do
     # rmdir only removes it if the session left it empty, which is what we want —
@@ -529,13 +543,25 @@ args=(
   --security-opt=no-new-privileges
   -e TERM -e "TZ=${TZ:-UTC}"
   -e DISABLE_AUTOUPDATER=1
-  -e "CLAUDE_CODE_OAUTH_TOKEN=$OAUTH_TOKEN"
+  --env-file "$ENV_FILE"                         # OAuth token + secrets (0600, off the process table)
   -w "$WORKSPACE"
   -v "$STATE_DIR/dot-claude:/home/dev/.claude:rw"
   -v "$STATE_DIR/claude.json:/home/dev/.claude.json:rw"
   -v "$AIRLOCK_TMP:$AIRLOCK_TMP:rw"                 # per-project scratch, same path host & box
   -e "AIRLOCK_TMP=$AIRLOCK_TMP"
 )
+
+# Resource limits. Cap the in-box process count so a runaway or compromised agent can't
+# fork-bomb the host; podman already defaults pids-limit to 2048, but Docker's default is
+# unlimited, so set it explicitly for parity. A RAM cap is opt-in (empty = none): too low
+# a ceiling silently breaks real builds (node/webpack, native compiles), so it is off by
+# default and set deliberately per host. Both are overridable in host config.
+case "$AIRLOCK_PIDS_LIMIT" in
+  ''|0) ;;                                          # unset / 0 -> engine default
+  *[!0-9]*) echo "claude-airlock: AIRLOCK_PIDS_LIMIT must be a number (got '$AIRLOCK_PIDS_LIMIT') — ignoring." >&2 ;;
+  *) args+=( --pids-limit "$AIRLOCK_PIDS_LIMIT" ) ;;
+esac
+[ -n "$AIRLOCK_MEMORY" ] && args+=( --memory "$AIRLOCK_MEMORY" )
 
 if [ "$AIRLOCK_ENGINE" = podman ]; then
   # Rootless podman puts the box in a user namespace. By DEFAULT it maps the host user
@@ -683,9 +709,9 @@ if [ -f "$SECRETS_FILE" ]; then
           echo "  Unlock your password store first (run: pass show ${_sval#pass:}), then relaunch." >&2
           exit 1
         fi
-        args+=( -e "$_skey=$_resolved" ) ;;
+        printf '%s=%s\n' "$_skey" "$_resolved" >> "$ENV_FILE" ;;   # into the 0600 env-file, not argv
       "") : ;;
-      *) args+=( -e "$_skey=$_sval" ) ;;
+      *) printf '%s=%s\n' "$_skey" "$_sval" >> "$ENV_FILE" ;;      # into the 0600 env-file, not argv
     esac
   done < "$SECRETS_FILE"
 fi

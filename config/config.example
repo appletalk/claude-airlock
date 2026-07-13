@@ -56,6 +56,16 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 # Space separated, relative to the project. Add nested paths like "backend/.venv".
 AIRLOCK_ARTIFACT_DIRS=".venv node_modules"
 
+# Resource limits (availability guard, not containment).
+#   AIRLOCK_PIDS_LIMIT — cap the box's process count so a runaway or compromised agent
+#     can't fork-bomb the host. Default 4096. Podman already defaults to 2048; this also
+#     covers Docker, whose default is unlimited. Set 0 (or empty) to use the engine default.
+#   AIRLOCK_MEMORY — host RAM ceiling for the box, e.g. 8g. EMPTY by default (no limit):
+#     too low a cap silently breaks real builds (webpack, native compiles), so set it
+#     deliberately per host if you want it.
+# AIRLOCK_PIDS_LIMIT=4096
+# AIRLOCK_MEMORY=
+
 # Git identity used inside the box (it has no ~/.gitconfig of its own). Defaults
 # to your host's global git user.name/email; a repo's local .git/config still wins.
 # AIRLOCK_GIT_NAME="Your Name"
