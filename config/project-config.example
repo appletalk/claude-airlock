@@ -1,0 +1,49 @@
+# Per-project airlock config — commit this at <project>/.airlock/config.
+#
+# SAFE-PARSED as `key = value` (never executed). Unknown keys are ignored;
+# values are validated. Only these keys are honored:
+
+# Extra environment-built directories to keep container-local, ADDED to the
+# default ".venv node_modules". Relative paths only (absolute paths and ".."
+# are rejected). Use for monorepos / non-standard layouts.
+# artifact_dirs = venv frontend/node_modules backend/.venv
+
+# Extra egress domains this project needs, ADDED to whatever the project's egress
+# posture already allows. Domain characters only. Because this file is writable from
+# INSIDE the sandbox, each domain must be APPROVED once on the host: you're prompted
+# at launch, and approved domains apply silently thereafter. An unexpected domain
+# here (e.g. added by a compromised session) prompts and is skipped unless you
+# approve it. Approvals live host-side where the box can't reach.
+# egress = cdn.jsdelivr.net fonts.gstatic.com
+
+# NOT configurable here: the egress POSTURE. By default a project gets 'minimal' —
+# Anthropic core only, plus the `egress =` domains above. To also open package
+# registries, run one of these on the HOST: `airlock egress dev` (npm+PyPI+GitHub),
+# or a subset like `airlock egress github pypi` (GitHub+PyPI, no npm). Like secrets,
+# this is a host-controlled grant kept out of this box-writable file, so a compromised
+# session can't widen its own egress to the registries.
+
+# Extra folders this project needs to see, e.g. a sibling repo whose docs or code it
+# references. Paths are RELATIVE to the host's AIRLOCK_SHARE_BASE (default ~/development)
+# — so this committed file never contains absolute /home paths, and a path can't escape
+# the base (absolute and ".." are rejected). Like egress, each folder is APPROVED ONCE
+# on the host: you're prompted at launch, and approved folders mount silently thereafter
+# at their real host path. Approvals live host-side where the box can't reach, so an
+# unexpected share added by a compromised session just prompts and is skipped.
+#   share    = <relpath> ...   -> READ-ONLY  (the default, least privilege)
+#   share_rw = <relpath> ...   -> READ-WRITE (the box can MODIFY those files)
+# Read and write use separate approvals, and the write prompt says so explicitly:
+# approving a read share never grants write. Prefer `share` unless the box genuinely
+# needs to write the folder.
+# share = other-repo virtualization-mcp-servers/deploy
+# share_rw = virtualization-application-registry
+
+# Image/stack to run for this project. MUST be a claude-airlock:* tag (you can't
+# point the sandbox at an arbitrary image from here).
+# image = claude-airlock:dev
+
+# NOT configurable here: secrets. Manage them with `airlock secret set KEY VALUE`
+# (or `KEY pass:PATH` to resolve from your password store at launch, encrypted at
+# rest). It's a host-controlled store the box can neither read nor choose from;
+# it's injected as env, and your committed .mcp.json / configs reference it by
+# name (e.g. ${MCP_HUB_TOKEN}). Keep injected creds read-only/scoped.

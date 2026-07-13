@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# claude-airlock pre-commit — shellcheck + bats. Install with `make hooks`.
+#
+# Lenient about MISSING tools (a fresh clone can still commit) but fails on real
+# lint/test errors. Get the tools with `make bootstrap` or your package manager.
+# Bypass in a pinch with `git commit --no-verify`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+shellcheck_bin="$(command -v shellcheck 2>/dev/null || echo .tooling/bin/shellcheck)"
+bats_bin="$(command -v bats 2>/dev/null || echo .tooling/bin/bats)"
+
+scripts=(
+  bin/claude-airlock bin/install.sh
+  image/init-firewall.sh image/entrypoint.sh
+  config/airlock-statusline.sh
+  hooks/pre-commit scripts/bootstrap-tools.sh
+)
+
+rc=0
+if command -v "$shellcheck_bin" >/dev/null 2>&1; then
+  echo "==> shellcheck"
+  "$shellcheck_bin" "${scripts[@]}" || rc=1
+else
+  echo "!! shellcheck not found — skipping (run 'make bootstrap' or install it)" >&2
+fi
+
+if command -v "$bats_bin" >/dev/null 2>&1; then
+  echo "==> bats"
+  "$bats_bin" test/ || rc=1
+else
+  echo "!! bats not found — skipping (run 'make bootstrap' or install it)" >&2
+fi
+
+if [ "$rc" -ne 0 ]; then
+  echo "pre-commit checks failed — fix, or bypass with 'git commit --no-verify'" >&2
+  exit 1
+fi

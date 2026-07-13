@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# airlock-pg-start — start a throwaway local PostgreSQL for tests inside the box.
+#
+# Listens on 127.0.0.1:5432, superuser "postgres", trust auth. The cluster is
+# ephemeral (recreated each container, under $HOME which isn't persisted), which
+# is what you want for tests. Idempotent — safe to run repeatedly.
+set -euo pipefail
+
+PGDATA="${PGDATA:-$HOME/.airlock-pgdata}"
+PGBIN="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1)"
+if [ -z "$PGBIN" ]; then
+  echo "airlock-pg-start: PostgreSQL is not installed in this image." >&2
+  exit 1
+fi
+export PATH="$PGBIN:$PATH"
+
+if pg_isready -q -h 127.0.0.1 -p 5432 2>/dev/null; then
+  echo "postgres already running on 127.0.0.1:5432"
+  exit 0
+fi
+
+if [ ! -s "$PGDATA/PG_VERSION" ]; then
+  echo "airlock-pg-start: initializing cluster at $PGDATA"
+  initdb -D "$PGDATA" -U postgres --auth=trust -E UTF8 >/dev/null
+fi
+
+pg_ctl -D "$PGDATA" -l "$PGDATA/server.log" \
+  -o "-c listen_addresses=127.0.0.1 -c port=5432 -c unix_socket_directories=$PGDATA" -w start
+
+echo "postgres ready: postgresql://postgres@127.0.0.1:5432  (trust auth, superuser 'postgres')"

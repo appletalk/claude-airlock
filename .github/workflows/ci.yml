@@ -1,0 +1,110 @@
+name: ci
+
+# Two layers of testing, because they catch different things:
+#
+#   unit        — the real launcher against a STUBBED engine, asserting the argv it
+#                 assembles. Fast, hermetic, no containers. Runs for BOTH engines.
+#   containment — build the real image and make a real box prove it is contained:
+#                 an allowed host reachable, a denied host not. This is the claim the
+#                 whole project rests on, so CI must not take it on faith.
+#
+# The matrix exists specifically so the Docker path cannot rot. Rootless podman is the
+# default and what the author actually uses day to day; without CI, Docker would quietly
+# break and nobody would notice until someone without podman tried to run it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: make lint
+
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [podman, docker]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+      # The engines are stubbed here, so neither needs to be installed — this exercises
+      # the launcher's argv assembly, not a container.
+      - name: bats (ENGINE=${{ matrix.engine }})
+        run: ENGINE=${{ matrix.engine }} bats test/
+
+  containment:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [podman, docker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install podman
+        if: matrix.engine == 'podman'
+        run: sudo apt-get update && sudo apt-get install -y podman passt uidmap
+
+      # A user namespace cannot autoload netfilter modules, so rootless podman needs them
+      # resident before the box starts. On a developer machine this is
+      # /etc/modules-load.d/airlock.conf + a reboot; in CI we just load them directly.
+      # This also means CI genuinely exercises the documented rootless prerequisite.
+      - name: Preload netfilter modules (rootless podman prerequisite)
+        if: matrix.engine == 'podman'
+        run: |
+          set -x
+          grep -v '^\s*#' config/modules-load.d/airlock.conf \
+            | grep -v '^\s*$' \
+            | while read -r m; do sudo modprobe "$m" || echo "note: $m unavailable (may be builtin)"; done
+          lsmod | grep -E 'nft_compat|ip_set|xt_set' || true
+
+      - name: Confirm rootless (no sudo, no daemon)
+        if: matrix.engine == 'podman'
+        run: |
+          podman info --format '{{.Host.Security.Rootless}}' | grep -qx true
+          grep -q "^$USER:" /etc/subuid
+
+      - name: Build base image
+        run: ${{ matrix.engine }} build -t claude-airlock:base image
+
+      # The real assertion. airlock-doctor runs a live box, raises the egress firewall,
+      # and requires BOTH directions to hold: api.anthropic.com reachable AND example.com
+      # blocked. A firewall that blocks everything would pass a block-only check while
+      # being useless; one that allows everything would pass a reachability check while
+      # containing nothing.
+      - name: Live containment test (${{ matrix.engine }})
+        run: AIRLOCK_ENGINE=${{ matrix.engine }} AIRLOCK_IMAGE=claude-airlock:base ./scripts/airlock-doctor.sh
+
+      # Belt and braces: assert the LAN-exposure regression stays dead. The firewall used
+      # to derive a /24 from the container's default route and ACCEPT it — harmless under
+      # Docker's private bridge, but under podman+pasta the box inherits the HOST's
+      # network config, so that rule would allow a slice of the real LAN.
+      - name: Assert no blanket /24 accept rule
+        run: |
+          set -euo pipefail
+          rules=$(${{ matrix.engine }} run --rm \
+            --cap-drop=ALL --cap-add=NET_ADMIN --cap-add=NET_RAW \
+            --cap-add=SETUID --cap-add=SETGID \
+            --security-opt=no-new-privileges \
+            -e AIRLOCK_EGRESS_GROUPS="" \
+            --entrypoint /bin/bash claude-airlock:base -c \
+            '/usr/local/bin/init-firewall.sh >/dev/null 2>&1; iptables -S OUTPUT')
+          echo "$rules"
+          if echo "$rules" | grep -qE '^-A OUTPUT -d [0-9.]+/24 -j ACCEPT'; then
+            echo "::error::firewall accepts a whole /24 — the LAN-exposure rule is back"
+            exit 1
+          fi
+          echo "ok: no blanket /24 accept rule"

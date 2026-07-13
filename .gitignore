@@ -1,0 +1,18 @@
+# Local state lives under ~/.config/claude-airlock, never in the repo.
+*.log
+
+# Vendored dev tools (make bootstrap) — not committed.
+.tooling/
+
+# Corporate / internal CA certs are a LOCAL, UNTRACKED drop-in (see README).
+#
+# This is a safety interlock, not tidiness. This repo is public. A private PKI chain
+# belongs to whoever's network it is, and nobody running `git add -A` on a work machine
+# should be one keystroke away from publishing their employer's internal CA names to the
+# open internet. Ignoring them here makes that mistake impossible rather than merely
+# discouraged — which is what lets the same repo be used at work and in public.
+#
+# Drop .crt files in image/certs/ and rebuild; they are baked into the image and never
+# committed. An internal mirror that deliberately WANTS them tracked can still override
+# with `git add -f image/certs/*.crt`.
+image/certs/*.crt

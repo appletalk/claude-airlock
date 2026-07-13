@@ -1,0 +1,21 @@
+{
+  "env": {
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    "CLAUDE_CODE_SCROLL_SPEED": "3"
+  },
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "permissions": {
+    "allow": [
+      "mcp__playwright"
+    ],
+    "deny": []
+  },
+  "tui": "fullscreen",
+  "statusLine": {
+    "type": "command",
+    "command": "bash /home/dev/.claude/airlock-statusline.sh"
+  }
+}

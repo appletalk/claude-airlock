@@ -1,0 +1,699 @@
+#!/usr/bin/env bash
+#
+# claude-airlock — run Claude Code inside the airlock container for $PWD.
+#
+# Write scope  : current directory (mounted at its REAL host path) -> read-write
+# Read scope   : none by default. A project may request extra folders via .airlock/
+#                config — `share = <relpath>` (read-only) or `share_rw = <relpath>`
+#                (read-write), relative to AIRLOCK_SHARE_BASE, each approved once on
+#                the host and mounted at its real path. AIRLOCK_ROOTS (host-set) can
+#                still broad-mount trees read-only at /roots/<name>.
+# Auth         : shared long-lived OAuth token via CLAUDE_CODE_OAUTH_TOKEN
+# History      : this project's sessions + memory are LIVE-SHARED with host
+#                Claude, so `--resume` and saved memories continue in and out of
+#                the box. Everything else (config, settings/hooks, credentials,
+#                other projects) stays isolated.
+# Egress       : default-DROP allowlist enforced inside the container
+#
+# Optional config (bash syntax): ~/.config/claude-airlock/config
+set -euo pipefail
+
+AIRLOCK_IMAGE="${AIRLOCK_IMAGE:-claude-airlock:dev}"
+AIRLOCK_ROOTS="${AIRLOCK_ROOTS:-}"                   # broad RO mounts at /roots/<name> (host-trusted; default none)
+AIRLOCK_SHARE_BASE="${AIRLOCK_SHARE_BASE:-$HOME/development}"  # base for relative, host-approved per-project `share =` folders
+AIRLOCK_SHARE_HISTORY="${AIRLOCK_SHARE_HISTORY:-1}"   # 1 = share sessions+memory in/out
+AIRLOCK_MODEL="${AIRLOCK_MODEL:-opus}"                # default model in the box ("" = Claude's default)
+AIRLOCK_ARTIFACT_DIRS="${AIRLOCK_ARTIFACT_DIRS:-.venv node_modules}"  # env-built dirs kept container-local
+
+# Container engine. Rootless podman is the DEFAULT and the recommended posture:
+# belonging to the `docker` group is root-equivalent on the host (`docker run -v /:/host`
+# owns the machine), so under Docker the tool that exists to contain a misbehaving agent
+# is itself backed by a root-equivalent socket. Rootless podman has no daemon and no
+# privileged socket — the box cannot exceed this unprivileged user's authority.
+# Docker remains supported (AIRLOCK_ENGINE=docker) for hosts that have nothing else.
+AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
+# Rootless podman's network stack. 'pasta' is podman's current default and the better
+# maintained option; 'slirp4netns' is the older alternative. Either way the egress
+# firewall inside the box is what actually enforces containment — see the note in the
+# engine-args section below about why we must NOT trust the container's default route.
+AIRLOCK_PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
+
+CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
+# shellcheck disable=SC1090
+[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+
+case "$AIRLOCK_ENGINE" in
+  podman|docker) ;;
+  *) echo "claude-airlock: AIRLOCK_ENGINE must be 'podman' or 'docker' (got '$AIRLOCK_ENGINE')." >&2; exit 1 ;;
+esac
+if ! command -v "$AIRLOCK_ENGINE" >/dev/null 2>&1; then
+  echo "claude-airlock: '$AIRLOCK_ENGINE' not found on PATH." >&2
+  if [ "$AIRLOCK_ENGINE" = podman ] && command -v docker >/dev/null 2>&1; then
+    echo "  Docker is installed. To use it (less safe — the docker group is root-equivalent):" >&2
+    echo "      AIRLOCK_ENGINE=docker airlock ..." >&2
+    echo "  or set AIRLOCK_ENGINE=docker in $CONFIG_FILE" >&2
+  fi
+  exit 1
+fi
+
+# Canonical opt-in egress groups (the "dev registries"). CORE (Anthropic) is always
+# on and is NOT a group. A project's posture (STATE_DIR/egress-mode) is one of:
+# 'minimal' (core only), 'dev' (all groups), or an explicit subset like "github pypi".
+AIRLOCK_EGRESS_ALL_GROUPS="github npm pypi"
+# Normalize a stored posture to a validated space-separated group list ("" = minimal).
+_resolve_egress_groups() {
+  local raw="$1" g out=""
+  case "$raw" in
+    ""|minimal) return ;;
+    dev)        printf '%s' "$AIRLOCK_EGRESS_ALL_GROUPS"; return ;;
+  esac
+  for g in $raw; do                                   # explicit list — keep known groups, dedup
+    case " $AIRLOCK_EGRESS_ALL_GROUPS " in *" $g "*)
+      case " $out " in *" $g "*) ;; *) out="${out:+$out }$g" ;; esac ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Gate a space-separated list of requested share relpaths ($1) against a host-side
+# approval store ($2) for access mode $3 (ro|rw); approved ABSOLUTE paths are appended
+# to the array named $4, and $5 is the OTHER mode's store. The CURRENT config's mode is
+# authoritative and the two stores are kept mutually exclusive: approving a path in one
+# mode clears it from the other. A rw->ro DOWNGRADE is a privilege reduction, so it's
+# auto-allowed (no prompt) if the path is already approved rw. A new path, or a ro->rw
+# UPGRADE (more access), prompts — so a compromised box can't widen read into write.
+# Relative paths resolve under the HOST-set AIRLOCK_SHARE_BASE (never the project file).
+_gate_shares() {
+  local _req="$1" _store="$2" _mode="$3"; local -n _dst="$4"; local _other="$5"
+  local _s _abs _ans _ok
+  [ -n "$_req" ] || return 0
+  if [ -z "$AIRLOCK_SHARE_BASE" ]; then
+    echo "claude-airlock: .airlock/config requests folder shares but AIRLOCK_SHARE_BASE is unset — skipping." >&2
+    return 0
+  fi
+  touch "$_store"
+  for _s in $_req; do
+    _abs="$AIRLOCK_SHARE_BASE/$_s"
+    if [ ! -d "$_abs" ]; then
+      echo "claude-airlock: shared folder '$_s' not found under $AIRLOCK_SHARE_BASE — skipping." >&2
+      continue
+    fi
+    _ok=0
+    if grep -qxF "$_s" "$_store"; then
+      _ok=1                                                 # already approved at this level
+    elif [ "$_mode" = ro ] && [ -f "$_other" ] && grep -qxF "$_s" "$_other"; then
+      _ok=1                                                 # rw->ro downgrade: less access, auto-allow
+      echo "claude-airlock: '$_s' downgraded to read-only (was read-write)." >&2
+    fi
+    if [ "$_ok" = 0 ]; then                                 # new path, or ro->rw upgrade — needs approval
+      if [ "$_mode" = rw ]; then
+        echo "claude-airlock: .airlock/config requests WRITE access to '$_s' — not yet approved." >&2
+        printf 'Share %s with the sandbox READ-WRITE — the box could MODIFY these files? [y/N] ' "$_abs" >&2
+      else
+        echo "claude-airlock: .airlock/config requests read access to '$_s' — not yet approved." >&2
+        printf 'Share %s with the sandbox (read-only)? [y/N] ' "$_abs" >&2
+      fi
+      read -r _ans || _ans=""
+      case "$_ans" in
+        y|Y|yes|YES) _ok=1; echo "  approved (remembered for this project)." >&2 ;;
+        *) echo "  skipped '$_s' — not shared." >&2 ;;
+      esac
+    fi
+    if [ "$_ok" = 1 ]; then                                 # record at this level, clear the other
+      grep -qxF "$_s" "$_store" || printf '%s\n' "$_s" >> "$_store"
+      if [ -s "$_other" ] && grep -qxF "$_s" "$_other"; then
+        grep -vxF "$_s" "$_other" > "$_other.tmp" 2>/dev/null || true; mv "$_other.tmp" "$_other"
+      fi
+      _dst+=( "$_abs" )
+    fi
+  done
+}
+
+WORKSPACE="$PWD"
+
+# `airlock shell` opens an interactive shell in the box instead of Claude — same
+# firewall, mounts, git identity, and Postgres, just bash. Doesn't take the
+# session lock (a shell can't corrupt --resume history).
+AIRLOCK_SHELL=0
+if [ "${1:-}" = "shell" ]; then AIRLOCK_SHELL=1; shift; fi
+
+# `airlock secret set|list|rm` manages the host-side per-project secret store —
+# the host-CONTROLLED grant of what this project's box gets, injected as env at
+# launch. Values are literal or `pass:PATH` (resolved via `pass show` at launch,
+# so they stay encrypted at rest). The store lives in STATE_DIR, never mounted
+# into the box, so the sandbox can neither read it nor choose its own secrets.
+if [ "${1:-}" = "secret" ]; then
+  _sslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _sstore="$HOME/.config/claude-airlock/state/$_sslug/secrets"
+  mkdir -p "$(dirname "$_sstore")"
+  case "${2:-list}" in
+    set)
+      _sk="${3:?usage: airlock secret set KEY VALUE|pass:PATH}"
+      case "$_sk" in ''|*[!A-Za-z0-9_]*) echo "airlock: invalid key '$_sk' (A-Z 0-9 _ only)" >&2; exit 1 ;; esac
+      shift 3; _sv="$*"
+      [ -n "$_sv" ] || { echo "airlock: no value given for $_sk" >&2; exit 1; }
+      touch "$_sstore"; chmod 600 "$_sstore"
+      sed -i "/^${_sk}=/d" "$_sstore" 2>/dev/null || true
+      printf '%s=%s\n' "$_sk" "$_sv" >> "$_sstore"
+      echo "airlock: set $_sk for $(basename "$WORKSPACE")" ;;
+    list)
+      echo "secrets for $(basename "$WORKSPACE")  ($_sstore):"
+      if [ -s "$_sstore" ]; then
+        while IFS= read -r _l || [ -n "$_l" ]; do
+          case "$_l" in
+            ''|\#*) continue ;;
+            *=pass:*) echo "  ${_l%%=*} = ${_l#*=}" ;;   # pass ref — a pointer, not a secret; show it
+            *=*)      echo "  ${_l%%=*} = ***" ;;         # literal value — mask
+          esac
+        done < "$_sstore"
+      else echo "  (none)"; fi ;;
+    rm)
+      _sk="${3:?usage: airlock secret rm KEY}"
+      if [ -f "$_sstore" ]; then sed -i "/^${_sk}=/d" "$_sstore"; echo "airlock: removed $_sk"; else echo "airlock: no secrets"; fi ;;
+    *) echo "usage: airlock secret set KEY VALUE|pass:PATH  |  airlock secret list  |  airlock secret rm KEY" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+# `airlock share list|rm` reviews the host-side folder-share approvals for this
+# project (the TOFU allowlist a `share =` line in .airlock/config is checked
+# against). Like secrets, the list lives in STATE_DIR and the box can't touch it;
+# `rm` revokes an approval so the next launch re-prompts (or drops the mount).
+if [ "${1:-}" = "share" ]; then
+  _shslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _shdir="$HOME/.config/claude-airlock/state/$_shslug"
+  _shstore="$_shdir/approved-shares"; _shstore_rw="$_shdir/approved-shares-rw"
+  case "${2:-list}" in
+    list)
+      echo "approved shares for $(basename "$WORKSPACE"):"
+      echo "  base: ${AIRLOCK_SHARE_BASE:-<unset>}"
+      _shany=0
+      for _row in "ro=$_shstore" "rw=$_shstore_rw"; do
+        _shmode="${_row%%=*}"; _shf="${_row#*=}"
+        [ -s "$_shf" ] || continue
+        while IFS= read -r _l || [ -n "$_l" ]; do
+          [ -n "$_l" ] || continue
+          echo "  $_l  ->  ${AIRLOCK_SHARE_BASE:-<base unset>}/$_l  ($_shmode)"; _shany=1
+        done < "$_shf"
+      done
+      [ "$_shany" = 1 ] || echo "  (none)" ;;
+    rm)
+      _shk="${3:?usage: airlock share rm RELPATH}"
+      _shrm=0
+      for _shf in "$_shstore" "$_shstore_rw"; do
+        if [ -f "$_shf" ] && grep -qxF "$_shk" "$_shf"; then
+          grep -vxF "$_shk" "$_shf" > "$_shf.tmp" || true; mv "$_shf.tmp" "$_shf"; _shrm=1
+        fi
+      done
+      if [ "$_shrm" = 1 ]; then echo "airlock: revoked share $_shk (next launch re-prompts)"
+      else echo "airlock: no such approved share '$_shk' (see 'airlock share list')"; fi ;;
+    *) echo "usage: airlock share list  |  airlock share rm RELPATH" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+# `airlock egress [show|list|minimal|dev|<groups>|add <groups>|rm <groups>]` reviews or
+# sets this project's egress POSTURE. Default 'minimal' = Anthropic core only (Claude
+# can't run without it) plus any host-approved `egress =` domains. 'dev' opens all
+# convenience groups; name a subset to REPLACE (e.g. `egress github pypi` — GitHub+PyPI,
+# no npm); or edit incrementally with `add`/`rm` (e.g. `egress rm pypi`). The posture
+# lives host-side in STATE_DIR (never mounted into the box), so widening is a deliberate
+# HOST action; a compromised box can't grant itself a registry as an exfil channel.
+if [ "${1:-}" = "egress" ]; then
+  _egslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _egdir="$HOME/.config/claude-airlock/state/$_egslug"; mkdir -p "$_egdir"
+  _egmode="$(cat "$_egdir/egress-mode" 2>/dev/null || echo "${AIRLOCK_EGRESS_MODE:-minimal}")"
+  _egwrite() {   # store a resolved group list; empty -> minimal
+    if [ -z "$1" ]; then printf 'minimal\n' > "$_egdir/egress-mode"
+      echo "airlock: egress for $(basename "$WORKSPACE") -> minimal (Anthropic core only)"
+    else printf '%s\n' "$1" > "$_egdir/egress-mode"
+      echo "airlock: egress groups for $(basename "$WORKSPACE") -> $1"; fi
+  }
+  case "${2:-show}" in
+    show|list)
+      _egnow="$(_resolve_egress_groups "$_egmode")"
+      echo "egress for $(basename "$WORKSPACE"):"
+      echo "  posture: ${_egmode:-minimal}"
+      echo "  active groups: ${_egnow:-<none — Anthropic core only>}"
+      echo "  available groups: $AIRLOCK_EGRESS_ALL_GROUPS"
+      echo "  host-approved extra domains (.airlock/config 'egress ='):"
+      if [ -s "$_egdir/approved-egress" ]; then sed 's/^/    /' "$_egdir/approved-egress"; else echo "    (none)"; fi ;;
+    minimal)
+      printf 'minimal\n' > "$_egdir/egress-mode"
+      echo "airlock: egress for $(basename "$WORKSPACE") -> minimal (Anthropic core only)" ;;
+    dev)
+      printf 'dev\n' > "$_egdir/egress-mode"
+      echo "airlock: egress for $(basename "$WORKSPACE") -> dev (all groups: $AIRLOCK_EGRESS_ALL_GROUPS)" ;;
+    add|rm|github|npm|pypi)                            # set/edit the group list
+      _op="set"; case "$2" in add|rm) _op="$2"; shift 2 ;; *) shift ;; esac
+      [ "$#" -gt 0 ] || { echo "usage: airlock egress $_op <groups: $AIRLOCK_EGRESS_ALL_GROUPS>" >&2; exit 1; }
+      for _g in "$@"; do                               # validate every requested group
+        case " $AIRLOCK_EGRESS_ALL_GROUPS " in *" $_g "*) ;; *) echo "airlock: unknown egress group '$_g' (valid: $AIRLOCK_EGRESS_ALL_GROUPS)" >&2; exit 1 ;; esac
+      done
+      case "$_op" in
+        set) _sel="$*" ;;                              # REPLACE with the named groups
+        add) _sel="$(_resolve_egress_groups "$_egmode") $*" ;;   # union with current
+        rm)  _sel=""; for _g in $(_resolve_egress_groups "$_egmode"); do
+               _keep=1; for _r in "$@"; do [ "$_g" = "$_r" ] && _keep=0; done
+               [ "$_keep" = 1 ] && _sel="${_sel:+$_sel }$_g"; done ;;
+      esac
+      _egwrite "$(_resolve_egress_groups "$_sel")" ;;  # resolver validates + dedups
+    *) echo "usage: airlock egress [show|list] | minimal | dev | <groups> | add <groups> | rm <groups>   (groups: $AIRLOCK_EGRESS_ALL_GROUPS)" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+# `airlock tmp` prints (and creates) this project's persistent scratch dir. Both the
+# box and the host `claude` wrapper export it as $AIRLOCK_TMP, so neither side has to
+# compute the slug — this is the single source of truth for the path.
+if [ "${1:-}" = "tmp" ]; then
+  _tslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _tdir="/tmp/airlock/$_tslug"
+  mkdir -p "$_tdir" && chmod 700 "$_tdir"
+  printf '%s\n' "$_tdir"
+  exit 0
+fi
+
+# `airlock doctor` verifies this host can actually run the sandbox: engine present,
+# rootless prerequisites (subuid/subgid, resident netfilter modules — a user namespace
+# cannot autoload them), and a LIVE containment test in a throwaway box. Runs before the
+# auth-token check on purpose: you must be able to diagnose a broken host without a token.
+if [ "${1:-}" = "doctor" ]; then
+  _dself="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+  _ddoctor="$(dirname "$(dirname "$_dself")")/scripts/airlock-doctor.sh"
+  if [ ! -x "$_ddoctor" ]; then
+    echo "claude-airlock: doctor script not found at $_ddoctor" >&2; exit 1
+  fi
+  AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE="$AIRLOCK_IMAGE" exec "$_ddoctor"
+fi
+
+# --- Per-project config: <project>/.airlock/config -------------------------
+# SAFE-PARSED, never sourced. The project dir is untrusted and this runs on the
+# HOST before the sandbox exists, so sourcing it would be host code execution.
+# Only known keys with validated values are honored; push tokens are NOT read
+# from here (a project must not reference your host secrets).
+PROJ_CFG="$WORKSPACE/.airlock/config"
+if [ -f "$PROJ_CFG" ]; then
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _line="${_line%%#*}"
+    case "$_line" in *=*) ;; *) continue ;; esac
+    _key="$(printf '%s' "${_line%%=*}" | tr -d '[:space:]')"
+    _val="$(printf '%s' "${_line#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$_key" in
+      artifact_dirs)                                  # extra container-local dirs
+        for _d in $_val; do
+          case "$_d" in /*|*..*) continue ;; esac     # relative paths only
+          case " $AIRLOCK_ARTIFACT_DIRS " in *" $_d "*) ;; *) AIRLOCK_ARTIFACT_DIRS="$AIRLOCK_ARTIFACT_DIRS $_d" ;; esac
+        done ;;
+      egress)                                         # requested; gated by host approval below
+        for _dom in $_val; do
+          case "$_dom" in ''|*[!a-zA-Z0-9.-]*) continue ;; esac
+          _REQ_EGRESS="${_REQ_EGRESS:+$_REQ_EGRESS }$_dom"
+        done ;;
+      share)                                          # requested READ-ONLY folders (rel to base); gated below
+        for _s in $_val; do
+          case "$_s" in ''|/*|*..*) continue ;; esac  # relative paths only, no escapes
+          _REQ_SHARE="${_REQ_SHARE:+$_REQ_SHARE }$_s"
+        done ;;
+      share_rw)                                       # requested READ-WRITE folders (rel to base); gated below
+        for _s in $_val; do
+          case "$_s" in ''|/*|*..*) continue ;; esac  # relative paths only, no escapes
+          _REQ_SHARE_RW="${_REQ_SHARE_RW:+$_REQ_SHARE_RW }$_s"
+        done ;;
+      image)                                          # must be a claude-airlock:* tag
+        case "$_val" in
+          claude-airlock:*) case "$_val" in *[!a-zA-Z0-9._:-]*) : ;; *) AIRLOCK_IMAGE="$_val" ;; esac ;;
+        esac ;;
+      *) : ;;                                         # ignore unknown keys
+    esac
+  done < "$PROJ_CFG"
+fi
+
+# --- Auth: shared long-lived OAuth token (CLAUDE_CODE_OAUTH_TOKEN) ---
+TOKEN_FILE="${AIRLOCK_TOKEN_FILE:-$HOME/.config/claude-airlock/token}"
+OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+[ -z "$OAUTH_TOKEN" ] && [ -f "$TOKEN_FILE" ] && OAUTH_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+if [ -z "$OAUTH_TOKEN" ]; then
+  echo "claude-airlock: no auth token found." >&2
+  echo "  Generate a long-lived (~1 year) token once, on the host:" >&2
+  echo "      claude-host setup-token" >&2
+  echo "  Then save the printed sk-ant-oat... value:" >&2
+  echo "      mkdir -p \"$(dirname "$TOKEN_FILE")\"" >&2
+  echo "      printf %s 'PASTE_TOKEN_HERE' > \"$TOKEN_FILE\" && chmod 600 \"$TOKEN_FILE\"" >&2
+  exit 1
+fi
+
+# --- Per-project state store (isolated: config, settings, other projects) ---
+slug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+STATE_DIR="$HOME/.config/claude-airlock/state/$slug"
+mkdir -p "$STATE_DIR/dot-claude"
+
+# Per-project persistent scratch. The box's own /tmp dies with the container (--rm),
+# which silently loses derived artifacts (a dedup index, a cache) between sessions.
+# Give each project a host dir bind-mounted at the SAME path, so host and box name the
+# file identically (the real-path invariant used for the workspace and shares).
+# ONLY this project's dir is mounted — never /tmp/airlock, never bare /tmp — so nothing
+# leaks between projects. It lives on the host's tmpfs: survives session exit, cleared
+# on reboot. An inter-session cache, not durable storage; bare /tmp stays ephemeral so
+# build/test temp files don't eat host RAM.
+AIRLOCK_TMP="/tmp/airlock/$slug"
+mkdir -p "$AIRLOCK_TMP" && chmod 700 "$AIRLOCK_TMP"
+
+# Per-project egress posture (host-controlled, tamper-proof — the mode file lives in
+# STATE_DIR, never mounted into the box). Default 'minimal' = Anthropic core only;
+# 'dev' opens the npm/PyPI/GitHub convenience groups (`airlock egress dev`). Global
+# AIRLOCK_EGRESS_MODE can shift the default. The resolved groups are passed to the
+# in-container firewall as AIRLOCK_EGRESS_GROUPS; the box can neither read the mode
+# file nor set the env, so it can't widen its own egress.
+EGRESS_MODE="$(cat "$STATE_DIR/egress-mode" 2>/dev/null || echo "${AIRLOCK_EGRESS_MODE:-minimal}")"
+AIRLOCK_EGRESS_GROUPS="$(_resolve_egress_groups "$EGRESS_MODE")"
+
+# Gate egress requested by the (box-writable) .airlock/config behind a host-side
+# approval list the box CANNOT touch — it lives in STATE_DIR, which is not mounted
+# into the container. Approved domains apply silently; a new/changed one (e.g. an
+# injected `egress = evil.com`) prompts once and is skipped unless you approve it.
+# Global-config egress (AIRLOCK_EXTRA_EGRESS, host-set) is trusted and not gated.
+if [ -n "${_REQ_EGRESS:-}" ]; then
+  _APPROVED="$STATE_DIR/approved-egress"
+  touch "$_APPROVED"
+  for _dom in $_REQ_EGRESS; do
+    if grep -qxF "$_dom" "$_APPROVED"; then
+      AIRLOCK_EXTRA_EGRESS="${AIRLOCK_EXTRA_EGRESS:+$AIRLOCK_EXTRA_EGRESS }$_dom"
+    else
+      echo "claude-airlock: .airlock/config requests egress to '$_dom' — not yet approved." >&2
+      printf 'Allow the sandbox to reach %s? [y/N] ' "$_dom" >&2
+      read -r _ans || _ans=""
+      case "$_ans" in
+        y|Y|yes|YES)
+          printf '%s\n' "$_dom" >> "$_APPROVED"
+          AIRLOCK_EXTRA_EGRESS="${AIRLOCK_EXTRA_EGRESS:+$AIRLOCK_EXTRA_EGRESS }$_dom"
+          echo "  approved (remembered for this project)." >&2 ;;
+        *) echo "  skipped '$_dom' — not added to egress." >&2 ;;
+      esac
+    fi
+  done
+fi
+
+# Gate folder shares requested by the (box-writable) .airlock/config, TOFU-style like
+# egress: each relpath resolves under the HOST-set AIRLOCK_SHARE_BASE and is approved
+# once into a store in STATE_DIR the box can't reach. Read (`share`) and write
+# (`share_rw`) use SEPARATE stores + prompts — approving a read never grants write.
+# Read and write shares each gate against their own store; the CURRENT config's mode
+# wins and the helper keeps the two stores mutually exclusive (approving in one clears
+# the other), so switching `share` <-> `share_rw` migrates cleanly with no stale entry.
+SHARE_RO=(); SHARE_RW=()
+_gate_shares "${_REQ_SHARE:-}"    "$STATE_DIR/approved-shares"    ro SHARE_RO "$STATE_DIR/approved-shares-rw"
+_gate_shares "${_REQ_SHARE_RW:-}" "$STATE_DIR/approved-shares-rw" rw SHARE_RW "$STATE_DIR/approved-shares"
+
+# Claude keys per-project session/memory dirs by the project's absolute path with
+# non-alphanumerics turned to '-'. Because we mount the project at its real host
+# path, this slug (and every path embedded in the transcripts) matches the host.
+HISTSLUG="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g')"
+
+# --- First-run identity/prefs seed (once); then always enforce friction-skips ---
+if [ ! -s "$STATE_DIR/claude.json" ] || ! jq -e . "$STATE_DIR/claude.json" >/dev/null 2>&1; then
+  if [ -f "$HOME/.claude.json" ] && command -v jq >/dev/null 2>&1; then
+    jq 'del(.projects, .mcpServers)' "$HOME/.claude.json" > "$STATE_DIR/claude.json.tmp" 2>/dev/null \
+      && mv "$STATE_DIR/claude.json.tmp" "$STATE_DIR/claude.json" \
+      || echo '{}' > "$STATE_DIR/claude.json"
+  else
+    echo '{}' > "$STATE_DIR/claude.json"
+  fi
+fi
+# Enforce (idempotent): onboarding done, a theme, and trust for the workspace
+# path. Must NOT gate on oauthAccount, which Claude writes itself at runtime.
+if command -v jq >/dev/null 2>&1; then
+  HOST_THEME="$(jq -r '.theme // "dark"' "$HOME/.claude.json" 2>/dev/null)"; [ "$HOST_THEME" = "null" ] && HOST_THEME="dark"
+  jq --arg theme "$HOST_THEME" --arg ws "$WORKSPACE" '
+      .hasCompletedOnboarding = true
+    | .theme = (.theme // $theme)
+    | .copyOnSelect = false
+    | .projects[$ws] = ((.projects[$ws] // {}) +
+        {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true, projectOnboardingSeenCount: 1})
+  ' "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp" 2>/dev/null \
+     && mv "$STATE_DIR/claude.json.tmp" "$STATE_DIR/claude.json"
+fi
+
+# On the Playwright image, give the box Claude the Playwright MCP (browser tools),
+# baked into the image — box-only, so the host never consumes it (unlike a project
+# .mcp.json, which both sides would read). Removed on other images so a leftover
+# config never points at a missing server.
+if command -v jq >/dev/null 2>&1; then
+  if [[ "$AIRLOCK_IMAGE" == *playwright* ]]; then
+    _mcp='.mcpServers.playwright = {command:"playwright-mcp", args:["--headless","--no-sandbox"]}'
+  else
+    _mcp='if has("mcpServers") then .mcpServers |= del(.playwright) else . end'
+  fi
+  jq "$_mcp" "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp" 2>/dev/null \
+    && mv "$STATE_DIR/claude.json.tmp" "$STATE_DIR/claude.json"
+fi
+
+# Prime the box with airlock conventions (empty shadow venv/node_modules are
+# expected — provision them; blocked egress is the firewall; etc.) so Claude
+# doesn't misread the sandbox. Refreshed each launch.
+_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+_repo="$(dirname "$(dirname "$_self")")"
+[ -f "$_repo/config/box-CLAUDE.md" ] && cp "$_repo/config/box-CLAUDE.md" "$STATE_DIR/dot-claude/CLAUDE.md"
+[ -f "$_repo/config/airlock-statusline.sh" ] && cp "$_repo/config/airlock-statusline.sh" "$STATE_DIR/dot-claude/airlock-statusline.sh"
+
+# Merge the airlock default settings.json baseline (env, attribution, permissions,
+# ...) into the box's settings each launch, so every session shares the same
+# defaults. Airlock defaults win on conflicts; other keys Claude wrote are kept.
+if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; then
+  _bs="$STATE_DIR/dot-claude/settings.json"
+  [ -s "$_bs" ] && jq -e . "$_bs" >/dev/null 2>&1 || echo '{}' > "$_bs"
+  jq -s '
+    .[0] as $e | .[1] as $d
+    | ($e * $d)
+    | .permissions.allow = ((($e.permissions.allow // []) + ($d.permissions.allow // [])) | unique)
+    | .permissions.deny  = ((($e.permissions.deny  // []) + ($d.permissions.deny  // [])) | unique)
+  ' "$_bs" "$_repo/config/box-settings.json" > "$_bs.tmp" 2>/dev/null \
+    && mv "$_bs.tmp" "$_bs"
+fi
+
+# --- Concurrent-session guard: warn if this project is already open (airlock) ---
+# Note: only detects other *airlock* sessions, not a raw host `claude`. Running
+# the same session live in two places can corrupt the shared history file.
+# Lock format: "<pid> <kind> <epoch>", shared with the claude-host wrapper so
+# airlock and raw host claude cross-detect each other on the same project.
+LOCK="$STATE_DIR/session.lock"
+if [ "$AIRLOCK_SHELL" != 1 ]; then
+  if [ -f "$LOCK" ]; then
+    read -r oldpid oldkind _ < "$LOCK" 2>/dev/null || true
+    if [ -n "${oldpid:-}" ] && kill -0 "$oldpid" 2>/dev/null; then
+      echo "claude-airlock: a ${oldkind:-} session for this project may already be open (pid $oldpid)." >&2
+      echo "Two live sessions on one project can corrupt shared --resume history." >&2
+      printf "Open another anyway? [y/N] " >&2
+      read -r ans || ans=""
+      case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted." >&2; exit 1 ;; esac
+    fi
+  fi
+  printf '%s airlock %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" > "$LOCK"
+fi
+
+# Cleanup: drop the lock, and remove any empty artifact mountpoints we had to
+# create on the host (populated in the shadow-mount section below).
+ARTIFACT_CLEANUP=()
+_airlock_cleanup() {
+  [ "$AIRLOCK_SHELL" = 1 ] || rm -f "$LOCK"
+  local p
+  for p in "${ARTIFACT_CLEANUP[@]:-}"; do
+    [ -d "$p" ] && rmdir "$p" 2>/dev/null || true
+  done
+  # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
+  # so we don't litter /tmp with empties but never delete a kept artifact.
+  rmdir "$AIRLOCK_TMP" 2>/dev/null || true
+  rmdir /tmp/airlock 2>/dev/null || true
+}
+trap _airlock_cleanup EXIT INT TERM
+
+# --- Assemble engine args ---
+# Least-privilege capabilities: drop the engine's broad default set and re-add only what
+# this box actually needs — NET_ADMIN + NET_RAW so the entrypoint can raise the
+# iptables/ipset egress firewall (the ipset match opens a netlink socket that needs
+# NET_RAW), and SETUID/SETGID so it can drop root -> the unprivileged `dev` user via
+# gosu. no-new-privileges stops anything inside from regaining privileges (e.g. via a
+# setuid binary). The agent itself runs as non-root `dev` with no capabilities.
+#
+# Under rootless podman these caps are namespaced: "root" in the box is root only within
+# ITS OWN user namespace, so NET_ADMIN grants control of the box's own network namespace
+# and nothing on the host. Under Docker the same caps are backed by real host root.
+args=(
+  --rm -it
+  --hostname airlock
+  --cap-drop=ALL
+  --cap-add=NET_ADMIN --cap-add=NET_RAW
+  --cap-add=SETUID --cap-add=SETGID
+  --security-opt=no-new-privileges
+  -e TERM -e "TZ=${TZ:-UTC}"
+  -e DISABLE_AUTOUPDATER=1
+  -e "CLAUDE_CODE_OAUTH_TOKEN=$OAUTH_TOKEN"
+  -w "$WORKSPACE"
+  -v "$STATE_DIR/dot-claude:/home/dev/.claude:rw"
+  -v "$STATE_DIR/claude.json:/home/dev/.claude.json:rw"
+  -v "$AIRLOCK_TMP:$AIRLOCK_TMP:rw"                 # per-project scratch, same path host & box
+  -e "AIRLOCK_TMP=$AIRLOCK_TMP"
+)
+
+if [ "$AIRLOCK_ENGINE" = podman ]; then
+  # Rootless podman puts the box in a user namespace. By DEFAULT it maps the host user
+  # to container root, and container uid 1000 (`dev`) to a subuid — so every bind-mounted
+  # file would appear root-owned and `dev` could not write its own workspace. keep-id
+  # pins host uid/gid -> 1000:1000 instead, which is exactly the uid the image gives
+  # `dev`, so mounts line up and files the box writes land on the host owned by you.
+  # Container root still maps into the subuid range, so the entrypoint can still raise
+  # the firewall before dropping to `dev`.
+  args+=( "--userns=keep-id:uid=1000,gid=1000" )
+  args+=( "--network=$AIRLOCK_PODMAN_NETWORK" )
+fi
+
+# The current project: read-write, at its REAL host path, so the session
+# transcripts (which embed absolute paths) resolve and `--resume` is seamless
+# in and out of the box.
+args+=( -v "$WORKSPACE:$WORKSPACE:rw" )
+
+# Shadow environment-built artifact dirs (.venv, node_modules, ...) with
+# container-local, per-project storage. venvs and node_modules aren't portable
+# across the host↔container boundary (different interpreter/libc/arch), so the
+# box gets its OWN copy while the host's sits underneath, untouched — neither
+# side clobbers the other.
+for d in $AIRLOCK_ARTIFACT_DIRS; do
+  case "$d" in /*|*..*) continue ;; esac        # reject absolute paths / parent escapes
+  host_path="$WORKSPACE/$d"
+  store="$STATE_DIR/artifacts/$(printf '%s' "$d" | sed 's#/#__#g')"
+  mkdir -p "$store"
+  if [ ! -e "$host_path" ]; then
+    mkdir -p "$host_path" && ARTIFACT_CLEANUP+=( "$host_path" )
+  fi
+  args+=( -v "$store:$host_path:rw" )
+done
+
+# Host-approved per-project folder shares, mounted at their REAL host path so the box
+# sees the same absolute path you do (no /roots translation). `share_rw` mounts rw,
+# `share` mounts ro. Skip any that overlap the workspace — it's already read-write, and
+# nesting mounts under it can't be set up by the runtime. rw wins over a duplicate ro.
+for _m in "${SHARE_RW[@]:-}"; do
+  [ -z "$_m" ] && continue
+  case "$_m" in "$WORKSPACE"|"$WORKSPACE"/*) continue ;; esac
+  case "$WORKSPACE" in "$_m"/*) continue ;; esac
+  args+=( -v "$_m:$_m:rw" )
+done
+for _m in "${SHARE_RO[@]:-}"; do
+  [ -z "$_m" ] && continue
+  case "$_m" in "$WORKSPACE"|"$WORKSPACE"/*) continue ;; esac
+  case "$WORKSPACE" in "$_m"/*) continue ;; esac
+  case " ${SHARE_RW[*]:-} " in *" $_m "*) continue ;; esac      # already mounted rw
+  args+=( -v "$_m:$_m:ro" )
+done
+
+# Broad read-only roots (host-set AIRLOCK_ROOTS) for cross-project inspection, under
+# /roots/<name>. Kept off the real-path tree on purpose: nesting a read-write child
+# inside a read-only parent mount can't be set up by the container runtime. Empty by
+# default — prefer targeted per-project `share =` folders above.
+IFS=': ' read -r -a roots <<< "$AIRLOCK_ROOTS"
+for r in "${roots[@]}"; do
+  [ -z "$r" ] && continue
+  [ -d "$r" ] || continue
+  [ "$r" = "$WORKSPACE" ] && continue
+  args+=( -v "$r:/roots/$(basename "$r"):ro" )
+done
+
+# Live-share THIS project's sessions + memory with host Claude (nothing else).
+#
+# Transcripts MUST be read-write: the box's Claude records its own session here, and
+# that is what makes `--resume` work in and out of the box. There is no read-only
+# variant of that — a box that cannot write its transcript cannot hold a session.
+#
+# memory/ carries a KNOWN, ACCEPTED RISK — read this before changing the default.
+#
+# The host's Claude auto-loads this project's memories into its context every session,
+# unprompted. Mounted read-write, memory/ is therefore a persistent influence channel out
+# of the sandbox: a compromised box could write a memory file that the UNSANDBOXED host
+# agent later reads and acts on, with your real credentials and no egress firewall. It
+# sidesteps containment without touching the network — it just writes a file you have
+# already told the host to trust. The egress firewall cannot see this and will not stop it.
+#
+# It is nonetheless READ-WRITE BY DEFAULT, deliberately. The box is the primary
+# workspace, not the exception; making memory read-only would mean the agent can never
+# SAVE a memory where you actually do the work, so memories would silently evaporate at
+# session end and the feature would be dead. A safety default that gets switched off on
+# day two buys nothing. We take the friction win and document the exposure.
+#
+# Tighten it per-project (or globally) when the code is untrusted:
+#   ro  — box reads your memories, cannot author them  (closes the channel)
+#   off — box neither reads nor writes them; it gets empty container-local storage
+AIRLOCK_SHARE_MEMORY="${AIRLOCK_SHARE_MEMORY:-rw}"
+case "$AIRLOCK_SHARE_MEMORY" in
+  ro|rw|off) ;;
+  *) echo "claude-airlock: AIRLOCK_SHARE_MEMORY must be ro|rw|off (got '$AIRLOCK_SHARE_MEMORY')." >&2; exit 1 ;;
+esac
+
+if [ "$AIRLOCK_SHARE_HISTORY" = "1" ]; then
+  HOST_PROJ="$HOME/.claude/projects/$HISTSLUG"
+  BOX_PROJ="/home/dev/.claude/projects/$HISTSLUG"
+  mkdir -p "$HOST_PROJ"
+  args+=( -v "$HOST_PROJ:$BOX_PROJ:rw" )
+
+  # Layer memory/ on top of the rw project mount. A read-only child inside a read-write
+  # parent is fine (it's the reverse — rw child under an ro parent — the runtimes refuse).
+  case "$AIRLOCK_SHARE_MEMORY" in
+    ro)
+      mkdir -p "$HOST_PROJ/memory"
+      args+=( -v "$HOST_PROJ/memory:$BOX_PROJ/memory:ro" ) ;;
+    off)
+      # Shadow the host's memories with empty container-local storage: the box neither
+      # reads nor writes them, but Claude still has a working memory dir of its own.
+      mkdir -p "$STATE_DIR/box-memory"
+      args+=( -v "$STATE_DIR/box-memory:$BOX_PROJ/memory:rw" ) ;;
+    rw) : ;;   # inherited read-write from the parent mount — the box can author host memories
+  esac
+fi
+
+# Git identity: the box has no ~/.gitconfig, so supply the host's global
+# user.name/email as the box's GLOBAL git config, so commits are attributed
+# correctly. A repo's own local .git/config still wins (it's in the mounted repo).
+GIT_NAME="${AIRLOCK_GIT_NAME:-$(git config --global user.name 2>/dev/null || true)}"
+GIT_EMAIL="${AIRLOCK_GIT_EMAIL:-$(git config --global user.email 2>/dev/null || true)}"
+if [ -n "$GIT_NAME$GIT_EMAIL" ]; then
+  { echo "[user]"
+    [ -n "$GIT_NAME" ]  && printf '\tname = %s\n'  "$GIT_NAME"
+    [ -n "$GIT_EMAIL" ] && printf '\temail = %s\n' "$GIT_EMAIL"
+  } > "$STATE_DIR/gitconfig"
+  args+=( -v "$STATE_DIR/gitconfig:/home/dev/.gitconfig:rw" )
+fi
+
+# Inject per-project secrets (host-controlled grant) as env into the box. pass:
+# refs resolve here via `pass show` — if pass/gpg is locked it prompts, and on
+# failure we exit asking you to unlock. The box gets values, never the store.
+SECRETS_FILE="$STATE_DIR/secrets"
+if [ -f "$SECRETS_FILE" ]; then
+  while IFS= read -r _sline || [ -n "$_sline" ]; do
+    _sline="${_sline%%#*}"
+    case "$_sline" in *=*) ;; *) continue ;; esac
+    _skey="$(printf '%s' "${_sline%%=*}" | tr -d '[:space:]')"
+    case "$_skey" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    _sval="$(printf '%s' "${_sline#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$_sval" in
+      pass:*)
+        _resolved="$(pass show "${_sval#pass:}" 2>/dev/null | head -n1)"
+        if [ -z "$_resolved" ]; then
+          echo "claude-airlock: could not resolve secret $_skey via 'pass show ${_sval#pass:}'." >&2
+          echo "  Unlock your password store first (run: pass show ${_sval#pass:}), then relaunch." >&2
+          exit 1
+        fi
+        args+=( -e "$_skey=$_resolved" ) ;;
+      "") : ;;
+      *) args+=( -e "$_skey=$_sval" ) ;;
+    esac
+  done < "$SECRETS_FILE"
+fi
+
+[ -n "$AIRLOCK_MODEL" ] && args+=( -e "ANTHROPIC_MODEL=$AIRLOCK_MODEL" )
+[ -n "${AIRLOCK_EXTRA_EGRESS:-}" ] && args+=( -e "AIRLOCK_EXTRA_EGRESS=$AIRLOCK_EXTRA_EGRESS" )
+args+=( -e "AIRLOCK_EGRESS_GROUPS=$AIRLOCK_EGRESS_GROUPS" )   # host-set egress posture (minimal / dev / group subset)
+
+if [ "$AIRLOCK_SHELL" = 1 ]; then
+  "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" bash -l
+else
+  "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" claude "$@"
+fi

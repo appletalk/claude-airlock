@@ -1,0 +1,264 @@
+# claude-airlock
+
+Run Claude Code inside a Docker sandbox with a **default-DROP egress firewall**, so
+`--dangerously-skip-permissions` / auto mode and internet access are contained. The
+goal is to make the *contained* box the default safe way to run Claude on a project —
+zero per-project config for the common case, explicit host-approved grants when a
+project needs more.
+
+## Why
+
+Assume the agent may misbehave (prompt injection, a bad tool call) and bound the blast
+radius:
+
+- **Class A — escape / exfil.** A misbehaving agent can't reach the network beyond a
+  small allowlist, can't touch other projects, and runs as a non-root user with a
+  minimal Linux capability set inside the container.
+- **Class B — destructive but *authorized* actions** (e.g. `terraform destroy`, a bad
+  commit) are **not** solved by isolation. Mitigate by keeping write credentials out of
+  the box (read-only / CI-scoped), branch protection, and human-reviewed pushes.
+
+The container + firewall is the moat; the launcher just assembles the invocation and
+manages host-side, tamper-proof grants.
+
+## Requirements
+
+- Linux with **Podman (rootless, recommended)** or **Docker**. Developed on WSL2;
+  container images are Debian. Select with `AIRLOCK_ENGINE` (see below).
+- A Claude subscription (auth is a long-lived OAuth token — see below).
+- `zsh` for the shell integration (the `airlock` / `claude` helpers).
+
+### Container engine — `AIRLOCK_ENGINE=podman|docker`
+
+**Rootless Podman is the recommended engine.** Belonging to the `docker` group is
+equivalent to having root on the host (`docker run -v /:/host` trivially owns the
+machine), so running the sandbox under Docker means the tool that exists to contain a
+misbehaving agent is itself reachable through a root-equivalent socket. Rootless Podman
+has no daemon and no privileged socket: the box cannot exceed your own unprivileged
+user's authority, no matter what happens inside it.
+
+Rootless Podman needs two things Docker did not:
+
+**1. Preloaded netfilter modules (one-time, needs root).** The kernel refuses to
+*autoload* netfilter modules for a process in a user namespace — which is what a rootless
+container is — so the box's firewall cannot bring them up itself. Docker's root daemon
+autoloaded them on your behalf; without it they must be resident at boot:
+
+```sh
+sudo install -m 0644 config/modules-load.d/airlock.conf /etc/modules-load.d/airlock.conf
+# then reboot (on WSL2: `wsl --shutdown` from Windows)
+```
+
+This needs `systemd` to be running — on WSL2 that means `systemd=true` under `[boot]` in
+`/etc/wsl.conf`. Verify after reboot with `airlock doctor`, which checks the modules *and*
+proves a rootless box can actually raise the firewall.
+
+**2. `subuid`/`subgid` ranges** for your user (`grep $USER /etc/subuid /etc/subgid`).
+Most distros configure these at install; if empty, run
+`sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER`.
+
+## Quick start
+
+```sh
+git clone git@github.com:appletalk/claude-airlock.git
+cd claude-airlock
+
+make install          # or: ./bin/install.sh
+                      # installs the launcher, builds claude-airlock:base + :dev
+```
+
+Add the shell integration to `~/.zshrc` (or `~/.zshrc.local`) and reload:
+
+```sh
+source "$PWD/shell/claude-airlock.zsh"
+```
+
+One-time auth — generate a long-lived (~1yr) token on the host and save it:
+
+```sh
+command claude setup-token          # copy the printed sk-ant-oat... value
+printf %s 'PASTE_TOKEN' > ~/.config/claude-airlock/token
+chmod 600 ~/.config/claude-airlock/token
+```
+
+Then, in any project:
+
+```sh
+cd ~/some/project
+airlock               # Claude Code, contained, for this directory
+```
+
+> **Billing:** the `setup-token` path uses your **subscription quota** (included), not
+> pay-per-token API credits. The TUI may show "Claude API" — that's cosmetic; confirm
+> with `/usage`. **Never** set `ANTHROPIC_API_KEY` in the box — it silently switches to
+> metered API billing.
+
+## Commands
+
+```
+airlock                         Claude Code in the box for $PWD
+airlock shell                   interactive shell in the box (no session lock)
+airlock --dangerously-skip-permissions   auto mode, contained
+
+airlock secret set KEY VALUE|pass:PATH   grant an env secret to this project's box
+airlock secret list | rm KEY             (pass:PATH resolves via `pass` at launch)
+
+airlock share list              review approved folder shares (ro/rw)
+airlock share rm RELPATH        revoke a share approval
+
+airlock egress                  show this project's egress posture
+airlock egress minimal|dev      Anthropic-only  |  + npm/PyPI/GitHub
+airlock egress github pypi      an explicit subset (replaces)
+airlock egress add|rm <groups>  edit the group set incrementally
+
+airlock tmp                     print (and create) this project's $AIRLOCK_TMP scratch dir
+airlock doctor                  verify this host can actually contain a box (live test)
+
+command claude                  raw host Claude (bypasses the airlock guard)
+```
+
+`airlock doctor` is the one to run after changing engines or rebooting: it checks the
+rootless prerequisites and then makes a real throwaway box prove containment — an allowed
+host must be reachable *and* a denied host must not be.
+
+`claude` on the host is a lock-aware guard: it warns if an airlock session for the same
+project is already open (two live sessions can corrupt shared `--resume` history).
+
+## Per-project config — `<project>/.airlock/config`
+
+Committed with the project, **safe-parsed** (never sourced) since the project dir is
+untrusted. Keys (see `config/project-config.example`):
+
+| Key | Effect |
+| --- | --- |
+| `egress = a.com b.com` | extra egress domains; **host-approved once** (box-writable, so TOFU-gated) |
+| `share = <relpath> ...` | mount a sibling folder **read-only** at its real path (host-approved) |
+| `share_rw = <relpath> ...` | mount it **read-write** (louder prompt; separate approval from read) |
+| `artifact_dirs = venv frontend/node_modules` | extra env-built dirs kept container-local |
+| `image = claude-airlock:playwright` | opt into a heavier image (must be a `claude-airlock:*` tag) |
+
+Share paths are relative to `AIRLOCK_SHARE_BASE` (default `~/development`), so committed
+configs never contain absolute `/home` paths, and `..`/absolute are rejected.
+
+## Host config — `~/.config/claude-airlock/config`
+
+Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
+`AIRLOCK_SHARE_BASE`, `AIRLOCK_EGRESS_MODE` (default posture for new projects),
+`AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`.
+
+## Scratch files — `$AIRLOCK_TMP`
+
+The box's `/tmp` is destroyed with the container (`--rm`, including on Ctrl+C) and is
+never shared with the host, so anything written there is silently lost between sessions —
+and a host-written `/tmp` file is invisible to the box.
+
+Each project instead gets `/tmp/airlock/<slug>`, bind-mounted into its box at the **same
+path** and exported as `$AIRLOCK_TMP` by *both* the `airlock` launcher and the host
+`claude` wrapper. Host and box therefore name the same file identically (`airlock tmp`
+prints and creates it). Sessions are shared across the boundary, so both sides must agree
+on where scratch lives.
+
+- **Per-project.** Only that project's own directory is mounted (mode `0700`) — never
+  `/tmp/airlock`, never bare `/tmp` — so nothing leaks between projects.
+- **An inter-session cache, not durable storage.** It lives on the host's `tmpfs`: it
+  survives sessions but is cleared on reboot, so it never becomes an unmanaged junk
+  drawer. Anything that must truly persist belongs in the project (gitignored if it
+  shouldn't be committed).
+- **Bare `/tmp` stays ephemeral** on purpose, so `pip` / `pytest` / build temp files stay
+  container-local rather than consuming the host's RAM-backed `tmpfs`.
+
+Claude only *follows* the convention if told to. The box is briefed automatically
+(`config/box-CLAUDE.md` is copied in on every launch). For **host** Claude, paste
+[`config/host-CLAUDE.md`](config/host-CLAUDE.md) into your global `~/.claude/CLAUDE.md`.
+
+## Security model
+
+- **Egress: minimal by default.** Only Anthropic is reachable (Claude can't run without
+  it). npm / PyPI / GitHub are opt-in *groups*; other domains are per-project,
+  host-approved. Enforced by an in-container iptables/ipset default-DROP firewall.
+- **Host-controlled, tamper-proof grants.** Secrets, share approvals, and egress posture
+  live in a per-project state dir that is **never mounted into the box**. A compromised
+  session can request more (via the box-writable `.airlock/config`) but can't approve it
+  — approving read never grants write; widening always prompts on the host.
+- **Least-privilege container.** Drops all Linux capabilities except the few the firewall
+  and privilege-drop need; runs as non-root `dev`; `--security-opt=no-new-privileges`.
+- **No mounted credentials.** Auth is an OAuth token env var; the host `~/.claude`
+  credentials, docker socket, and other projects are never exposed.
+- **Optional private CA chain** (see below) is trusted by *external tooling*
+  (curl/git/Python) only — never added to Node's trust, so Claude's own TLS to
+  `api.anthropic.com` stays on its vetted built-in roots.
+
+### Known limitation: shared memory is an influence channel
+
+Worth understanding, because the egress firewall **cannot see it and will not stop it.**
+
+This project's `~/.claude/projects/<slug>/` is mounted **read-write** into the box, so
+sessions and memories flow in and out (that's what makes `--resume` and saved memories
+work on both sides). That directory contains `memory/` — and host Claude **auto-loads
+those files into its context every session, unprompted.**
+
+So a compromised box can write a memory file that the **unsandboxed host agent** later
+reads and acts on, with your real credentials and no firewall. It never touches the
+network; it just writes a file you have already told the host to trust. Containment holds
+against *escape and exfil* (Class A); this is a different thing — **influence**.
+
+It is read-write by default anyway, deliberately: the box is meant to be the primary
+workspace, so read-only memory would mean the agent can never *save* a memory where you
+actually do the work, and the feature would quietly die. We take the friction win and
+name the exposure. Tighten it when the code is untrusted:
+
+| `AIRLOCK_SHARE_MEMORY` | Behaviour |
+| --- | --- |
+| `rw` *(default)* | Box reads **and writes** host memories. Convenient; channel open. |
+| `ro` | Box reads host memories, cannot author them. **Closes the channel.** |
+| `off` | Box neither reads nor writes them; it gets empty container-local storage. |
+
+Transcripts stay read-write in every mode — a box that cannot write its transcript cannot
+hold a session at all. Set `AIRLOCK_SHARE_HISTORY=0` to share nothing.
+
+## Corporate / internal CA certs (optional)
+
+If you sit behind a TLS-inspecting proxy, or need to reach internal HTTPS services whose
+certs chain to a private PKI, drop the CA chain into `image/certs/` and rebuild:
+
+```sh
+cp /path/to/your-root-ca.crt image/certs/
+make install          # rebuild the images
+```
+
+Public CA certificates only — **never private keys**. The directory is empty by default
+and the CA layer is a no-op without it, so nothing here is needed on a normal home
+network.
+
+## Images
+
+Layered, built by `make install`:
+
+- `claude-airlock:base` — Debian + Claude Code + git/gh + the egress firewall + core CLIs.
+- `claude-airlock:dev` *(default)* — base + Python, Node, build tools, PostgreSQL, yaml
+  tooling. Start Postgres in-box with `airlock-pg-start` (localhost:5432, ephemeral).
+- `claude-airlock:playwright` — dev + headless Chromium + the Playwright MCP. Opt in via
+  `image = claude-airlock:playwright`. Build on demand:
+  `docker build -t claude-airlock:playwright image/playwright`.
+
+## Development
+
+```sh
+make bootstrap   # vendor shellcheck + bats into .tooling/ (no sudo) — or install them
+make hooks       # install the git pre-commit hook (runs lint + tests)
+make lint        # shellcheck the launcher + firewall scripts
+make test        # run the bats suite
+make check       # lint + test (what the hook runs)
+```
+
+The launcher is intentionally Bash — it composes `docker`/`iptables`/`pass`/`jq`. Keep
+it shellcheck-clean and covered by the bats suite (which drives the real launcher with a
+stubbed `docker`). `make help` lists all targets.
+
+## License
+
+Copyright (C) 2026 Appletalk.
+
+Licensed under the **GNU Affero General Public License v3.0 or later** — see
+[LICENSE](LICENSE). If you run a modified version of this as a network service, the AGPL
+requires you to offer its source to the users of that service.

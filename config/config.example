@@ -1,0 +1,83 @@
+# claude-airlock configuration — sourced by the launcher (bash syntax).
+# Copy to ~/.config/claude-airlock/config and edit.
+
+# Container engine: podman (default, rootless) | docker
+#
+# Rootless podman is strongly preferred. Membership in the `docker` group is
+# root-equivalent on the host (`docker run -v /:/host` owns the machine), so under Docker
+# the tool that exists to contain a misbehaving agent is itself backed by a
+# root-equivalent socket. Rootless podman has no daemon and no privileged socket: the box
+# cannot exceed your unprivileged user's authority.
+#
+# Rootless podman needs the netfilter modules resident at boot — a user namespace cannot
+# autoload them (see README). Run `airlock doctor` to verify the host is actually able to
+# contain a box. Set this to docker only if podman is unavailable.
+# AIRLOCK_ENGINE=podman
+
+# Rootless podman's network stack: pasta (podman's default) | slirp4netns.
+# Containment is enforced by the in-box egress firewall either way; this only changes how
+# packets leave the network namespace. Leave it alone unless pasta misbehaves.
+# AIRLOCK_PODMAN_NETWORK=pasta
+
+# Image to run.
+#   dev  = base + Python / Node 24 / build toolchain (default, for real work)
+#   base = lean (Claude + git + gh + egress firewall only)
+AIRLOCK_IMAGE=claude-airlock:dev
+
+# Base folder for per-project folder shares. A project's .airlock/config asks for
+# extra read-only folders with `share = <relpath>`, resolved RELATIVE to this base
+# (so committed project configs never contain your absolute /home paths) and each
+# approved once on the host. Keep this in your host config, not in project files.
+AIRLOCK_SHARE_BASE="$HOME/development"
+
+# Broad read-only roots mounted at /roots/<name> for cross-project inspection.
+# EMPTY by default (no other project is visible unless a project `share =`s it and
+# you approve it). Only set this if you deliberately want every listed tree readable
+# by every box. Space or colon separated. Host-trusted (not gated).
+# AIRLOCK_ROOTS="$HOME/development"
+
+# Sharing this project's Claude memories with the host: rw (default) | ro | off
+#
+# KNOWN LIMITATION. Host Claude auto-loads this project's memories into its context every
+# session. Mounted rw, a compromised box could therefore write a memory that the
+# UNSANDBOXED host agent later reads and acts on — an influence channel that never touches
+# the network, so the egress firewall neither sees nor stops it.
+#
+# It is rw by default on purpose: the box is the primary workspace, and read-only memory
+# would mean the agent can never SAVE a memory where you actually work, killing the
+# feature. Set this to `ro` (box reads memories, cannot author them) or `off` (box gets
+# its own empty memory dir) when working on untrusted code. Session transcripts stay rw
+# regardless — a box that can't write its transcript can't hold a session.
+# AIRLOCK_SHARE_MEMORY=rw
+
+# Environment-built directories kept container-local (shadow-mounted with
+# per-project storage), so the box's build artifacts never mix with or clobber
+# the host's — venvs and node_modules are not portable across the boundary.
+# Space separated, relative to the project. Add nested paths like "backend/.venv".
+AIRLOCK_ARTIFACT_DIRS=".venv node_modules"
+
+# Git identity used inside the box (it has no ~/.gitconfig of its own). Defaults
+# to your host's global git user.name/email; a repo's local .git/config still wins.
+# AIRLOCK_GIT_NAME="Your Name"
+# AIRLOCK_GIT_EMAIL="you@example.com"
+
+# Default model in the sandbox: opus | sonnet | haiku | opusplan | a full model
+# id. Empty ("") uses Claude Code's own default. Override per-session with
+# `airlock --model sonnet`.
+AIRLOCK_MODEL=opus
+
+# Default egress posture for NEW projects: minimal | dev.
+#   minimal (default) = Anthropic core only (+ any host-approved `egress =` domains
+#                       a project declares). Least privilege — nothing else reachable.
+#   dev               = also open the npm / PyPI / GitHub convenience groups.
+# Per-project override (host-controlled, tamper-proof): `airlock egress dev`, or a
+# subset like `airlock egress github pypi` (GitHub+PyPI, no npm). Edit incrementally
+# with `airlock egress add|rm <groups>` (e.g. `airlock egress rm pypi`); `airlock
+# egress` (or `list`) shows the current posture. Leave the default at minimal unless
+# most of your projects are code that needs the registries.
+# AIRLOCK_EGRESS_MODE=minimal
+
+# Extra egress domains ALWAYS allowed (host-trusted, applied in every mode), added
+# to the allowlist regardless of posture. Space or comma separated. For per-project,
+# box-approved domains use `egress =` in that project's .airlock/config instead.
+# AIRLOCK_EXTRA_EGRESS="registry.terraform.io"
