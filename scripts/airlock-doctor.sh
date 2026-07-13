@@ -48,16 +48,37 @@ if [ "$ENGINE" = "podman" ]; then
 
   # The kernel will not autoload netfilter modules for a userns, so anything the
   # firewall needs must already be resident. Builtins are fine and report as such.
+  #
+  # The v6 modules are as load-bearing as the v4 ones: the firewall programs ip6tables
+  # and a `family inet6` ipset, and it ABORTS if the box has a global IPv6 address it
+  # cannot filter. A host with no IPv6 stack at all can't need them, so there they are
+  # only a warning.
   hdr "netfilter modules (must be resident — a userns cannot autoload them)"
+  # Only modules that are ACTUALLY load-bearing are listed. The box's ip6tables is
+  # ip6tables-nft, so it never touches the legacy ip6_tables/ip6table_filter; and the nft
+  # REJECT target resolves to nft_reject + nf_reject_ipv{4,6}, so the nft_reject_ipv4
+  # module can be absent on a host whose firewall demonstrably works. Requiring modules
+  # the backend does not use would fail a healthy host and send you fixing the wrong
+  # thing — the exact failure mode this script was just rewritten to stop doing.
+  resident() { grep -qE "^${1} " /proc/modules 2>/dev/null || [ -d "/sys/module/${1}" ]; }
   missing=()
   for m in nft_compat ip_set ip_set_hash_net xt_set xt_conntrack; do
-    if grep -qE "^${m} " /proc/modules 2>/dev/null || [ -d "/sys/module/${m}" ]; then
-      ok "$m"
-    else
-      bad "$m not resident"
-      missing+=("$m")
-    fi
+    if resident "$m"; then ok "$m"; else bad "$m not resident"; missing+=("$m"); fi
   done
+
+  # v6 adds exactly one: the REJECT target for the v6 OUTPUT rule. The firewall aborts
+  # rather than run half-contained, so on an IPv6-enabled host a missing one is fatal.
+  # A host with no IPv6 stack at all has nothing to contain, so there it is only a note.
+  if resident nf_reject_ipv6; then
+    ok "nf_reject_ipv6 (IPv6 REJECT target)"
+  elif [ -f /proc/net/if_inet6 ]; then
+    bad "nf_reject_ipv6 not resident — the box cannot install its IPv6 REJECT rule,"
+    bad "     and will REFUSE TO START on this IPv6-enabled host"
+    missing+=("nf_reject_ipv6")
+  else
+    warn "nf_reject_ipv6 not resident (no IPv6 stack on this host — nothing to contain)"
+  fi
+
   if [ ${#missing[@]} -gt 0 ]; then
     warn "     # persist across reboots (needs systemd):"
     warn "     sudo install -m 0644 config/modules-load.d/airlock.conf \\"

