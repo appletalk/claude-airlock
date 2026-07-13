@@ -59,9 +59,12 @@ if [ "$ENGINE" = "podman" ]; then
     fi
   done
   if [ ${#missing[@]} -gt 0 ]; then
+    warn "     # persist across reboots (needs systemd):"
     warn "     sudo install -m 0644 config/modules-load.d/airlock.conf \\"
-    warn "         /etc/modules-load.d/airlock.conf   # then reboot"
-    warn "     (needs systemd; on WSL2 set systemd=true under [boot] in /etc/wsl.conf)"
+    warn "         /etc/modules-load.d/airlock.conf"
+    warn "     # and load them now, so you don't have to reboot:"
+    warn "     grep -v '^#' config/modules-load.d/airlock.conf | xargs -r sudo modprobe"
+    warn "     (on WSL2: set systemd=true under [boot] in /etc/wsl.conf, then wsl --shutdown)"
   fi
 fi
 

@@ -23,57 +23,88 @@ manages host-side, tamper-proof grants.
 
 ## Requirements
 
-- Linux with **Podman (rootless, recommended)** or **Docker**. Developed on WSL2;
-  container images are Debian. Select with `AIRLOCK_ENGINE` (see below).
-- A Claude subscription (auth is a long-lived OAuth token — see below).
+- Linux with **Podman (rootless, recommended)** or **Docker**. Container images are
+  Debian; developed on WSL2 and on native Arch. Select with `AIRLOCK_ENGINE`.
+- `systemd`, for the one-time module preload under rootless Podman (step 1). On WSL2
+  that means `systemd=true` under `[boot]` in `/etc/wsl.conf`.
+- A Claude subscription (auth is a long-lived OAuth token — step 4).
 - `zsh` for the shell integration (the `airlock` / `claude` helpers).
+- `~/.local/bin` on your `PATH` — that's where the launcher is symlinked.
 
-### Container engine — `AIRLOCK_ENGINE=podman|docker`
+### Why rootless Podman
 
-**Rootless Podman is the recommended engine.** Belonging to the `docker` group is
-equivalent to having root on the host (`docker run -v /:/host` trivially owns the
-machine), so running the sandbox under Docker means the tool that exists to contain a
-misbehaving agent is itself reachable through a root-equivalent socket. Rootless Podman
-has no daemon and no privileged socket: the box cannot exceed your own unprivileged
-user's authority, no matter what happens inside it.
+Belonging to the `docker` group is equivalent to having root on the host (`docker run -v
+/:/host` trivially owns the machine), so running the sandbox under Docker means the tool
+that exists to contain a misbehaving agent is itself reachable through a root-equivalent
+socket. Rootless Podman has no daemon and no privileged socket: the box cannot exceed
+your own unprivileged user's authority, no matter what happens inside it.
 
-Rootless Podman needs two things Docker did not:
+It's the default. Set `AIRLOCK_ENGINE=docker` only if Podman is unavailable — and note
+that images live in the engine's own store, so switching engines later means rebuilding.
 
-**1. Preloaded netfilter modules (one-time, needs root).** The kernel refuses to
-*autoload* netfilter modules for a process in a user namespace — which is what a rootless
-container is — so the box's firewall cannot bring them up itself. Docker's root daemon
-autoloaded them on your behalf; without it they must be resident at boot:
-
-```sh
-sudo install -m 0644 config/modules-load.d/airlock.conf /etc/modules-load.d/airlock.conf
-# then reboot (on WSL2: `wsl --shutdown` from Windows)
-```
-
-This needs `systemd` to be running — on WSL2 that means `systemd=true` under `[boot]` in
-`/etc/wsl.conf`. Verify after reboot with `airlock doctor`, which checks the modules *and*
-proves a rootless box can actually raise the firewall.
-
-**2. `subuid`/`subgid` ranges** for your user (`grep $USER /etc/subuid /etc/subgid`).
-Most distros configure these at install; if empty, run
-`sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER`.
-
-## Quick start
+## Setup
 
 ```sh
 git clone git@github.com:appletalk/claude-airlock.git
-cd claude-airlock
-
-make install          # or: ./bin/install.sh
-                      # installs the launcher, builds claude-airlock:base + :dev
+cd claude-airlock          # the commands below are run from the repo root
 ```
 
-Add the shell integration to `~/.zshrc` (or `~/.zshrc.local`) and reload:
+### 1. Rootless Podman prerequisites (one-time, needs root)
+
+Skip this section entirely if you're using Docker — its root daemon already does both of
+these for you. That convenience is exactly what you give up by going rootless, and it is
+worth giving up.
+
+**Netfilter modules must be resident.** The kernel refuses to *autoload* netfilter
+modules for a process in a user namespace — which is what a rootless container is — so
+the box's firewall cannot bring them up itself. Install the module list to have systemd
+load them at every boot, then load them into the running kernel so you don't have to
+reboot to use the box today:
+
+```sh
+sudo install -m 0644 config/modules-load.d/airlock.conf /etc/modules-load.d/airlock.conf
+grep -v '^#' config/modules-load.d/airlock.conf | xargs -r sudo modprobe
+```
+
+(Modules already built into your kernel are a harmless no-op. On WSL2, `modprobe` may
+refuse if the kernel lacks them — reboot with `wsl --shutdown` from Windows instead.)
+
+**`subuid`/`subgid` ranges must exist** for your user, so the box can map users. Most
+distros configure these at install — check with `grep $USER /etc/subuid /etc/subgid`, and
+if it comes back empty:
+
+```sh
+sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
+```
+
+### 2. Install the launcher and build the images
+
+```sh
+make install          # or: ./bin/install.sh
+```
+
+That symlinks the launcher into `~/.local/bin`, writes a default host config to
+`~/.config/claude-airlock/config`, builds `claude-airlock:base` + `:dev`, and finishes by
+running `airlock doctor` — which stands up a real throwaway box and makes it *prove*
+containment: an allowed host must be reachable and a denied host must not be. If that
+check fails, the install says so loudly rather than leaving you with a sandbox that
+isn't one. Re-run it any time with `make doctor` (or `airlock doctor`), especially after
+changing engines or upgrading the kernel.
+
+### 3. Shell integration
+
+Add to `~/.zshrc` (or `~/.zshrc.local`) and reload:
 
 ```sh
 source "$PWD/shell/claude-airlock.zsh"
 ```
 
-One-time auth — generate a long-lived (~1yr) token on the host and save it:
+This gives you `airlock` (Claude Code in the box) and a lock-aware `claude` on the host
+that warns if an airlock session for the same project is already open.
+
+### 4. Auth (one-time)
+
+Generate a long-lived (~1yr) token on the host and save it:
 
 ```sh
 command claude setup-token          # copy the printed sk-ant-oat... value
@@ -81,7 +112,7 @@ printf %s 'PASTE_TOKEN' > ~/.config/claude-airlock/token
 chmod 600 ~/.config/claude-airlock/token
 ```
 
-Then, in any project:
+### 5. Use it
 
 ```sh
 cd ~/some/project

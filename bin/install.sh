@@ -32,7 +32,7 @@ fi
 echo "==> Engine: $AIRLOCK_ENGINE"
 if [ "$AIRLOCK_ENGINE" = docker ]; then
   echo "    NOTE: the 'docker' group is root-equivalent on this host. Rootless podman"
-  echo "          is the safer engine — see README (AIRLOCK_ENGINE)."
+  echo "          is the safer engine — see README ('Why rootless Podman')."
 fi
 
 echo "==> Installing launcher -> $BIN_TARGET/claude-airlock"
@@ -55,7 +55,8 @@ echo "==> Verifying the host can actually contain a box (airlock doctor)"
 if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$REPO_DIR/scripts/airlock-doctor.sh"; then
   echo
   echo "claude-airlock: the install completed, but the host FAILED its containment check." >&2
-  echo "  Fix the items above before trusting the sandbox — see README (AIRLOCK_ENGINE)." >&2
+  echo "  Fix the items above before trusting the sandbox — see README (Setup, step 1:" >&2
+  echo "  'Rootless Podman prerequisites')." >&2
   exit 1
 fi
 
