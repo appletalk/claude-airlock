@@ -112,6 +112,54 @@ printf %s 'PASTE_TOKEN' > ~/.config/claude-airlock/token
 chmod 600 ~/.config/claude-airlock/token
 ```
 
+One token is shared by every box. This is a **convenience for disposable boxes, not a
+security tier** — logging in to each box by hand would be unusable friction. The
+convenience stops paying for a box that is long-lived and singular (a persistent
+orchestrator session): there a one-time login costs nothing amortised, and it yields a
+credential Claude renews itself, which is what Remote Control — steering the session from
+mobile — needs.
+
+Telemetry and error reporting are **off in every box** by default — a sandbox has no need
+to phone home. Remote Control, though, refuses to start without feature-flag evaluation,
+which telemetry gates, so a box you intend to steer from mobile has to opt back in:
+
+```sh
+airlock telemetry on      # this project only; default is off
+airlock telemetry show
+```
+
+This toggles **telemetry only**. Error reporting (crash/stack data) stays off in both
+states — Remote Control does not need it, so there is no reason to ship it just to enable
+RC.
+
+> Claude checks whether `DISABLE_TELEMETRY` is **set**, not what it equals — `=0` still
+> disables it. So "on" means the variable is **absent**, which `settings.json` cannot
+> express on its own (it adds keys, never removes them). The launcher manages the box's
+> `settings.json` directly each launch — deleting the key when on, asserting it when off —
+> which also self-heals a box provisioned before this logic existed.
+
+Switch **that one project** — the setting is per-project, so everything else keeps using
+the shared token:
+
+```sh
+cd ~/some/long-lived-project
+airlock login persist     # this project only; others are untouched
+airlock                   # complete /login once — it persists from here on
+airlock login show        # confirm mode + whether a credential is stored
+airlock login token       # switch back to the shared token
+```
+
+No token is injected, so Claude falls into its normal `/login` on first launch, and the
+credential it writes lands in `$HOME/.claude` — already the persistent per-project mount,
+so it survives restarts with no extra plumbing.
+
+> **Not a security downgrade,** despite first appearances. Both are bearer credentials for
+> the same account via the same OAuth flow; if anything the shared token has the wider
+> blast radius, since it is injected into *every* box while a persisted login exists in
+> one. The mode lives in the never-mounted state dir, so a box can neither read nor change
+> its own auth mode. `airlock login token` switches back but deliberately leaves the stored
+> credential in place; it tells you where, so delete it to revoke locally.
+
 ### 5. Use it
 
 ```sh

@@ -50,6 +50,30 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 # regardless — a box that can't write its transcript can't hold a session.
 # AIRLOCK_SHARE_MEMORY=rw
 
+# Skip injecting the shared OAuth token, so the box runs its own interactive /login
+# and persists it. Off by default.
+#
+# NOTE: this is normally set PER-PROJECT with `airlock login persist`, not here — the
+# whole point is that one long-lived box differs while every other project keeps the
+# token, and setting it in this file would flip them ALL. It is documented here only
+# because the env var still works as a one-off override for a single launch.
+#
+# The shared token is a CONVENIENCE for ephemeral boxes, not a security tier: boxes
+# are disposable, so a per-box login would be intolerable friction. That convenience
+# stops paying for a box that is LONG-LIVED and SINGULAR (one persistent orchestrator
+# session), where a one-time login costs nothing amortised and yields a credential
+# Claude renews itself — which is what Remote Control (steering the session from
+# mobile) needs.
+#
+# No extra mount is involved: Claude writes credentials under $HOME/.claude, which is
+# already the persistent per-project bind mount, so the login survives restarts.
+#
+# NOT a security downgrade: both are bearer credentials for the same account via the
+# same OAuth flow, and the shared token arguably has the WIDER blast radius since it
+# is injected into every box while a persisted login exists in one. The mode is not
+# settable from the box-writable .airlock/config, so a box cannot switch its own auth.
+# AIRLOCK_PERSIST_LOGIN=0
+
 # Environment-built directories kept container-local (shadow-mounted with
 # per-project storage), so the box's build artifacts never mix with or clobber
 # the host's — venvs and node_modules are not portable across the boundary.

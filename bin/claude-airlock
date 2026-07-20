@@ -8,7 +8,9 @@
 #                (read-write), relative to AIRLOCK_SHARE_BASE, each approved once on
 #                the host and mounted at its real path. AIRLOCK_ROOTS (host-set) can
 #                still broad-mount trees read-only at /roots/<name>.
-# Auth         : shared long-lived OAuth token via CLAUDE_CODE_OAUTH_TOKEN
+# Auth         : shared long-lived OAuth token via CLAUDE_CODE_OAUTH_TOKEN, or —
+#                with AIRLOCK_PERSIST_LOGIN=1 — no injected token at all, the box
+#                doing its own /login which persists in the per-project state dir
 # History      : this project's sessions + memory are LIVE-SHARED with host
 #                Claude, so `--resume` and saved memories continue in and out of
 #                the box. Everything else (config, settings/hooks, credentials,
@@ -22,6 +24,11 @@ AIRLOCK_IMAGE="${AIRLOCK_IMAGE:-claude-airlock:dev}"
 AIRLOCK_ROOTS="${AIRLOCK_ROOTS:-}"                   # broad RO mounts at /roots/<name> (host-trusted; default none)
 AIRLOCK_SHARE_BASE="${AIRLOCK_SHARE_BASE:-$HOME/development}"  # base for relative, host-approved per-project `share =` folders
 AIRLOCK_SHARE_HISTORY="${AIRLOCK_SHARE_HISTORY:-1}"   # 1 = share sessions+memory in/out
+AIRLOCK_PERSIST_LOGIN="${AIRLOCK_PERSIST_LOGIN:-0}"   # 1 = no token injection; box does its own /login, persisted (see auth section)
+AIRLOCK_PERMISSION_MODE="${AIRLOCK_PERMISSION_MODE:-}" # one-off --permission-mode; the durable per-project setting is `airlock mode`
+# Claude's own --permission-mode choices, mirrored so we reject a typo on the HOST rather
+# than launching a box that dies on an invalid flag. Keep in sync with `claude --help`.
+AIRLOCK_PERMISSION_MODES="acceptEdits auto bypassPermissions manual dontAsk plan"
 AIRLOCK_MODEL="${AIRLOCK_MODEL:-opus}"                # default model in the box ("" = Claude's default)
 AIRLOCK_ARTIFACT_DIRS="${AIRLOCK_ARTIFACT_DIRS:-.venv node_modules}"  # env-built dirs kept container-local
 AIRLOCK_PIDS_LIMIT="${AIRLOCK_PIDS_LIMIT:-4096}"     # cap in-box process count (fork-bomb guard); 0/"" = engine default
@@ -265,6 +272,117 @@ if [ "${1:-}" = "egress" ]; then
   exit 0
 fi
 
+# `airlock login [show|token|persist]` sets how THIS project authenticates.
+#
+#   token   (default, every project) — the host injects the shared long-lived
+#           token. Right for disposable boxes: no per-box login friction.
+#   persist (opt-in, expected to be rare) — inject nothing, so Claude falls into its
+#           normal /login on first launch. The credential it writes lands in the
+#           per-project .claude mount, so it survives restarts and you log in once.
+#
+# Per-project by design, stored in STATE_DIR like the egress posture. A global switch
+# would defeat the purpose: the point is that ONE long-lived box differs while every
+# other project keeps using the token. STATE_DIR is never mounted, so a box cannot
+# read or change its own auth mode.
+if [ "${1:-}" = "login" ]; then
+  _lslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _ldir="$HOME/.config/claude-airlock/state/$_lslug"; mkdir -p "$_ldir"
+  case "${2:-show}" in
+    show)
+      if [ "$(cat "$_ldir/persist-login" 2>/dev/null || echo 0)" = "1" ]; then
+        echo "login mode for $(basename "$WORKSPACE"): persist"
+        echo "  no token injected; the box runs its own /login and it persists"
+        if [ -s "$_ldir/dot-claude/.credentials.json" ]; then
+          echo "  credential: present (logged in)"
+        else
+          echo "  credential: NONE YET — run 'airlock' and complete /login once"
+        fi
+      else
+        echo "login mode for $(basename "$WORKSPACE"): token (default)"
+        echo "  the shared long-lived token is injected at launch"
+      fi ;;
+    token)
+      rm -f "$_ldir/persist-login"
+      echo "airlock: login for $(basename "$WORKSPACE") -> token (shared, injected)"
+      # Deliberately does NOT delete the stored credential: switching back to the token
+      # should not silently destroy a login you may want on the next switch. Say so, so
+      # a leftover credential is never a surprise.
+      [ -s "$_ldir/dot-claude/.credentials.json" ] && \
+        echo "  note: a persisted credential remains at $_ldir/dot-claude/.credentials.json — remove it to fully revoke locally" ;;
+    persist)
+      printf '1\n' > "$_ldir/persist-login"
+      echo "airlock: login for $(basename "$WORKSPACE") -> persist (box logs itself in)"
+      echo "  next launch will prompt /login once; the credential then persists." ;;
+    *) echo "usage: airlock login [show] | token | persist" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+# `airlock telemetry [show|on|off]` controls this project's box telemetry. OFF by default —
+# a sandbox has no need to phone home. Stored per-project in STATE_DIR; the launcher
+# enforces it in the box's settings.json each launch (see the merge block below for why it
+# lives there and must be actively managed).
+#
+# `on` exists because Remote Control refuses to run without feature-flag evaluation, which
+# telemetry gates. A long-lived box steered from mobile therefore has to opt back in.
+# Scope note: this toggles TELEMETRY only. Error reporting (crash/stack data) stays off in
+# both states — RC does not need it, so there is no reason to ship it.
+if [ "${1:-}" = "telemetry" ]; then
+  _tslug2="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _tdir2="$HOME/.config/claude-airlock/state/$_tslug2"; mkdir -p "$_tdir2"
+  case "${2:-show}" in
+    show)
+      if [ -f "$_tdir2/telemetry-on" ]; then
+        echo "telemetry for $(basename "$WORKSPACE"): ON (Remote Control usable; error reporting still off)"
+      else
+        echo "telemetry for $(basename "$WORKSPACE"): off (default; Remote Control unavailable)"
+      fi ;;
+    on)
+      touch "$_tdir2/telemetry-on"
+      echo "airlock: telemetry for $(basename "$WORKSPACE") -> ON"
+      echo "  DISABLE_TELEMETRY removed from the box on next launch; error reporting stays off." ;;
+    off)
+      rm -f "$_tdir2/telemetry-on"
+      echo "airlock: telemetry for $(basename "$WORKSPACE") -> off (default)" ;;
+    *) echo "usage: airlock telemetry [show] | on | off" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+# `airlock mode [show|<mode>|reset]` sets the permission mode this project's box STARTS
+# in, passed through as `claude --permission-mode`. Modes: acceptEdits, auto,
+# bypassPermissions, manual, dontAsk, plan.
+#
+# Per-project and stored in STATE_DIR, like the egress posture and login mode — a
+# long-running orchestrator wants to start in `auto` without every disposable box
+# inheriting that. `reset` drops the setting so Claude uses its own default.
+#
+# Note this sets the STARTING mode only; shift-tab still switches modes in-session. And
+# it is a HOST setting by design: a box that could raise its own permission mode would
+# be choosing how much it gets asked, which is the operator's call, not the agent's.
+if [ "${1:-}" = "mode" ]; then
+  _mslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _mdir="$HOME/.config/claude-airlock/state/$_mslug"; mkdir -p "$_mdir"
+  case "${2:-show}" in
+    show)
+      # No apostrophe in the :- default. Inside ${var:-word} a single quote opens a quote
+      # context even within double quotes, so "Claude's" here is a parse error, not a string.
+      _mnow="$(cat "$_mdir/permission-mode" 2>/dev/null || true)"
+      echo "permission mode for $(basename "$WORKSPACE"): ${_mnow:-<unset - Claude default>}"
+      echo "  available: $AIRLOCK_PERMISSION_MODES" ;;
+    reset)
+      rm -f "$_mdir/permission-mode"
+      echo "airlock: permission mode for $(basename "$WORKSPACE") -> unset (Claude's default)" ;;
+    *)
+      case " $AIRLOCK_PERMISSION_MODES " in
+        *" $2 "*) printf '%s\n' "$2" > "$_mdir/permission-mode"
+                  echo "airlock: permission mode for $(basename "$WORKSPACE") -> $2" ;;
+        *) echo "airlock: unknown permission mode '$2' (valid: $AIRLOCK_PERMISSION_MODES)" >&2; exit 1 ;;
+      esac ;;
+  esac
+  exit 0
+fi
+
 # `airlock tmp` prints (and creates) this project's persistent scratch dir. Both the
 # box and the host `claude` wrapper export it as $AIRLOCK_TMP, so neither side has to
 # compute the slug — this is the single source of truth for the path.
@@ -331,24 +449,57 @@ if [ -f "$PROJ_CFG" ]; then
   done < "$PROJ_CFG"
 fi
 
-# --- Auth: shared long-lived OAuth token (CLAUDE_CODE_OAUTH_TOKEN) ---
-TOKEN_FILE="${AIRLOCK_TOKEN_FILE:-$HOME/.config/claude-airlock/token}"
-OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
-[ -z "$OAUTH_TOKEN" ] && [ -f "$TOKEN_FILE" ] && OAUTH_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
-if [ -z "$OAUTH_TOKEN" ]; then
-  echo "claude-airlock: no auth token found." >&2
-  echo "  Generate a long-lived (~1 year) token once, on the host:" >&2
-  echo "      claude-host setup-token" >&2
-  echo "  Then save the printed sk-ant-oat... value:" >&2
-  echo "      mkdir -p \"$(dirname "$TOKEN_FILE")\"" >&2
-  echo "      printf %s 'PASTE_TOKEN_HERE' > \"$TOKEN_FILE\" && chmod 600 \"$TOKEN_FILE\"" >&2
-  exit 1
-fi
-
 # --- Per-project state store (isolated: config, settings, other projects) ---
 slug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
 STATE_DIR="$HOME/.config/claude-airlock/state/$slug"
 mkdir -p "$STATE_DIR/dot-claude"
+
+# --- Auth: shared long-lived OAuth token (CLAUDE_CODE_OAUTH_TOKEN) ---
+#
+# The shared token is a CONVENIENCE for ephemeral boxes, not a security tier. Boxes
+# come and go, and logging in to each one by hand would be unusable friction, so the
+# host injects one long-lived token and every box borrows it. Default everywhere.
+#
+# `airlock login persist` drops that convenience for ONE project whose box is
+# LONG-LIVED and SINGULAR (a persistent orchestrator session). A one-time /login
+# costs nothing when amortised over a session measured in days, and it yields a
+# credential Claude renews itself — which is what Remote Control needs.
+#
+# Mechanically this is just an omission: we skip injecting the token, so Claude
+# finds no credential in the env and runs its own device-flow login. It writes the
+# result under $HOME/.claude — ALREADY the persistent per-project bind mount
+# ($STATE_DIR/dot-claude, above), so the login survives restarts with no extra
+# mount. Requires egress to claude.ai + console.anthropic.com (both core-allowed).
+#
+# The mode is PER-PROJECT and lives in STATE_DIR, exactly like the egress posture:
+# a global switch would be wrong here, since the whole point is that one box differs
+# from the rest. AIRLOCK_PERSIST_LOGIN=1 still works as a one-off override for a
+# single launch; the stored mode is what makes it stick across restarts.
+#
+# NOT a security downgrade, despite first appearances. Both are bearer credentials
+# for the same account, obtained through the same OAuth flow. If anything the shared
+# token has the wider blast radius — it is injected into EVERY box, so one bad box
+# exposes a credential that works for all of them, whereas a persisted login exists
+# in exactly one. Either way STATE_DIR is never mounted, so a box can neither read
+# nor change its own auth mode.
+PERSIST_LOGIN="$(cat "$STATE_DIR/persist-login" 2>/dev/null || echo "$AIRLOCK_PERSIST_LOGIN")"
+if [ "$PERSIST_LOGIN" = "1" ]; then
+  OAUTH_TOKEN=""
+else
+  TOKEN_FILE="${AIRLOCK_TOKEN_FILE:-$HOME/.config/claude-airlock/token}"
+  OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+  [ -z "$OAUTH_TOKEN" ] && [ -f "$TOKEN_FILE" ] && OAUTH_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+  if [ -z "$OAUTH_TOKEN" ]; then
+    echo "claude-airlock: no auth token found." >&2
+    echo "  Generate a long-lived (~1 year) token once, on the host:" >&2
+    echo "      claude-host setup-token" >&2
+    echo "  Then save the printed sk-ant-oat... value:" >&2
+    echo "      mkdir -p \"$(dirname "$TOKEN_FILE")\"" >&2
+    echo "      printf %s 'PASTE_TOKEN_HERE' > \"$TOKEN_FILE\" && chmod 600 \"$TOKEN_FILE\"" >&2
+    echo "  Or, for a single long-lived box that logs itself in: airlock login persist" >&2
+    exit 1
+  fi
+fi
 
 # Sensitive env (the OAuth token + any injected secrets) goes in a mode-0600 --env-file,
 # NOT on the engine command line. `-e KEY=VALUE` is visible in the host process table
@@ -359,7 +510,12 @@ mkdir -p "$STATE_DIR/dot-claude"
 # written, and is removed on exit. Non-sensitive env stays on `-e` (below).
 ENV_FILE="$STATE_DIR/engine-env"
 (umask 077; : > "$ENV_FILE")
-printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$OAUTH_TOKEN" >> "$ENV_FILE"
+# Empty under persist-login — the var must be ABSENT, not empty-string: Claude
+# treats a set-but-empty token as a credential and fails auth instead of falling
+# through to its own /login.
+if [ -n "$OAUTH_TOKEN" ]; then
+  printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$OAUTH_TOKEN" >> "$ENV_FILE"
+fi
 
 # Per-project persistent scratch. The box's own /tmp dies with the container (--rm),
 # which silently loses derived artifacts (a dedup index, a cache) between sessions.
@@ -482,6 +638,29 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
     | .permissions.deny  = ((($e.permissions.deny  // []) + ($d.permissions.deny  // [])) | unique)
   ' "$_bs" "$_repo/config/box-settings.json" > "$_bs.tmp" 2>/dev/null \
     && mv "$_bs.tmp" "$_bs"
+
+  # Telemetry posture (`airlock telemetry`), enforced HERE because settings.json is what
+  # Claude actually reads for it — and because the merge above ($e * $d) only ADDS keys,
+  # it can never REMOVE a stale DISABLE_TELEMETRY that an earlier launch wrote. So we must
+  # delete or add these keys explicitly every launch, not merely omit them from the
+  # baseline. Two facts force this exact shape:
+  #   - Claude checks whether DISABLE_TELEMETRY is SET, not its value: "0" still disables.
+  #     So "on" means the key is ABSENT; a settings.json env block can never express that
+  #     on its own (it adds keys, never removes), which is why the launcher owns it.
+  #   - Remote Control refuses to run without feature-flag evaluation, which telemetry
+  #     gates — the whole reason a long-lived box opts back in.
+  # Only TELEMETRY toggles. DISABLE_ERROR_REPORTING is asserted present in BOTH states: a
+  # sandbox has no business shipping crash/stack data to Anthropic, and RC does not need it
+  # — only feature-flag evaluation, which is gated on telemetry alone. Coupling the two
+  # would silently re-enable crash reporting the moment you turned RC on, for no benefit.
+  # Off (default): telemetry key present. On: telemetry key DELETED (RC needs it absent,
+  # not "0"). Idempotent either way, so a box provisioned before this logic self-heals.
+  if [ -f "$STATE_DIR/telemetry-on" ]; then
+    _tfilter='.env |= ((. // {}) + {DISABLE_ERROR_REPORTING:"1"} | del(.DISABLE_TELEMETRY))'
+  else
+    _tfilter='.env |= ((. // {}) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
+  fi
+  jq "$_tfilter" "$_bs" > "$_bs.tmp" 2>/dev/null && mv "$_bs.tmp" "$_bs"
 fi
 
 # --- Concurrent-session guard: warn if this project is already open (airlock) ---
@@ -720,8 +899,41 @@ fi
 [ -n "${AIRLOCK_EXTRA_EGRESS:-}" ] && args+=( -e "AIRLOCK_EXTRA_EGRESS=$AIRLOCK_EXTRA_EGRESS" )
 args+=( -e "AIRLOCK_EGRESS_GROUPS=$AIRLOCK_EGRESS_GROUPS" )   # host-set egress posture (minimal / dev / group subset)
 
+# Starting permission mode (`airlock mode`), passed through to Claude. An explicit
+# --permission-mode on the command line WINS: a stored default must never override what
+# you just typed, or the flag would appear to be ignored. Validated when stored, so a
+# stale/hand-edited state file can still be wrong — check again rather than launch a box
+# that dies on an invalid flag.
+claude_args=()
+PERMISSION_MODE="$(cat "$STATE_DIR/permission-mode" 2>/dev/null || echo "$AIRLOCK_PERMISSION_MODE")"
+if [ -n "$PERMISSION_MODE" ]; then
+  case " $AIRLOCK_PERMISSION_MODES " in
+    *" $PERMISSION_MODE "*) ;;
+    *) echo "claude-airlock: ignoring invalid permission mode '$PERMISSION_MODE' (valid: $AIRLOCK_PERMISSION_MODES)" >&2
+       PERMISSION_MODE="" ;;
+  esac
+fi
+if [ -n "$PERMISSION_MODE" ]; then
+  for _a in "$@"; do
+    case "$_a" in --permission-mode|--permission-mode=*) PERMISSION_MODE="" ;; esac
+  done
+fi
+# --permission-mode belongs to an interactive SESSION, not to `claude <subcommand>`
+# (remote-control, mcp, setup-token, doctor, ...). Injecting it into a subcommand makes
+# the mode value look like a stray positional and the subcommand dies — "Unknown argument:
+# auto" — which reads as the subcommand being broken rather than the launcher adding a
+# flag the caller never typed. A leading non-flag word is a subcommand; anything starting
+# with '-' (or nothing at all) is a session.
+case "${1:-}" in
+  ''|-*) ;;
+  *) PERMISSION_MODE="" ;;
+esac
+if [ -n "$PERMISSION_MODE" ]; then
+  claude_args+=( --permission-mode "$PERMISSION_MODE" )
+fi
+
 if [ "$AIRLOCK_SHELL" = 1 ]; then
   "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" bash -l
 else
-  "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" claude "$@"
+  "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" claude "${claude_args[@]}" "$@"
 fi
