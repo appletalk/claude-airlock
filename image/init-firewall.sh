@@ -176,6 +176,26 @@ ipset create allowed-domains    hash:net
 ipset create allowed-domains-v6 hash:net family inet6
 for dom in "${DOMAINS[@]}"; do
   resolved=0
+
+  # A raw IP literal is a static pin — there is nothing to resolve, and passing it to `dig`
+  # (which would treat it as a hostname) yields nothing, so it would be dropped as
+  # "could not resolve". Internal datasources here have no DNS yet (e.g. VictoriaLogs is
+  # reached by IP), and a worker box must be able to egress to the datasource it is building
+  # against to test its own work. Add the literal straight to the matching-family ipset. This
+  # is the SAFEST egress case: no DNS indirection, no re-resolution drift — the pin is exact.
+  if [[ "$dom" =~ $IP_REGEX ]]; then
+    ipset add allowed-domains "$dom" 2>/dev/null || true
+    log "pinned literal IPv4 $dom"
+    continue
+  fi
+  # Require a colon: IP6_REGEX is [0-9a-fA-F:]+, which a hex-only HOSTNAME (e.g. "cafe")
+  # would also match — but no hostname contains a colon, and every IPv6 literal does.
+  if [[ "$dom" == *:* ]] && [[ "$dom" =~ $IP6_REGEX ]]; then
+    ipset add allowed-domains-v6 "$dom" 2>/dev/null || true
+    log "pinned literal IPv6 $dom"
+    continue
+  fi
+
   ips="$(dig +short A "$dom" | grep -E "$IP_REGEX" || true)"
   if [ -n "$ips" ]; then
     resolved=1
