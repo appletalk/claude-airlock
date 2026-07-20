@@ -51,6 +51,27 @@ setup() { setup_airlock_env; }
   [[ "$(engine_args)" == *"claude-airlock:playwright"* ]]
 }
 
+# Auth mode is HOST-gated. A box that could set persist_login in its own (box-writable)
+# config could suppress the injected token and stand up an interactive login prompt of
+# its own — phishing the operator for an account credential from inside the sandbox.
+# The parser ignores unknown keys, so this is really a regression guard: it fails the day
+# someone adds persist_login to the key switch without thinking about who writes the file.
+@test "persist_login cannot be enabled from the box-writable .airlock/config" {
+  p="$(mkproj)"; write_config "$p" "persist_login = 1"
+  cat > "$STUBBIN/$ENGINE" <<'EOF'
+#!/usr/bin/env bash
+a=("$@")
+for ((i=0; i<${#a[@]}; i++)); do
+  if [ "${a[$i]}" = "--env-file" ]; then
+    grep -q 'CLAUDE_CODE_OAUTH_TOKEN' "${a[$((i+1))]}" && echo yes > "$ENGINE_ARGS_FILE.hasvar"
+  fi
+done
+EOF
+  chmod +x "$STUBBIN/$ENGINE"
+  _launch "$p"
+  [ "$(cat "$ENGINE_ARGS_FILE.hasvar" 2>/dev/null)" = "yes" ]   # token still injected
+}
+
 @test "share_rw with .. is rejected" {
   p="$(mkproj)"; write_config "$p" "share_rw = ../escape"
   run _launch "$p"
