@@ -25,7 +25,7 @@ AIRLOCK_ROOTS="${AIRLOCK_ROOTS:-}"                   # broad RO mounts at /roots
 AIRLOCK_SHARE_BASE="${AIRLOCK_SHARE_BASE:-$HOME/development}"  # base for relative, host-approved per-project `share =` folders
 AIRLOCK_SHARE_HISTORY="${AIRLOCK_SHARE_HISTORY:-1}"   # 1 = share sessions+memory in/out
 AIRLOCK_PERSIST_LOGIN="${AIRLOCK_PERSIST_LOGIN:-0}"   # 1 = no token injection; box does its own /login, persisted (see auth section)
-AIRLOCK_PERMISSION_MODE="${AIRLOCK_PERMISSION_MODE:-}" # one-off --permission-mode; the durable per-project setting is `airlock mode`
+AIRLOCK_PERMISSION_MODE="${AIRLOCK_PERMISSION_MODE:-}" # per-invocation override (beats stored `airlock mode`; CLI --permission-mode beats it). Broker's one-shot auto-dispatch flag.
 # Claude's own --permission-mode choices, mirrored so we reject a typo on the HOST rather
 # than launching a box that dies on an invalid flag. Keep in sync with `claude --help`.
 AIRLOCK_PERMISSION_MODES="acceptEdits auto bypassPermissions manual dontAsk plan"
@@ -899,13 +899,20 @@ fi
 [ -n "${AIRLOCK_EXTRA_EGRESS:-}" ] && args+=( -e "AIRLOCK_EXTRA_EGRESS=$AIRLOCK_EXTRA_EGRESS" )
 args+=( -e "AIRLOCK_EGRESS_GROUPS=$AIRLOCK_EGRESS_GROUPS" )   # host-set egress posture (minimal / dev / group subset)
 
-# Starting permission mode (`airlock mode`), passed through to Claude. An explicit
-# --permission-mode on the command line WINS: a stored default must never override what
-# you just typed, or the flag would appear to be ignored. Validated when stored, so a
-# stale/hand-edited state file can still be wrong — check again rather than launch a box
-# that dies on an invalid flag.
+# Starting permission mode, passed through to Claude. Precedence, most-specific first:
+#   1. an explicit --permission-mode on the command line (handled below — it always wins;
+#      a stored default must never override what you just typed)
+#   2. AIRLOCK_PERMISSION_MODE — a per-INVOCATION override (the one-shot flag a broker uses
+#      to dispatch ONE worker in `auto` without changing the repo's persistent setting)
+#   3. the stored per-project default (`airlock mode <x>`)
+# So the env beats the stored file: "override for this launch only" is exactly its job.
+# (In headless `-p` dispatch the mode is moot — `-p` auto-approves regardless — so this
+# matters for INTERACTIVE dispatch, e.g. watching a worker run in auto.)
+# Validated below, so a stale/hand-edited state file can't launch a box that dies on a bad flag.
 claude_args=()
-PERMISSION_MODE="$(cat "$STATE_DIR/permission-mode" 2>/dev/null || echo "$AIRLOCK_PERMISSION_MODE")"
+# The `|| true` matters: under `set -e`, a failing command substitution (no stored-mode
+# file — the common case) would abort the whole launch here.
+PERMISSION_MODE="${AIRLOCK_PERMISSION_MODE:-$(cat "$STATE_DIR/permission-mode" 2>/dev/null || true)}"
 if [ -n "$PERMISSION_MODE" ]; then
   case " $AIRLOCK_PERMISSION_MODES " in
     *" $PERMISSION_MODE "*) ;;

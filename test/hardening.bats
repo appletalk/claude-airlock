@@ -196,6 +196,30 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
   [ "$status" -ne 0 ]
 }
 
+# AIRLOCK_PERMISSION_MODE is a per-INVOCATION override that must beat the stored per-project
+# default — the broker's one-shot "dispatch this worker in auto" without touching the repo's
+# persistent setting. Precedence: CLI flag > env > stored file.
+@test "AIRLOCK_PERMISSION_MODE overrides the stored per-project mode for one launch" {
+  p="$(mkproj)"
+  _launch "$p" mode manual                                # persistent default = manual
+  AIRLOCK_PERMISSION_MODE=auto _launch "$p"               # one-shot override
+  args="$(engine_args)"
+  [[ "$args" == *"auto"* ]]
+  [[ "$args" != *"manual"* ]]                             # env won, stored file did not
+  : > "$ENGINE_ARGS_FILE"
+  _launch "$p"                                            # next launch, no override -> stored wins
+  [[ "$(engine_args)" == *"manual"* ]]
+}
+
+@test "an explicit --permission-mode still beats AIRLOCK_PERMISSION_MODE" {
+  p="$(mkproj)"
+  AIRLOCK_PERMISSION_MODE=auto _launch "$p" --permission-mode plan
+  args="$(engine_args)"
+  [[ "$args" == *"plan"* ]]
+  [[ "$args" != *"auto"* ]]                               # our env-injected one was dropped
+  [ "$(grep -c -- '--permission-mode' <<<"$args")" -eq 1 ]
+}
+
 # --- starting permission mode (`airlock mode`) --------------------------------------
 # Same per-project shape as login/egress: one long-lived box can start in `auto` without
 # every disposable box inheriting it.
