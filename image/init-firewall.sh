@@ -102,6 +102,7 @@ iptables -t mangle -F; iptables -t mangle -X
 ip6 -F; ip6 -X
 ipset destroy allowed-domains    2>/dev/null || true
 ipset destroy allowed-domains-v6 2>/dev/null || true
+ipset destroy allowed-ipport     2>/dev/null || true
 ipset destroy github-ranges      2>/dev/null || true
 ipset destroy github-ranges-v6   2>/dev/null || true
 if [ -n "$DOCKER_DNS_RULES" ]; then
@@ -174,8 +175,19 @@ log "dns: pinned to ${#NAMESERVERS[@]} configured resolver(s)"
 # set — which is correct, not an error.
 ipset create allowed-domains    hash:net
 ipset create allowed-domains-v6 hash:net family inet6
+ipset create allowed-ipport     hash:ip,port          # exact IPv4 host+port grants (non-443 datasources)
 for dom in "${DOMAINS[@]}"; do
   resolved=0
+
+  # An IP:port literal grants exactly ONE host+port. The HTTPS rule below matches
+  # allowed-domains only on --dport 443, so a bare datasource IP on a non-standard port
+  # (e.g. VictoriaLogs on 9428) would still be dropped. hash:ip,port + a dst,dst match
+  # opens precisely that endpoint and nothing else — the tightest datasource grant.
+  if [[ "$dom" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]{1,5})$ ]]; then
+    ipset add allowed-ipport "${BASH_REMATCH[1]},tcp:${BASH_REMATCH[2]}" 2>/dev/null || true
+    log "pinned literal ${BASH_REMATCH[1]}:${BASH_REMATCH[2]} (tcp)"
+    continue
+  fi
 
   # A raw IP literal is a static pin — there is nothing to resolve, and passing it to `dig`
   # (which would treat it as a hostname) yields nothing, so it would be dropped as
@@ -272,6 +284,7 @@ ip6 -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # --- Permit HTTPS (and git-ssh to GitHub) to the allowed sets, both families ---
 iptables -A OUTPUT -p tcp --dport 443 -m set --match-set allowed-domains dst -j ACCEPT
+iptables -A OUTPUT -p tcp -m set --match-set allowed-ipport dst,dst -j ACCEPT   # exact host+port grants (any port)
 iptables -A OUTPUT -p tcp --dport 443 -m set --match-set github-ranges  dst -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 22  -m set --match-set github-ranges  dst -j ACCEPT
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
