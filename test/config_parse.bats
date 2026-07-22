@@ -132,3 +132,33 @@ EOF
   _launch "$p"                                        # stdin=/dev/null: write prompt gets EOF -> skipped
   [[ "$(engine_args)" != *"$SHARE_BASE/ug:$SHARE_BASE/ug:rw"* ]]     # not silently upgraded
 }
+
+# --- egress entry parsing -----------------------------------------------------
+# A grant that is silently dropped is the worst outcome here: the box comes up
+# looking configured while having no access to the endpoint. Each of these was a
+# real bug -- the comma list, the IP:port shape, and the silent skip.
+
+@test "egress accepts a comma-separated list (both entries reach the box)" {
+  p="$(mkproj)"; write_config "$p" "egress = a.example.com, b.example.com"
+  sd="$(state_dir "$p")"; mkdir -p "$sd"
+  printf 'a.example.com\nb.example.com\n' > "$sd/approved-egress"
+  _launch "$p"
+  args="$(engine_args)"
+  [[ "$args" == *"a.example.com"* ]]
+  [[ "$args" == *"b.example.com"* ]]
+}
+
+@test "egress accepts an IP:port datasource grant" {
+  p="$(mkproj)"; write_config "$p" "egress = 10.1.15.115:8428"
+  sd="$(state_dir "$p")"; mkdir -p "$sd"
+  printf '10.1.15.115:8428\n' > "$sd/approved-egress"
+  _launch "$p"
+  [[ "$(engine_args)" == *"10.1.15.115:8428"* ]]
+}
+
+@test "a malformed egress entry aborts the launch rather than being skipped" {
+  p="$(mkproj)"; write_config "$p" "egress = 10.1.15.115::8428"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a valid"* ]]
+}

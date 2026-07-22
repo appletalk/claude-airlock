@@ -27,9 +27,29 @@ IP_REGEX='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
 CIDR_REGEX='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$'
 IP6_REGEX='^[0-9a-fA-F:]+$'
 CIDR6_REGEX='^[0-9a-fA-F:]+/[0-9]{1,3}$'
+# An IPv4 host+port grant. Kept as its own shape so a malformed port cannot fall
+# through to the hostname path, where `dig` would fail to resolve it and report a
+# network problem instead of the config error it actually is.
+IPPORT_REGEX='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5}$'
+# Hostnames, deliberately strict. Anything matching none of these shapes is a typo.
+DOMAIN_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$'
 
 log() { echo "[airlock-fw] $*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# Classify an allowlist entry by shape: ipport | ipv4 | ipv6 | domain | invalid.
+# "invalid" is fatal at the call site. An entry we cannot classify can never be
+# granted, so continuing would hand back a box that looks configured and silently
+# is not - the same failure this file already refuses to tolerate elsewhere.
+classify_entry() {
+  local e="$1"
+  if   [[ "$e" =~ $IPPORT_REGEX ]]; then echo ipport
+  elif [[ "$e" =~ $IP_REGEX     ]]; then echo ipv4
+  elif [[ "$e" == *:* ]] && [[ "$e" =~ $IP6_REGEX ]]; then echo ipv6
+  elif [[ "$e" =~ $DOMAIN_REGEX ]]; then echo domain
+  else echo invalid
+  fi
+}
 
 # --- Can we filter IPv6, and do we even have it? -----------------------------------
 # The dangerous combination is "the box can reach the v6 internet" + "we cannot program
@@ -79,17 +99,33 @@ if [ -f "$CONF_FILE" ]; then
   while IFS= read -r line; do
     line="${line%%#*}"; line="$(echo "$line" | xargs || true)"
     [ -z "$line" ] && continue
+    # A group prefix and an IP:port literal both contain a colon, so dispatching on
+    # "*:*" alone read `10.1.15.115:8428` as group "10.1.15.115" + domain "8428" and
+    # skipped it as an inactive group - a log line that reads like normal operation.
+    # Only a token that could actually BE a group name (letter-led, no dots) is
+    # treated as a prefix; anything else is a plain entry.
     case "$line" in
-      *:*)                                  # "group:domain" — only if group active
+      *:*)
         grp="${line%%:*}"; dom="${line#*:}"
-        group_active "$grp" || { log "skip $dom (group '$grp' inactive)"; continue; }
-        DOMAINS+=("$dom") ;;
+        if [[ "$grp" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]]; then
+          group_active "$grp" || { log "skip $dom (group '$grp' inactive)"; continue; }
+          DOMAINS+=("$dom")
+        else
+          DOMAINS+=("$line")                # IP:port or IPv6 literal, not a group prefix
+        fi ;;
       *) DOMAINS+=("$line") ;;              # untagged core line — always
     esac
   done < "$CONF_FILE"
 fi
 if [ -n "${AIRLOCK_EXTRA_EGRESS:-}" ]; then
-  for d in ${AIRLOCK_EXTRA_EGRESS//,/ }; do DOMAINS+=("$d"); done
+  # Split on comma, space, tab or newline - EXPLICITLY, via a scoped IFS.
+  # This cannot use the word splitting of an unquoted expansion: the script runs
+  # under a strict IFS ($'\n\t') that deliberately excludes the space, so the old
+  # `for d in ${AIRLOCK_EXTRA_EGRESS//,/ }` turned "a,b" into a single element
+  # containing the whole list. Every multi-entry grant was lost, and the only
+  # symptom was one WARN naming the entire list as an unresolvable "domain".
+  IFS=$' \t\n,' read -r -a _extra <<< "$AIRLOCK_EXTRA_EGRESS"
+  for d in "${_extra[@]}"; do [ -n "$d" ] && DOMAINS+=("$d"); done
 fi
 log "allowlist domains: ${#DOMAINS[@]}"
 
@@ -179,34 +215,38 @@ ipset create allowed-ipport     hash:ip,port          # exact IPv4 host+port gra
 for dom in "${DOMAINS[@]}"; do
   resolved=0
 
-  # An IP:port literal grants exactly ONE host+port. The HTTPS rule below matches
-  # allowed-domains only on --dport 443, so a bare datasource IP on a non-standard port
-  # (e.g. VictoriaLogs on 9428) would still be dropped. hash:ip,port + a dst,dst match
-  # opens precisely that endpoint and nothing else — the tightest datasource grant.
-  if [[ "$dom" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]{1,5})$ ]]; then
-    ipset add allowed-ipport "${BASH_REMATCH[1]},tcp:${BASH_REMATCH[2]}" 2>/dev/null || true
-    log "pinned literal ${BASH_REMATCH[1]}:${BASH_REMATCH[2]} (tcp)"
-    continue
-  fi
-
-  # A raw IP literal is a static pin — there is nothing to resolve, and passing it to `dig`
-  # (which would treat it as a hostname) yields nothing, so it would be dropped as
-  # "could not resolve". Internal datasources here have no DNS yet (e.g. VictoriaLogs is
-  # reached by IP), and a worker box must be able to egress to the datasource it is building
-  # against to test its own work. Add the literal straight to the matching-family ipset. This
-  # is the SAFEST egress case: no DNS indirection, no re-resolution drift — the pin is exact.
-  if [[ "$dom" =~ $IP_REGEX ]]; then
-    ipset add allowed-domains "$dom" 2>/dev/null || true
-    log "pinned literal IPv4 $dom"
-    continue
-  fi
-  # Require a colon: IP6_REGEX is [0-9a-fA-F:]+, which a hex-only HOSTNAME (e.g. "cafe")
-  # would also match — but no hostname contains a colon, and every IPv6 literal does.
-  if [[ "$dom" == *:* ]] && [[ "$dom" =~ $IP6_REGEX ]]; then
-    ipset add allowed-domains-v6 "$dom" 2>/dev/null || true
-    log "pinned literal IPv6 $dom"
-    continue
-  fi
+  # Literal pins use `ipset add -exist`, so a duplicate (two allowlisted names, or two
+  # configs, naming the same endpoint) is a no-op while a REAL rejection - an octet or
+  # port out of range, say - aborts. These are explicit operator grants: one that the
+  # kernel refuses must not be swallowed, or the box comes up looking granted.
+  case "$(classify_entry "$dom")" in
+    ipport)
+      # An IP:port literal grants exactly ONE host+port. The HTTPS rule below matches
+      # allowed-domains only on --dport 443, so a bare datasource IP on a non-standard port
+      # (e.g. VictoriaLogs on 9428) would still be dropped. hash:ip,port + a dst,dst match
+      # opens precisely that endpoint and nothing else — the tightest datasource grant.
+      ip="${dom%:*}"; port="${dom##*:}"
+      ipset add -exist allowed-ipport "${ip},tcp:${port}" \
+        || die "could not pin ${ip}:${port} — check the address and port are in range"
+      log "pinned literal ${ip}:${port} (tcp)"
+      continue ;;
+    ipv4)
+      # A raw IP literal is a static pin — there is nothing to resolve, and passing it to `dig`
+      # (which would treat it as a hostname) yields nothing, so it would be dropped as
+      # "could not resolve". Internal datasources here have no DNS yet (e.g. VictoriaLogs is
+      # reached by IP), and a worker box must be able to egress to the datasource it is building
+      # against to test its own work. Add the literal straight to the matching-family ipset. This
+      # is the SAFEST egress case: no DNS indirection, no re-resolution drift — the pin is exact.
+      ipset add -exist allowed-domains "$dom" || die "could not pin IPv4 literal $dom"
+      log "pinned literal IPv4 $dom (port 443 only — use IP:port for other ports)"
+      continue ;;
+    ipv6)
+      ipset add -exist allowed-domains-v6 "$dom" || die "could not pin IPv6 literal $dom"
+      log "pinned literal IPv6 $dom"
+      continue ;;
+    invalid)
+      die "egress entry '$dom' is not a valid hostname, IPv4, IPv6, or IPv4:port. Refusing to start: a grant that can never apply would leave this box looking configured while silently having no access." ;;
+  esac
 
   ips="$(dig +short A "$dom" | grep -E "$IP_REGEX" || true)"
   if [ -n "$ips" ]; then

@@ -14,7 +14,14 @@
 # at launch, and approved domains apply silently thereafter. An unexpected domain
 # here (e.g. added by a compromised session) prompts and is skipped unless you
 # approve it. Approvals live host-side where the box can't reach.
+# Entries may be separated by spaces or commas, and each one may be a hostname, a
+# bare IPv4 (reachable on 443 only), an IPv6 literal, or "IPv4:port" for a datasource
+# on a non-standard port (e.g. VictoriaMetrics on 8428) -- that form opens exactly
+# that one host+port and nothing else. An entry that matches none of those shapes is
+# a typo and ABORTS the launch: a grant that can never apply would otherwise leave
+# the box looking configured while silently having no access.
 # egress = cdn.jsdelivr.net fonts.gstatic.com
+# egress = 10.1.15.115:8428, 10.1.15.116:8428
 
 # NOT configurable here: the egress POSTURE. By default a project gets 'minimal' —
 # Anthropic core only, plus the `egress =` domains above. To also open package

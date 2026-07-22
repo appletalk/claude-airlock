@@ -216,11 +216,18 @@ untrusted. Keys (see `config/project-config.example`):
 
 | Key | Effect |
 | --- | --- |
-| `egress = a.com b.com` | extra egress domains; **host-approved once** (box-writable, so TOFU-gated) |
+| `egress = a.com, 10.1.15.115:8428` | extra egress grants; **host-approved once** (box-writable, so TOFU-gated) |
 | `share = <relpath> ...` | mount a sibling folder **read-only** at its real path (host-approved) |
 | `share_rw = <relpath> ...` | mount it **read-write** (louder prompt; separate approval from read) |
 | `artifact_dirs = venv frontend/node_modules` | extra env-built dirs kept container-local |
 | `image = claude-airlock:playwright` | opt into a heavier image (must be a `claude-airlock:*` tag) |
+
+Egress entries are separated by spaces **or** commas, and each may be a hostname, a bare
+IPv4 (443 only), an IPv6 literal, or `IPv4:port` — the last opens exactly one host+port,
+which is the tightest form and the right one for an internal datasource on a non-standard
+port. An entry matching none of those shapes **aborts the launch** rather than being
+skipped: a grant that can never apply would otherwise leave the box looking configured
+while silently having no access to the endpoint.
 
 Share paths are relative to `AIRLOCK_SHARE_BASE` (default `~/development`), so committed
 configs never contain absolute `/home` paths, and `..`/absolute are rejected.
