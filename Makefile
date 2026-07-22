@@ -13,7 +13,8 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh \
                  image/init-firewall.sh image/entrypoint.sh \
                  config/airlock-statusline.sh \
                  hooks/pre-commit scripts/bootstrap-tools.sh \
-                 scripts/airlock-doctor.sh
+                 scripts/airlock-doctor.sh \
+                 scripts/image-smoke.sh scripts/validator-checks.sh
 
 .DEFAULT_GOAL := help
 
@@ -42,6 +43,9 @@ test: ## run the bats suite against BOTH engines (podman + docker)
 doctor: ## verify THIS host can actually contain a box (live containment test)
 	@bash scripts/airlock-doctor.sh
 
+image-smoke: ## prove the dev image's validators work offline (needs a built :dev)
+	@bash scripts/image-smoke.sh
+
 check: lint test ## lint + test (what the pre-commit hook runs)
 
 hooks: ## install the git pre-commit hook (symlink)
@@ -51,4 +55,4 @@ hooks: ## install the git pre-commit hook (symlink)
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install lint test doctor check hooks bootstrap
+.PHONY: help install lint test doctor image-smoke check hooks bootstrap
