@@ -1,0 +1,8 @@
+sources:
+  in:
+    type: demo_logs
+    format: syslog
+sinks:
+  out:
+    type: blackhole
+    inputs: [in]

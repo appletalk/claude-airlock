@@ -365,11 +365,45 @@ network.
 Layered, built by `make install`:
 
 - `claude-airlock:base` — Debian + Claude Code + git/gh + the egress firewall + core CLIs.
-- `claude-airlock:dev` *(default)* — base + Python, Node, build tools, PostgreSQL, yaml
-  tooling. Start Postgres in-box with `airlock-pg-start` (localhost:5432, ephemeral).
+- `claude-airlock:dev` *(default)* — base + Python, Node, PowerShell, build tools,
+  PostgreSQL, yaml tooling, and the offline config validators below. Start Postgres
+  in-box with `airlock-pg-start` (localhost:5432, ephemeral).
 - `claude-airlock:playwright` — dev + headless Chromium + the Playwright MCP. Opt in via
   `image = claude-airlock:playwright`. Build on demand:
   `docker build -t claude-airlock:playwright image/playwright`.
+
+### Config validators (in `:dev`, syntax/lint only)
+
+Infrastructure-as-code tooling that runs to completion at **minimal egress** — no
+provider downloads, no collection resolution, no plugin fetches. All of it is pinned by
+version + sha256 in `image/dev/Dockerfile`.
+
+| tool | what works offline |
+|---|---|
+| `promtool check config\|rules`, `promtool test rules` | Prometheus config, alerting/recording rules, rule unit tests |
+| `terraform fmt -check` | HCL syntax + formatting (exit 3 = drift, 2 = syntax error) |
+| `tflint` | the `terraform` ruleset bundled inside the binary |
+| `ansible-lint` | playbook/role lint (`ANSIBLE_LINT_NODEPS=1` is set image-wide, see below) |
+| `vector validate --no-environment` | config parse + topology, no component/health checks |
+| `Invoke-ScriptAnalyzer` (pwsh) | PowerShell script lint |
+
+Deliberately **out of scope**, because they need the network and would otherwise degrade
+to a no-op inside a box: `terraform init`/`validate`, `tflint --init` (external rulesets),
+`ansible-galaxy collection install`, and bare `vector validate`. Those fail rather than
+lie. A project that genuinely needs them opens a narrow `egress =` in `.airlock/config`
+for a one-time fetch and caches the result with `artifact_dirs` (e.g. `.terraform`), which
+persists across sessions.
+
+Two settings are load-bearing rather than cosmetic. `ANSIBLE_LINT_NODEPS=1` forces
+ansible-lint's offline mode: by default it installs `requirements.yml` collections and
+refreshes JSON schemas over the network, and since the firewall **drops** rather than
+rejects, that stalls instead of failing. `POWERSHELL_UPDATECHECK=Off` +
+`POWERSHELL_TELEMETRY_OPTOUT=1` do the same job for pwsh's startup update check.
+
+`make image-smoke` proves the whole table: it runs each validator inside a real box at
+minimal egress against a **known-bad** fixture and fails if the tool accepts it. Checking
+only that valid input passes would not catch a validator that has quietly stopped
+validating.
 
 ## Development
 

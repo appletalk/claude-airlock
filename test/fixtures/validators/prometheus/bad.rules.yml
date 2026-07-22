@@ -1,0 +1,6 @@
+groups:
+  - name: example
+    rules:
+      - alert: InstanceDown
+        expr: up ==
+        for: 5m

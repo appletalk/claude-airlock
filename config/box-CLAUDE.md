@@ -56,8 +56,22 @@ know these environment conventions so you don't misread them:
   dev` or a subset like `airlock egress github pypi`, or an `egress =` line); you
   can't widen it from in here.
 
-- **Runtimes:** Python 3.13, Node 24. If a project pins a different version, flag
-  the mismatch instead of forcing it.
+- **Runtimes:** Python 3.13, Node 24, PowerShell 7. If a project pins a different
+  version, flag the mismatch instead of forcing it.
+
+- **Config validators are installed, and they are SYNTAX/LINT ONLY.** These run
+  offline, at any egress level — use them freely on infrastructure-as-code:
+  `promtool check config|rules`, `promtool test rules`, `terraform fmt -check`,
+  `tflint`, `ansible-lint`, `vector validate --no-environment`, and
+  `Invoke-ScriptAnalyzer` under `pwsh`. What is **deliberately not available** is
+  anything that must download a dependency graph first: `terraform init` and
+  `terraform validate` (providers), `tflint --init` (external rulesets),
+  `ansible-galaxy collection install`, and bare `vector validate` (opens sinks and
+  runs health checks). Those are excluded BY DESIGN, not missing — don't retry
+  them, don't work around them, and don't report their failure as a broken box.
+  Say which check you could not run and why. When you report a file as validated,
+  say what actually ran: "terraform fmt clean; validate not run (no providers)" is
+  honest, "terraform validated" is not.
 
 - **Browser E2E (Playwright):** only on the `:playwright` image. Headless Chromium
   is pre-installed at `$PLAYWRIGHT_BROWSERS_PATH`. Launch it with `--no-sandbox`
