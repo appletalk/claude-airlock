@@ -426,8 +426,26 @@ if [ -f "$PROJ_CFG" ]; then
           case " $AIRLOCK_ARTIFACT_DIRS " in *" $_d "*) ;; *) AIRLOCK_ARTIFACT_DIRS="$AIRLOCK_ARTIFACT_DIRS $_d" ;; esac
         done ;;
       egress)                                         # requested; gated by host approval below
-        for _dom in $_val; do
-          case "$_dom" in ''|*[!a-zA-Z0-9.-]*) continue ;; esac
+        # Split on commas as well as whitespace: `egress = a.com, b.com` is the obvious
+        # way to write a list, and a whitespace-only split leaves the comma inside the
+        # token where validation then rejects it.
+        for _dom in ${_val//,/ }; do
+          [ -z "$_dom" ] && continue
+          # Accept exactly the shapes init-firewall.sh can program: hostname, IPv4,
+          # IPv4:port (for datasources on non-443 ports), or an IPv6 literal. The old
+          # check was a character class that excluded ':', so every IP:port grant was
+          # dropped by a bare `continue` — no message, and the entry simply never
+          # existed. A grant that cannot apply is now fatal rather than invisible:
+          # a box that looks configured and silently has no access is the worse outcome.
+          if ! [[ "$_dom" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$ ]] \
+             && ! [[ "$_dom" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(:[0-9]{1,5})?$ ]] \
+             && ! { [[ "$_dom" == *:* ]] && [[ "$_dom" =~ ^[0-9a-fA-F:]+$ ]]; }; then
+            echo "claude-airlock: .airlock/config: 'egress = $_dom' is not a valid" >&2
+            echo "  hostname, IPv4, IPv4:port, or IPv6 literal. Fix the entry — it can never be" >&2
+            echo "  granted, and starting without it would leave this box looking configured" >&2
+            echo "  while silently having no access to it." >&2
+            exit 1
+          fi
           _REQ_EGRESS="${_REQ_EGRESS:+$_REQ_EGRESS }$_dom"
         done ;;
       share)                                          # requested READ-ONLY folders (rel to base); gated below
