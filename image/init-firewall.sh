@@ -252,16 +252,27 @@ for dom in "${DOMAINS[@]}"; do
   if [ -n "$ips" ]; then
     resolved=1
     while read -r ip; do
-      # A duplicate IP (two allowlisted names resolving to the same host) makes `ipset add`
-      # fail; that is benign, so it must not abort the run under errexit.
-      if [ -n "$ip" ]; then ipset add allowed-domains "$ip" 2>/dev/null || true; fi
+      # A duplicate IP (two allowlisted names resolving to the same host) is benign and
+      # must not abort the run under errexit -- `-exist` says exactly that, which is why
+      # this no longer discards the error wholesale. A rejection that is NOT a duplicate
+      # means the address was not granted, and that has to be visible: swallowing it is
+      # how a multi-entry grant once came up looking configured with nothing programmed.
+      # Not fatal, unlike an operator's literal pin: one A record among several can fail
+      # while the domain stays reachable through the rest.
+      if [ -n "$ip" ]; then
+        ipset add -exist allowed-domains "$ip" \
+          || log "WARN: could not add $ip (for $dom) — that address is NOT granted"
+      fi
     done <<< "$ips"
   fi
   ips6="$(dig +short AAAA "$dom" | grep -E "$IP6_REGEX" || true)"
   if [ -n "$ips6" ]; then
     resolved=1
     while read -r ip6addr; do
-      if [ -n "$ip6addr" ]; then ipset add allowed-domains-v6 "$ip6addr" 2>/dev/null || true; fi
+      if [ -n "$ip6addr" ]; then
+        ipset add -exist allowed-domains-v6 "$ip6addr" \
+          || log "WARN: could not add $ip6addr (for $dom) — that address is NOT granted"
+      fi
     done <<< "$ips6"
   fi
   [ "$resolved" = 0 ] && log "WARN: could not resolve $dom"
@@ -280,10 +291,16 @@ if group_active github; then
     gh_cidrs="$(echo "$gh_meta" | jq -r '(.git + .api + .web)[]')"
     # `aggregate` collapses IPv4 ranges only; feed it just the v4 set.
     while read -r cidr; do
-      if [[ "$cidr" =~ $CIDR_REGEX ]]; then ipset add github-ranges "$cidr" 2>/dev/null || true; fi
+      if [[ "$cidr" =~ $CIDR_REGEX ]]; then
+        ipset add -exist github-ranges "$cidr" \
+          || log "WARN: could not add GitHub range $cidr — that range is NOT granted"
+      fi
     done < <(echo "$gh_cidrs" | grep -v ':' | aggregate -q 2>/dev/null || true)
     while read -r cidr; do
-      if [[ "$cidr" =~ $CIDR6_REGEX ]]; then ipset add github-ranges-v6 "$cidr" 2>/dev/null || true; fi
+      if [[ "$cidr" =~ $CIDR6_REGEX ]]; then
+        ipset add -exist github-ranges-v6 "$cidr" \
+          || log "WARN: could not add GitHub range $cidr — that range is NOT granted"
+      fi
     done < <(echo "$gh_cidrs" | grep ':' || true)
     # Count actual members. `ipset list | grep -c ':'` would also count every header
     # line (Name:, Type:, Size in memory: ...), so the v6 figure was inflated by ~8.
