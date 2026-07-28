@@ -48,3 +48,21 @@ elif [ -n "$rate_5h" ]; then
 elif [ -n "$rate_7d" ]; then
     printf " \033[38;5;99mwk:%.0f%%\033[0m" "$rate_7d"
 fi
+
+# (Peak) badge - bold orange, last on the line so it reads as a suffix to the
+# rate limits it qualifies. Anthropic's peak window is 05:00-11:00 Pacific,
+# Monday-Friday, when the subscription limits are tighter and the session cap is
+# reached sooner. Peak applies to the ACCOUNT, so it is shown in the box as well
+# as on the host - keeping the two statuslines identical apart from the badge.
+# TZ is pinned rather than trusting the container's local zone, which is UTC:
+# without this the window would be wrong by 7-8 hours. debian:trixie-slim ships
+# /usr/share/zoneinfo/America/Vancouver, so the zone resolves (verified).
+# Hours are stripped of their leading zero before the numeric comparison
+# ("08" -> "8"). The window is inclusive of 05:00 and exclusive of 11:00.
+peak_dow=$(TZ=America/Vancouver date +%u)
+peak_hour=$(TZ=America/Vancouver date +%H)
+peak_hour=${peak_hour#0}
+peak_hour=${peak_hour:-0}
+if [ "$peak_dow" -le 5 ] && [ "$peak_hour" -ge 5 ] && [ "$peak_hour" -lt 11 ]; then
+    printf " \033[1;38;5;208m(Peak)\033[0m"
+fi
