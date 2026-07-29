@@ -91,6 +91,12 @@ check fails, the install says so loudly rather than leaving you with a sandbox t
 isn't one. Re-run it any time with `make doctor` (or `airlock doctor`), especially after
 changing engines or upgrading the kernel.
 
+Re-running it is also how you **update Claude Code in the box**: the install resolves the
+current release and passes it as the base image's build arg, so a new release rebuilds
+that layer instead of silently reusing the cached one. Unchanged upstream is a cache hit
+and costs nothing. Pin or track a different channel with
+`CLAUDE_CODE_VERSION=stable make install` (or a specific `x.y.z`).
+
 ### 3. Shell integration
 
 Add to `~/.zshrc` (or `~/.zshrc.local`) and reload:
