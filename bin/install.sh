@@ -44,9 +44,32 @@ if [ ! -f "$CONFIG_DIR/config" ]; then
   echo "    wrote default config -> $CONFIG_DIR/config"
 fi
 
-echo "==> Building base image (claude-airlock:base)"
-"$AIRLOCK_ENGINE" build -t claude-airlock:base "$REPO_DIR/image"
+# Claude Code must be CURRENT after every install run, not whatever version the
+# image happened to cache. The install layer sits at the end of the base image
+# with no changing inputs of its own, so a plain rebuild always hits the cache.
+# Resolving the concrete current version here and passing it as a build arg makes
+# the version itself the cache key: unchanged upstream -> instant cache hit;
+# new release -> the layer (and the dev image on top of it) rebuilds.
+#
+# 'latest' is the channel the upstream installer uses when given no target, so
+# resolving it keeps the image on exactly the version it has always tracked.
+# Override with CLAUDE_CODE_VERSION=stable, or a specific x.y.z, to pin.
+CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-}"
+if [ -z "$CLAUDE_CODE_VERSION" ]; then
+  CLAUDE_CODE_VERSION="$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest || true)"
+  if [[ ! "$CLAUDE_CODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    echo "    WARNING: could not resolve the current Claude Code version from" >&2
+    echo "             downloads.claude.ai - falling back to the 'latest' channel." >&2
+    echo "             The build may reuse a cached (older) Claude Code layer." >&2
+    CLAUDE_CODE_VERSION=latest
+  fi
+fi
+
+echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_VERSION"
+"$AIRLOCK_ENGINE" build --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
+  -t claude-airlock:base "$REPO_DIR/image"
 echo "==> Building dev image (claude-airlock:dev) — Python, Node 24, build tools"
+echo "    (a new Claude Code version moves the base, so this layer rebuilds too)"
 "$AIRLOCK_ENGINE" build -t claude-airlock:dev "$REPO_DIR/image/dev"
 echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
 echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$REPO_DIR/image/playwright\""

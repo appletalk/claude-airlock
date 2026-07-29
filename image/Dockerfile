@@ -65,8 +65,21 @@ RUN chmod 0444 /etc/airlock/firewall.conf \
     && chmod 0555 /usr/local/bin/init-firewall.sh /usr/local/bin/airlock-entrypoint
 
 # Install Claude Code as the agent user (native, self-contained installer).
+#
+# CLAUDE_CODE_VERSION is both the installer target and this layer's ONLY cache
+# key. Without it the layer's inputs never change, so every rebuild reuses the
+# cached install and the box keeps shipping whatever Claude Code was current the
+# first time the image was built. bin/install.sh resolves the concrete current
+# version and passes it in, so the layer is reused only while that exact version
+# is still current and rebuilds the moment upstream moves.
+#
+# The literal default ("latest", the channel the upstream installer picks when
+# given no target) is for a bare `docker build image/`: right version on a cold
+# build, but cacheable - go through bin/install.sh to guarantee freshness.
+ARG CLAUDE_CODE_VERSION=latest
 USER ${USERNAME}
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}" \
+    && /home/${USERNAME}/.local/bin/claude --version
 ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
 
 # Container starts as root so the entrypoint can raise the firewall, then drops
