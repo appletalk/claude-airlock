@@ -1,0 +1,18 @@
+logging {
+	level  = "info"
+	format = "logfmt"
+}
+
+prometheus.scrape "demo" {
+	targets = [{
+		__address__ = "localhost:9090",
+	}]
+	forward_to = [prometheus.remote_write.default.receiver]
+	bogus_key  = 1
+}
+
+prometheus.remote_write "default" {
+	endpoint {
+		url = "http://localhost:9009/api/v1/push"
+	}
+}
