@@ -398,12 +398,13 @@ version + sha256 in `image/dev/Dockerfile`.
 | `tflint` | the `terraform` ruleset bundled inside the binary |
 | `ansible-lint` | playbook/role lint (`ANSIBLE_LINT_NODEPS=1` is set image-wide, see below) |
 | `vector validate --no-environment` | config parse + topology, no component/health checks |
+| `alloy fmt -t`, `alloy validate` | Alloy syntax + formatting, component references and argument schemas |
 | `Invoke-ScriptAnalyzer` (pwsh) | PowerShell script lint |
 
 Deliberately **out of scope**, because they need the network and would otherwise degrade
 to a no-op inside a box: `terraform init`/`validate`, `tflint --init` (external rulesets),
-`ansible-galaxy collection install`, and bare `vector validate`. Those fail rather than
-lie. A project that genuinely needs them opens a narrow `egress =` in `.airlock/config`
+`ansible-galaxy collection install`, bare `vector validate`, and `alloy run` (which starts
+the components and reports usage upstream). Those fail rather than lie. A project that genuinely needs them opens a narrow `egress =` in `.airlock/config`
 for a one-time fetch and caches the result with `artifact_dirs` (e.g. `.terraform`), which
 persists across sessions.
 

@@ -76,6 +76,7 @@ RUN set -eux; \
 #   tflint                           the terraform ruleset bundled INSIDE the binary
 #   ansible-lint                     playbook/role lint, offline (see ANSIBLE_LINT_NODEPS)
 #   vector validate --no-environment config parse + topology, no component/health checks
+#   alloy fmt -t / alloy validate    Alloy syntax + component/argument schema check
 #   Invoke-ScriptAnalyzer            PowerShell script lint
 #
 # OUT OF SCOPE - these need the network and are expected to FAIL LOUDLY in a box:
@@ -83,6 +84,7 @@ RUN set -eux; \
 #   tflint --init                    pulls external rulesets (aws, azurerm, ...) from GitHub
 #   ansible-galaxy collection install pulls from galaxy.ansible.com
 #   vector validate (no flag)        opens sinks and runs health checks
+#   alloy run                        starts the components and reports usage upstream
 # A project that needs those opens a narrow `egress =` in .airlock/config for a
 # one-time fetch and caches the result via `artifact_dirs` (e.g. `.terraform`),
 # which persists across sessions. It is not this image's job to guess a provider
@@ -157,6 +159,30 @@ RUN set -eux; \
     install -m 0555 "$(find /tmp/vector-x -type f -name vector -perm -u+x | head -1)" /usr/local/bin/vector; \
     rm -rf /tmp/vector.tgz /tmp/vector-x; \
     vector --version
+
+# Grafana Alloy: `fmt` and `validate` only. Both are pure config-graph work -- they
+# parse the river/Alloy syntax, resolve component references and check every
+# argument against the component's schema without starting a single component, so
+# they complete at minimal egress. `alloy run` is the out-of-scope half: it opens
+# the UI port, starts the components, and reports usage to Grafana.
+#
+# Note the size: this is a ~450MB binary (every component plus the embedded UI are
+# linked in, and Go binaries don't strip usefully). It is the single largest tool
+# in the image -- roughly promtool + terraform + vector combined.
+ARG ALLOY_VERSION=1.18.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha=92f4c950aec4ec16a7fdbf6f805be4334d4d5fbbe458eecf514319c1c491bef4 ;; \
+      arm64) sha=e20f8570628818a15192d34372839017a4c446269b5d96036ad976ebf7a7728a ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-${arch}.zip" -o /tmp/alloy.zip; \
+    echo "${sha}  /tmp/alloy.zip" | sha256sum -c -; \
+    unzip -q -o /tmp/alloy.zip -d /tmp "alloy-linux-${arch}"; \
+    install -m 0555 "/tmp/alloy-linux-${arch}" /usr/local/bin/alloy; \
+    rm -f /tmp/alloy.zip "/tmp/alloy-linux-${arch}"; \
+    alloy --version
 
 # PowerShell from the upstream tarball (Microsoft publishes no trixie apt repo,
 # and the tarball keeps this layer distro-agnostic like the Node one above).

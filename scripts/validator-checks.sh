@@ -65,6 +65,12 @@ hdr "vector validate --no-environment"
 expect_ok   "accepts a valid topology"                    vector validate --no-environment vector/good.yaml
 expect_fail "rejects an unknown sink field"               vector validate --no-environment vector/bad.yaml
 
+hdr "alloy fmt / validate (Alloy syntax + component schema)"
+expect_ok   "fmt -t accepts formatted config"             alloy fmt -t alloy/good.alloy
+expect_fail "fmt -t rejects misformatted config"          alloy fmt -t alloy/bad-fmt.alloy
+expect_ok   "validate accepts a valid component graph"    alloy validate alloy/good.alloy
+expect_fail "validate rejects an unknown attribute"       alloy validate alloy/bad.alloy
+
 hdr "ansible-lint (offline, ANSIBLE_LINT_NODEPS=1)"
 expect_ok   "accepts a clean play"                        ansible-lint --offline ansible/good.yml
 expect_fail "flags an unnamed, non-FQCN task"             ansible-lint --offline ansible/bad.yml
