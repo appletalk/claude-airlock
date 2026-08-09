@@ -111,6 +111,7 @@ _launch_default_engine() {
     AIRLOCK_ROOTS="" \
     CLAUDE_CODE_OAUTH_TOKEN="test-token" \
     ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
+    AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
     bash "$AIRLOCK" "$@" </dev/null
 }
 
