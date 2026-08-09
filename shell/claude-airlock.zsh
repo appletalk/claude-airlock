@@ -77,21 +77,28 @@ claude() {
     fi
   fi
   mkdir -p "${lock:h}" || return 1
-  print "$$ host $(date +%s) $(_airlock_pstart $$)" > "$lock"
   # Same per-project scratch dir the box gets, at the same path, exported the same way.
   # Sessions are shared host<->box, so both sides must agree on where persistent scratch
   # lives — otherwise host Claude writes to bare /tmp and the box can't see it.
   # AIRLOCK_TMP_BASE mirrors the launcher's own default; both read it from the
   # environment so an override cannot make the two sides disagree.
   export AIRLOCK_TMP="${AIRLOCK_TMP_BASE:-/tmp/airlock}/$slug"
-  # Not `mkdir -p ... && chmod ...`: a failing mkdir there was silent, and the session
-  # then ran with a scratch path that does not exist.
+  # This check comes BEFORE the lock is written, and the order is load-bearing: it returns
+  # early, ahead of the `always` block that would otherwise clean up, so a lock taken above
+  # it survives - recording this interactive shell, which lives for days with a matching
+  # start time and is therefore unprunable. Nothing to release if nothing was taken.
+  # Not `mkdir -p ... && chmod ...` either: a failing mkdir there was silent, and the
+  # session then ran with a scratch path that does not exist.
   if ! mkdir -p "$AIRLOCK_TMP" 2>/dev/null; then
     print -u2 "claude: cannot create the per-project scratch dir $AIRLOCK_TMP"
     print -u2 "  Check ownership of ${AIRLOCK_TMP_BASE:-/tmp/airlock}."
     return 1
   fi
   chmod 700 "$AIRLOCK_TMP"
+  # Written atomically: a plain redirect truncates at open, so a peer reading in that
+  # window sees a 0-byte lock and silently skips the concurrent-session warning.
+  print "$$ host $(date +%s) $(_airlock_pstart $$)" > "$lock.tmp.$$"
+  mv -f "$lock.tmp.$$" "$lock"
   # Join the SAME refcount the boxes use. A host session mounts nothing, but it holds
   # $AIRLOCK_TMP under the same name, so without this it is invisible to every box's
   # cleanup and its scratch dir is removed out from under it while it is still running.

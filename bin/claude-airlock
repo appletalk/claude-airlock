@@ -56,6 +56,129 @@ CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
+# The refcount primitives and the `session` subcommand live HERE, above the engine and
+# AIRLOCK_TMP_BASE checks, because the host `claude` wrapper calls them on every start
+# and stop. Below those checks, a host with no container engine - a perfectly normal way
+# to use the wrapper - made every session print a warning about a risk that cannot exist
+# without a box, and a config-set AIRLOCK_TMP_BASE made both calls hard-fail. They read
+# only $PWD and the ENV snapshot of the scratch base, so they cannot be moved by config.
+# --- Shared-mount refcount primitives -------------------------------------------------
+# Defined up here, above the subcommand dispatch, because the host `claude` wrapper
+# delegates to them through the `session` subcommand: a raw host session holds exactly
+# the same $AIRLOCK_TMP as a box, so it has to be counted by the same code. Two
+# implementations of this would drift, and the direction they drift is data loss.
+
+# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
+# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
+# everything through the FINAL ") " first (greedy is required: a lazy match breaks on
+# such a comm, and every field after comm is numeric so it cannot over-strip); starttime
+# is then the 20th remaining field.
+# Pairing this with a pid is what makes a session file identify a PROCESS rather than a
+# number. Without it a recycled pid reads as live forever, and these files live in
+# persistent state rather than tmpfs, so that would survive reboots.
+_airlock_proc_start() {
+  local st
+  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  st="${st##*') '}"
+  printf '%s' "$st" | cut -d' ' -f20
+}
+
+# True when a session other than $2 is live in the registry $1. Entries whose process is
+# gone are pruned as we go, so a SIGKILLed session (trap never ran) cannot pin the shared
+# directories forever.
+_airlock_peers_in() {
+  local dir="$1" self="$2" f pid want have rc=1
+  for f in "$dir"/*; do
+    [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
+    pid="${f##*/}"
+    [ "$pid" = "$self" ] && continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
+    want="$(cat "$f" 2>/dev/null || true)"
+    have="$(_airlock_proc_start "$pid")"
+    # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
+    # as "dead" and prune a live peer's entry. An empty stored token means a file from
+    # an older version - fall back to bare existence rather than discarding it.
+    if [ -n "$have" ] && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
+      rc=0
+    else
+      rm -f "$f"
+    fi
+  done
+  return $rc
+}
+
+# Identity of a directory, so a recorded path cannot become a standing licence to delete
+# whatever later occupies it. Inode catches delete-and-recreate; ctime catches a dir that
+# was populated and then emptied. Empty when the path is gone.
+_airlock_dir_id() { stat -c '%i:%Z' "$1" 2>/dev/null || true; }
+
+# Remove the artifact mountpoints THIS PROJECT created, given its state dir. Shared by
+# the launcher's cleanup and by `session release`, because either can be the last one
+# out: a host session that outlives every box must still tidy up what those boxes made,
+# and when it did not, an empty .venv was left behind forever - its existence then stops
+# any future session from re-registering it.
+# Callers must have established that no peers remain before calling this.
+_airlock_release_artifacts() {
+  local dir="$1" m p want
+  for m in "$dir"/artifacts-created/*; do
+    [ -e "$m" ] || continue
+    # One redirection, two lines: path then identity. Separate `read < "$m"` calls would
+    # each reopen the file and both return line 1.
+    p=""; want=""
+    { IFS= read -r p; IFS= read -r want; } < "$m" 2>/dev/null || true
+    if [ -z "${p:-}" ] || [ ! -e "$p" ]; then rm -f "$m"; continue; fi
+    # The directory must still be the one we created. Without this the marker authorises
+    # deleting that path forever: a user who empties .venv to rebuild it would have the
+    # directory removed under them by whichever session happens to be last out.
+    if [ -n "${want:-}" ] && [ "$want" != "$(_airlock_dir_id "$p")" ]; then continue; fi
+    # rmdir, NOT rm -rf, and the peer check does not make that safe on its own. The two
+    # guard different writers: the peer check covers a sibling box (whose writes land in
+    # $store, so the host view of this path is empty), while rmdir's refusal covers the
+    # HOST populating it during the session - the user's other terminal running
+    # `python -m venv .venv`, an LSP, direnv, uv, a host-side build. Both are required.
+    if rmdir "$p" 2>/dev/null; then rm -f "$m"; fi
+  done
+  rmdir "$dir/artifacts-created" 2>/dev/null || true
+}
+
+# `airlock session register|release <pid>` — the host `claude` wrapper's hook into the
+# refcount. A raw host session mounts nothing, but it USES $AIRLOCK_TMP under the same
+# name, so without this it is invisible to every box's cleanup and its scratch dir gets
+# removed out from under it. register/release are deliberately dumb: no config parsing,
+# no engine, no token.
+if [ "${1:-}" = "session" ]; then
+  _xslug="$(printf '%s' "$PWD" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _xdir="$HOME/.config/claude-airlock/state/$_xslug/sessions"
+  _xtmp="${_AIRLOCK_TMP_BASE_ENV:-/tmp/airlock}/$_xslug"
+  _xpid="${3:-}"
+  case "${2:-}" in
+    register)
+      [ -n "$_xpid" ] || { echo "usage: airlock session register <pid>" >&2; exit 1; }
+      mkdir -p "$_xdir"
+      _airlock_proc_start "$_xpid" > "$_xdir/$_xpid" ;;
+    release)
+      [ -n "$_xpid" ] || { echo "usage: airlock session release <pid>" >&2; exit 1; }
+      rm -f "$_xdir/$_xpid"
+      # Same last-one-out rule the launcher follows: only tidy when nobody else holds it.
+      if ! _airlock_peers_in "$_xdir" "$_xpid"; then
+        # A host session can outlive every box, and then IT is the last one out - so it
+        # owes the same artifact cleanup the launcher does. Skipping this left an empty
+        # .venv behind permanently (measured against real containers).
+        _airlock_release_artifacts "$HOME/.config/claude-airlock/state/$_xslug"
+        rmdir "$_xtmp" 2>/dev/null || true
+        if [ "${_AIRLOCK_TMP_BASE_ENV:-/tmp/airlock}" = /tmp/airlock ]; then
+          rmdir /tmp/airlock 2>/dev/null || true
+        fi
+        rmdir "$_xdir" 2>/dev/null || true
+      fi ;;
+    peers)   # diagnostic: does anyone else hold this project's shared dirs?
+      if _airlock_peers_in "$_xdir" "${_xpid:-0}"; then echo "peers: yes"; else echo "peers: none"; fi ;;
+    *) echo "usage: airlock session <register|release|peers> <pid>" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+
 # Base directory for per-project scratch ($AIRLOCK_TMP). Env-only, and now ENFORCED
 # rather than merely documented: the zsh `claude` wrapper computes the same path and
 # reads only the environment, so a value set in the config would move the launcher's
@@ -159,122 +282,6 @@ _gate_shares() {
 }
 
 WORKSPACE="$PWD"
-
-# --- Shared-mount refcount primitives -------------------------------------------------
-# Defined up here, above the subcommand dispatch, because the host `claude` wrapper
-# delegates to them through the `session` subcommand: a raw host session holds exactly
-# the same $AIRLOCK_TMP as a box, so it has to be counted by the same code. Two
-# implementations of this would drift, and the direction they drift is data loss.
-
-# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
-# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
-# everything through the FINAL ") " first (greedy is required: a lazy match breaks on
-# such a comm, and every field after comm is numeric so it cannot over-strip); starttime
-# is then the 20th remaining field.
-# Pairing this with a pid is what makes a session file identify a PROCESS rather than a
-# number. Without it a recycled pid reads as live forever, and these files live in
-# persistent state rather than tmpfs, so that would survive reboots.
-_airlock_proc_start() {
-  local st
-  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
-  st="${st##*') '}"
-  printf '%s' "$st" | cut -d' ' -f20
-}
-
-# True when a session other than $2 is live in the registry $1. Entries whose process is
-# gone are pruned as we go, so a SIGKILLed session (trap never ran) cannot pin the shared
-# directories forever.
-_airlock_peers_in() {
-  local dir="$1" self="$2" f pid want have rc=1
-  for f in "$dir"/*; do
-    [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
-    pid="${f##*/}"
-    [ "$pid" = "$self" ] && continue
-    case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
-    want="$(cat "$f" 2>/dev/null || true)"
-    have="$(_airlock_proc_start "$pid")"
-    # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
-    # as "dead" and prune a live peer's entry. An empty stored token means a file from
-    # an older version - fall back to bare existence rather than discarding it.
-    if [ -n "$have" ] && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
-      rc=0
-    else
-      rm -f "$f"
-    fi
-  done
-  return $rc
-}
-
-# Identity of a directory, so a recorded path cannot become a standing licence to delete
-# whatever later occupies it. Inode catches delete-and-recreate; ctime catches a dir that
-# was populated and then emptied. Empty when the path is gone.
-_airlock_dir_id() { stat -c '%i:%Z' "$1" 2>/dev/null || true; }
-
-# Remove the artifact mountpoints THIS PROJECT created, given its state dir. Shared by
-# the launcher's cleanup and by `session release`, because either can be the last one
-# out: a host session that outlives every box must still tidy up what those boxes made,
-# and when it did not, an empty .venv was left behind forever - its existence then stops
-# any future session from re-registering it.
-# Callers must have established that no peers remain before calling this.
-_airlock_release_artifacts() {
-  local dir="$1" m p want
-  for m in "$dir"/artifacts-created/*; do
-    [ -e "$m" ] || continue
-    # One redirection, two lines: path then identity. Separate `read < "$m"` calls would
-    # each reopen the file and both return line 1.
-    p=""; want=""
-    { IFS= read -r p; IFS= read -r want; } < "$m" 2>/dev/null || true
-    if [ -z "${p:-}" ] || [ ! -e "$p" ]; then rm -f "$m"; continue; fi
-    # The directory must still be the one we created. Without this the marker authorises
-    # deleting that path forever: a user who empties .venv to rebuild it would have the
-    # directory removed under them by whichever session happens to be last out.
-    if [ -n "${want:-}" ] && [ "$want" != "$(_airlock_dir_id "$p")" ]; then continue; fi
-    # rmdir, NOT rm -rf, and the peer check does not make that safe on its own. The two
-    # guard different writers: the peer check covers a sibling box (whose writes land in
-    # $store, so the host view of this path is empty), while rmdir's refusal covers the
-    # HOST populating it during the session - the user's other terminal running
-    # `python -m venv .venv`, an LSP, direnv, uv, a host-side build. Both are required.
-    if rmdir "$p" 2>/dev/null; then rm -f "$m"; fi
-  done
-  rmdir "$dir/artifacts-created" 2>/dev/null || true
-}
-
-# `airlock session register|release <pid>` — the host `claude` wrapper's hook into the
-# refcount. A raw host session mounts nothing, but it USES $AIRLOCK_TMP under the same
-# name, so without this it is invisible to every box's cleanup and its scratch dir gets
-# removed out from under it. register/release are deliberately dumb: no config parsing,
-# no engine, no token.
-if [ "${1:-}" = "session" ]; then
-  _xslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
-  _xdir="$HOME/.config/claude-airlock/state/$_xslug/sessions"
-  _xtmp="${AIRLOCK_TMP_BASE:-/tmp/airlock}/$_xslug"
-  _xpid="${3:-}"
-  case "${2:-}" in
-    register)
-      [ -n "$_xpid" ] || { echo "usage: airlock session register <pid>" >&2; exit 1; }
-      mkdir -p "$_xdir"
-      _airlock_proc_start "$_xpid" > "$_xdir/$_xpid" ;;
-    release)
-      [ -n "$_xpid" ] || { echo "usage: airlock session release <pid>" >&2; exit 1; }
-      rm -f "$_xdir/$_xpid"
-      # Same last-one-out rule the launcher follows: only tidy when nobody else holds it.
-      if ! _airlock_peers_in "$_xdir" "$_xpid"; then
-        # A host session can outlive every box, and then IT is the last one out - so it
-        # owes the same artifact cleanup the launcher does. Skipping this left an empty
-        # .venv behind permanently (measured against real containers).
-        _airlock_release_artifacts "$HOME/.config/claude-airlock/state/$_xslug"
-        rmdir "$_xtmp" 2>/dev/null || true
-        if [ "${AIRLOCK_TMP_BASE:-/tmp/airlock}" = /tmp/airlock ]; then
-          rmdir /tmp/airlock 2>/dev/null || true
-        fi
-        rmdir "$_xdir" 2>/dev/null || true
-      fi ;;
-    peers)   # diagnostic: does anyone else hold this project's shared dirs?
-      if _airlock_peers_in "$_xdir" "${_xpid:-0}"; then echo "peers: yes"; else echo "peers: none"; fi ;;
-    *) echo "usage: airlock session <register|release|peers> <pid>" >&2; exit 1 ;;
-  esac
-  exit 0
-fi
 
 # `airlock shell` opens an interactive shell in the box instead of Claude — same
 # firewall, mounts, git identity, and Postgres, just bash. Doesn't take the
@@ -1008,7 +1015,20 @@ _airlock_cleanup() {
   if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
   rmdir "$SESS_DIR" 2>/dev/null || true
 }
-trap _airlock_cleanup EXIT INT TERM
+# A signal handler in bash runs and then the script CONTINUES. On the old
+# `trap ... EXIT INT TERM` that was actively harmful: a SIGTERM at one of the prompts
+# below ran cleanup early - which returns immediately, having mounted nothing - and the
+# launch then carried on, created .venv, the markers and the owner file, and exited with
+# the idempotence flag already set, so none of it was ever removed. The signal must END
+# the run, not merely interrupt it. This also closes a pre-existing hazard on the same
+# path: a signal at a prompt deleted ENV_FILE and SESS_FILE and then launched the box
+# anyway, with a --env-file that no longer existed and no refcount registration.
+# 130/143 are the conventional 128+SIGINT / 128+SIGTERM statuses. HUP is included because
+# closing the terminal otherwise leaves everything behind.
+trap _airlock_cleanup EXIT
+trap '_airlock_cleanup; exit 130' INT
+trap '_airlock_cleanup; exit 143' TERM
+trap '_airlock_cleanup; exit 129' HUP
 
 # Per-project egress posture (host-controlled, tamper-proof — the mode file lives in
 # STATE_DIR, never mounted into the box). Default 'minimal' = Anthropic core only;
@@ -1156,6 +1176,10 @@ fi
 if [ "$AIRLOCK_SHELL" != 1 ]; then
   if [ -f "$LOCK" ]; then
     read -r oldpid oldkind _ oldstart < "$LOCK" 2>/dev/null || true
+    # Numeric or nothing. /proc/self and /proc/thread-self always exist and always report
+    # a live start time, so a lock reading "self" would make every launch prompt forever
+    # - and with non-tty stdin the prompt reads EOF and aborts the run outright.
+    case "${oldpid:-}" in ''|*[!0-9]*) oldpid=""; oldstart="" ;; esac
     if [ -n "${oldpid:-}" ] && [ -n "$(_airlock_proc_start "$oldpid")" ] \
        && { [ -z "${oldstart:-}" ] || [ "$oldstart" = "$(_airlock_proc_start "$oldpid")" ]; }; then
       echo "claude-airlock: a ${oldkind:-} session for this project may already be open (pid $oldpid)." >&2
@@ -1165,7 +1189,10 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
       case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted." >&2; exit 1 ;; esac
     fi
   fi
-  printf '%s airlock %s %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" "$SELF_START" > "$LOCK"
+  # Atomic, same reason as the owner file: a plain redirect truncates at open, and a peer
+  # reading in that window sees a 0-byte lock and skips the warning entirely.
+  printf '%s airlock %s %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" "$SELF_START" > "$LOCK.tmp.$$"
+  mv -f "$LOCK.tmp.$$" "$LOCK"
   LOCK_HELD=1                                    # only now may cleanup remove it
 fi
 
