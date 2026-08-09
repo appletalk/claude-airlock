@@ -149,6 +149,44 @@ register_dead_peer() {
   [ -n "$output" ]
 }
 
+# --- the env-file (shared path, carries the OAuth token) ---------------------------
+
+@test "the engine env-file is per session, not per project" {
+  proj="$(mkproj envsess)"
+  _launch "$proj"
+  # Two boxes on one project must not share this path: cleanup rm -f's it, and the
+  # engine does not read it until long after it is written.
+  run bash -c 'sed -n "/engine-env/p" "$1"' _ "$ENGINE_ARGS_FILE"
+  [[ "$output" =~ engine-env\.[0-9]+$ ]]
+}
+
+@test "a dead session's env-file is swept, a live peer's is not" {
+  proj="$(mkproj envsweep)"
+  sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
+  sleep 300 & PEER_PID=$!
+  echo live > "$sdir/engine-env.$PEER_PID"
+  sleep 300 & dead=$!
+  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  echo stale > "$sdir/engine-env.$dead"
+  _launch "$proj"
+  # A SIGKILLed session leaves a token file behind; a live one must keep its own.
+  [ ! -e "$sdir/engine-env.$dead" ]
+  [ -e "$sdir/engine-env.$PEER_PID" ]
+}
+
+# --- failure surfacing --------------------------------------------------------------
+
+@test "an uncreatable scratch base aborts the launch instead of mounting nothing" {
+  proj="$(mkproj badbase)"
+  touch "$BATS_TEST_TMPDIR/notadir"
+  AIRLOCK_TMP_BASE="$BATS_TEST_TMPDIR/notadir/sub" run _launch "$proj"
+  [ "$status" -ne 0 ]
+  # and crucially it must not have gone on to launch a box with a bind source that
+  # does not exist
+  run engine_args
+  [ -z "$output" ]
+}
+
 @test "a session deregisters itself on exit" {
   proj="$(mkproj dereg)"
   register_live_peer "$proj"

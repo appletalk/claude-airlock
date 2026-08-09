@@ -743,7 +743,13 @@ fi
 # exactly what the per-project secret store went to lengths to keep private. The file
 # lives in STATE_DIR (never mounted into the box), is created 0600 before a byte is
 # written, and is removed on exit. Non-sensitive env stays on `-e` (below).
-ENV_FILE="$STATE_DIR/engine-env"
+# Per SESSION, not per project: two boxes on one project would otherwise share this
+# path, and the cleanup's unconditional `rm -f` would delete a sibling's token file out
+# from under it. The window is wide - a session writes this here but the engine does not
+# read it until ~450 lines later, with two blocking interactive prompts in between - and
+# the failure is a launch that dies for no visible reason. Stale files from a SIGKILLed
+# session (trap never ran) are pruned below, once the liveness helper exists.
+ENV_FILE="$STATE_DIR/engine-env.$$"
 (umask 077; : > "$ENV_FILE")
 # Empty under persist-login — the var must be ABSENT, not empty-string: Claude
 # treats a set-but-empty token as a credential and fails auth instead of falling
@@ -761,7 +767,81 @@ fi
 # on reboot. An inter-session cache, not durable storage; bare /tmp stays ephemeral so
 # build/test temp files don't eat host RAM.
 AIRLOCK_TMP="$AIRLOCK_TMP_BASE/$slug"
-mkdir -p "$AIRLOCK_TMP" && chmod 700 "$AIRLOCK_TMP"
+# Deliberately NOT `mkdir -p ... && chmod 700 ...`: under `set -e` only the LAST command
+# of an && list is fatal, so a failing mkdir there was silent and left the box with a
+# bind source that never got its 0700.
+mkdir -p "$AIRLOCK_TMP"
+chmod 700 "$AIRLOCK_TMP"
+
+# --- Shared-mount refcount: who else has this project's dirs mounted right now? ---
+# $AIRLOCK_TMP and the shadowed artifact dirs are each ONE host directory bind-mounted
+# into every box on this project, and removing one at exit attacks any sibling that
+# still holds it: a removed mount SOURCE strands that box on an orphaned inode (Links:0,
+# reads empty, writes ENOENT, indistinguishable from "the cache is empty"), and a
+# removed mount TARGET is torn down outright by detach_mounts().
+# So every session registers a pidfile and only the LAST one out removes anything.
+# Registered here, immediately after the mkdir above, rather than later: between the two
+# sit blocking interactive prompts, and a peer exiting in that window would rmdir the
+# directory this session just created and chmod'd.
+# Registered for `shell` sessions too, unlike session.lock below: this counts who holds
+# the MOUNTS, not who writes history, and a `shell` exit orphans a `claude` box just as
+# effectively.
+SESS_DIR="$STATE_DIR/sessions"
+mkdir -p "$SESS_DIR"
+SESS_FILE="$SESS_DIR/$$"
+
+# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
+# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
+# everything through the final ") " first; starttime is then the 20th remaining field.
+# Storing it makes a pidfile identify a PROCESS, not just a number: without it a
+# recycled pid reads as a live peer forever, and because these files live in persistent
+# state (not tmpfs) that would survive reboots and silently disable cleanup for good.
+_airlock_proc_start() {
+  local st
+  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  st="${st##*') '}"
+  printf '%s' "$st" | cut -d' ' -f20
+}
+
+_airlock_proc_start "$$" > "$SESS_FILE"
+
+# True when another live session holds this project's scratch and artifact mounts.
+# Entries whose process is gone are pruned as we go, so a SIGKILLed session (trap never
+# ran) cannot pin the directories forever.
+_airlock_peer_sessions() {
+  local f pid want have rc=1
+  for f in "$SESS_DIR"/*; do
+    [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
+    pid="${f##*/}"
+    # Belt and braces: cleanup unlinks our own file before calling this, so we should
+    # never see ourselves - but the check keeps the function correct if that moves.
+    [ "$pid" = "$$" ] && continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
+    want="$(cat "$f" 2>/dev/null || true)"
+    have="$(_airlock_proc_start "$pid")"
+    # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
+    # as "dead" and prune a live peer's entry. An empty stored token means a pidfile
+    # from an older version - fall back to bare existence rather than discarding it.
+    if [ -n "$have" ] && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
+      rc=0
+    else
+      rm -f "$f"
+    fi
+  done
+  return $rc
+}
+
+# Env-files are per-session and removed on exit, but a SIGKILLed session leaves one
+# behind holding an OAuth token. Sweep the dead ones now that we can tell live from
+# dead. Only files whose owning pid is gone are touched.
+for _ef in "$STATE_DIR"/engine-env.*; do
+  [ -e "$_ef" ] || continue
+  _efpid="${_ef##*engine-env.}"
+  case "$_efpid" in ''|*[!0-9]*) continue ;; esac
+  [ "$_efpid" = "$$" ] && continue
+  [ -n "$(_airlock_proc_start "$_efpid")" ] || rm -f "$_ef"
+done
+unset _ef _efpid
 
 # Per-project egress posture (host-controlled, tamper-proof — the mode file lives in
 # STATE_DIR, never mounted into the box). Default 'minimal' = Anthropic core only;
@@ -928,51 +1008,6 @@ fi
 # Registered for `shell` sessions too, unlike session.lock above: this counts who has
 # the dir MOUNTED, not who writes history, and a `shell` exit orphans a `claude` box
 # just as effectively.
-SESS_DIR="$STATE_DIR/sessions"
-mkdir -p "$SESS_DIR"
-SESS_FILE="$SESS_DIR/$$"
-
-# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
-# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
-# everything through the final ") " first; starttime is then the 20th remaining field.
-# Storing it makes a pidfile identify a PROCESS, not just a number: without it a
-# recycled pid reads as a live peer forever, and because these files live in persistent
-# state (not tmpfs) that would survive reboots and silently disable cleanup for good.
-_airlock_proc_start() {
-  local st
-  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
-  st="${st##*') '}"
-  printf '%s' "$st" | cut -d' ' -f20
-}
-
-_airlock_proc_start "$$" > "$SESS_FILE"
-
-# True when another live session holds this project's scratch and artifact mounts.
-# Entries whose process is gone are pruned as we go, so a SIGKILLed session (trap never
-# ran) cannot pin the directories forever.
-_airlock_peer_sessions() {
-  local f pid want have rc=1
-  for f in "$SESS_DIR"/*; do
-    [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
-    pid="${f##*/}"
-    # Belt and braces: cleanup unlinks our own file before calling this, so we should
-    # never see ourselves - but the check keeps the function correct if that moves.
-    [ "$pid" = "$$" ] && continue
-    case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
-    want="$(cat "$f" 2>/dev/null || true)"
-    have="$(_airlock_proc_start "$pid")"
-    # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
-    # as "dead" and prune a live peer's entry. An empty stored token means a pidfile
-    # from an older version - fall back to bare existence rather than discarding it.
-    if [ -n "$have" ] && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
-      rc=0
-    else
-      rm -f "$f"
-    fi
-  done
-  return $rc
-}
-
 # Cleanup: drop the lock, and remove any empty artifact mountpoints we had to
 # create on the host (populated in the shadow-mount section below).
 ARTIFACT_CLEANUP=()
