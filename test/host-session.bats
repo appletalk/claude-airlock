@@ -317,3 +317,18 @@ EOF
   run cat "$OWNER"
   [[ "$output" == 999001* ]]
 }
+
+@test "a HOST session that is last out cleans up what a box created" {
+  proj="$(mkproj hostlastartifact)"
+  sleep 60 & PEER_PID=$!
+  _launch "$proj" session register "$PEER_PID"   # a live host session
+  _launch "$proj"                                 # a box runs, creates .venv, exits
+  [ -d "$proj/.venv" ]                            # kept: the host session still holds it
+  # The host session is now the last one out, so IT owes the artifact cleanup. Skipping
+  # this left an empty .venv behind forever, and its existence stops any future session
+  # from re-registering it. Caught against real containers, not by the stubbed suite.
+  kill "$PEER_PID" 2>/dev/null; wait "$PEER_PID" 2>/dev/null || true
+  _launch "$proj" session release "$PEER_PID"
+  [ ! -e "$proj/.venv" ]
+  [ ! -d "$(state_dir "$proj")/artifacts-created" ]
+}
