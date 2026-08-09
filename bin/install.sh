@@ -56,9 +56,26 @@ if [ -t 0 ] && ! grep -q '^[[:space:]]*AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/conf
   echo "    Leave blank to skip — paste will then tell you how to set it."
   printf '    project path: '
   read -r PASTE_PROJECT || PASTE_PROJECT=""
-  PASTE_PROJECT="${PASTE_PROJECT/#\~/$HOME}"
+  # `read` does not expand anything, so a typed ~ or $HOME arrives literally. Both are
+  # natural to type (config.example itself shows "$HOME/..."), so handle the leading
+  # forms explicitly — never with eval, which would run whatever was pasted in.
+  PASTE_PROJECT="${PASTE_PROJECT%\"}"; PASTE_PROJECT="${PASTE_PROJECT#\"}"
+  PASTE_PROJECT="${PASTE_PROJECT%\'}"; PASTE_PROJECT="${PASTE_PROJECT#\'}"
+  # These patterns are LITERAL on purpose — they match the characters the user typed, so
+  # "does not expand in single quotes / tilde does not expand" is the intent, not a bug.
+  # shellcheck disable=SC2016,SC2088
+  case "$PASTE_PROJECT" in
+    '~')          PASTE_PROJECT="$HOME" ;;
+    '~/'*)        PASTE_PROJECT="$HOME/${PASTE_PROJECT#\~/}" ;;
+    '$HOME')      PASTE_PROJECT="$HOME" ;;
+    '$HOME/'*)    PASTE_PROJECT="$HOME/${PASTE_PROJECT#\$HOME/}" ;;
+    '${HOME}')    PASTE_PROJECT="$HOME" ;;
+    '${HOME}/'*)  PASTE_PROJECT="$HOME/${PASTE_PROJECT#\$\{HOME\}/}" ;;
+  esac
   if [ -n "$PASTE_PROJECT" ] && [ ! -d "$PASTE_PROJECT" ]; then
-    echo "    not a directory: $PASTE_PROJECT — skipping (set it in the config later)." >&2
+    echo "    not a directory: $PASTE_PROJECT — skipping." >&2
+    echo "    Set it later in $CONFIG_DIR/config, e.g.:" >&2
+    echo "        AIRLOCK_PASTE_PROJECT=\"\$HOME/development/myproject\"" >&2
     PASTE_PROJECT=""
   fi
   if [ -n "$PASTE_PROJECT" ]; then
