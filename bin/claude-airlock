@@ -912,6 +912,7 @@ _airlock_peer_sessions() { _airlock_peers_in "$SESS_DIR" "$$"; }
 LOCK="$STATE_DIR/session.lock"
 LOCK_HELD=0
 MOUNTED=0
+STORE_OWNED=()   # artifact stores this session holds read-write; released on exit
 
 # Identity of a directory, so a recorded path cannot become a standing licence to delete
 # whatever later occupies it. Inode catches delete-and-recreate; ctime catches a dir that
@@ -933,6 +934,13 @@ _airlock_cleanup() {
     if [ "${_lpid:-}" = "$$" ]; then rm -f "$LOCK"; fi
   fi
   rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
+  # Release any artifact stores we hold read-write, so the next session can take them.
+  # Unconditional: these are ours by definition, and holding one after exit would force
+  # every later box read-only until the pid happened to be reused.
+  local o
+  for o in "${STORE_OWNED[@]:-}"; do
+    [ -n "$o" ] && rm -f "$o"
+  done
   # Deregister BEFORE counting peers, so the last session out doesn't see itself.
   rm -f "$SESS_FILE"
   # Nothing below is ours to remove unless we actually mounted these directories. A run
@@ -1213,7 +1221,27 @@ for d in $AIRLOCK_ARTIFACT_DIRS; do
     printf '%s\n%s\n' "$host_path" "$(_airlock_dir_id "$host_path")" \
       > "$STATE_DIR/artifacts-created/path-$(printf '%s' "$d" | sed 's#/#__#g')"
   fi
-  args+=( -v "$store:$host_path:rw" )
+  # Advisory ownership of the STORE. Two boxes on one project mount the same store, and
+  # two concurrent `pip install`s into one venv corrupt it with no signature at all -
+  # you get a half-written package tree and an import error days later. Unlike the mount
+  # bugs this cannot be fixed by cleanup ordering, so the second box gets it read-only
+  # and is told why: a hard, immediate failure beats silent corruption, and the shared
+  # cache still works for everyone reading it.
+  owner="$store.owner"
+  owner_pid=""; owner_start=""
+  [ -f "$owner" ] && read -r owner_pid owner_start _ < "$owner" 2>/dev/null
+  if [ -n "${owner_pid:-}" ] && [ "$owner_pid" != "$$" ] \
+     && [ -n "$(_airlock_proc_start "$owner_pid")" ] \
+     && { [ -z "${owner_start:-}" ] || [ "$owner_start" = "$(_airlock_proc_start "$owner_pid")" ]; }; then
+    echo "claude-airlock: $d is already held read-write by session $owner_pid; mounting it READ-ONLY here." >&2
+    echo "  Two sessions installing into one $d at the same time corrupts it silently." >&2
+    echo "  Installs in this box will fail; run them in the other session, or close it first." >&2
+    args+=( -v "$store:$host_path:ro" )
+  else
+    printf '%s %s\n' "$$" "$SELF_START" > "$owner"
+    STORE_OWNED+=( "$owner" )
+    args+=( -v "$store:$host_path:rw" )
+  fi
 done
 
 # Host-approved per-project folder shares, mounted at their REAL host path so the box
