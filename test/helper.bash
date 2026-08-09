@@ -40,9 +40,12 @@ printf '%s\n' "\$@" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 printf '%s\n' "ENGINE_INVOKED=$_e" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 # Snapshot the session pidfiles that exist WHILE this session is live. Cleanup unlinks
 # its own on the way out, so the engine call is the only point a test can observe that
-# a session registered itself at all.
+# a session registered itself at all. \$PPID here IS the launcher's \$\$, so a test can
+# demand that pid specifically rather than accepting any file that happens to be around.
+printf 'LAUNCHER=%s\n' "\$PPID" >> "\${ENGINE_ARGS_FILE:-/dev/null}.sessions"
 for _f in "\$HOME"/.config/claude-airlock/state/*/sessions/*; do
-  [ -e "\$_f" ] && printf 'SESSION=%s\n' "\${_f##*/}" >> "\${ENGINE_ARGS_FILE:-/dev/null}.sessions"
+  [ -e "\$_f" ] && printf 'SESSION=%s/%s\n' "\$(basename "\$(dirname "\$(dirname "\$_f")")")" "\${_f##*/}" \
+    >> "\${ENGINE_ARGS_FILE:-/dev/null}.sessions"
 done
 exit 0
 EOF
@@ -124,6 +127,17 @@ engine_args() { cat "$ENGINE_ARGS_FILE" 2>/dev/null; }
 # Which engine binary the launcher actually invoked.
 invoked_engine() { sed -n 's/^ENGINE_INVOKED=//p' "$ENGINE_ARGS_FILE" 2>/dev/null | tail -1; }
 
-# Session pidfiles that existed at the moment the last launch reached the engine, i.e.
-# who had registered themselves as holding this project's mounts.
+# Session pidfiles ("<slug>/<pid>") that existed at the moment the last launch reached
+# the engine, i.e. who had registered as holding that project's mounts.
 live_sessions() { sed -n 's/^SESSION=//p' "$ENGINE_ARGS_FILE.sessions" 2>/dev/null; }
+
+# The launcher's own pid for the last launch, so a test can assert that THIS session
+# registered rather than accepting any pidfile that happened to be present.
+launcher_pid() { sed -n 's/^LAUNCHER=//p' "$ENGINE_ARGS_FILE.sessions" 2>/dev/null | tail -1; }
+
+# Did the last launch register ITSELF, under project $1's slug?
+launcher_registered() {
+  local pid; pid="$(launcher_pid)"
+  [ -n "$pid" ] || return 1
+  live_sessions | grep -qx "$(_slug "$1")/$pid"
+}

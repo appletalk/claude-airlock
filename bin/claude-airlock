@@ -689,6 +689,22 @@ slug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
 STATE_DIR="$HOME/.config/claude-airlock/state/$slug"
 mkdir -p "$STATE_DIR/dot-claude"
 
+# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
+# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
+# everything through the FINAL ") " first (greedy is required: a lazy match breaks on
+# such a comm, and every field after comm is numeric so it cannot over-strip); starttime
+# is then the 20th remaining field.
+# Pairing this with a pid is what makes a per-session file identify a PROCESS rather
+# than a number. Without it a recycled pid reads as live forever, and these files live
+# in persistent state rather than tmpfs, so that would survive reboots.
+_airlock_proc_start() {
+  local st
+  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  st="${st##*') '}"
+  printf '%s' "$st" | cut -d' ' -f20
+}
+SELF_START="$(_airlock_proc_start "$$")"
+
 # --- Auth: shared long-lived OAuth token (CLAUDE_CODE_OAUTH_TOKEN) ---
 #
 # The shared token is a CONVENIENCE for ephemeral boxes, not a security tier. Boxes
@@ -747,10 +763,27 @@ fi
 # path, and the cleanup's unconditional `rm -f` would delete a sibling's token file out
 # from under it. The window is wide - a session writes this here but the engine does not
 # read it until ~450 lines later, with two blocking interactive prompts in between - and
-# the failure is a launch that dies for no visible reason. Stale files from a SIGKILLed
-# session (trap never ran) are pruned below, once the liveness helper exists.
-ENV_FILE="$STATE_DIR/engine-env.$$"
+# the failure is a launch that dies for no visible reason.
+# Named <pid>.<starttime>, NOT bare <pid>: this file holds an OAuth token, and a session
+# killed with SIGKILL leaves one behind. Sweeping on bare pid existence would keep a
+# stale token forever the moment its pid was recycled - strictly worse than the old
+# fixed path, which the next launch truncated unconditionally.
+ENV_FILE="$STATE_DIR/engine-env.$$.$SELF_START"
 (umask 077; : > "$ENV_FILE")
+# Sweep env-files whose owning process is gone, including any left by older versions
+# (bare `engine-env`, or `engine-env.<pid>` with no start time - neither can be proven
+# live, and both may hold a token, so they go).
+for _ef in "$STATE_DIR"/engine-env "$STATE_DIR"/engine-env.*; do
+  [ -e "$_ef" ] || continue
+  [ "$_ef" = "$ENV_FILE" ] && continue
+  _eftag="${_ef##*/engine-env}"; _eftag="${_eftag#.}"
+  case "$_eftag" in
+    *.*) _efpid="${_eftag%%.*}"
+         [ "$(_airlock_proc_start "$_efpid")" = "${_eftag#*.}" ] || rm -f "$_ef" ;;
+    *)   rm -f "$_ef" ;;                          # legacy shape: no provable owner
+  esac
+done
+unset _ef _eftag _efpid
 # Empty under persist-login — the var must be ABSENT, not empty-string: Claude
 # treats a set-but-empty token as a credential and fails auth instead of falling
 # through to its own /login.
@@ -770,7 +803,12 @@ AIRLOCK_TMP="$AIRLOCK_TMP_BASE/$slug"
 # Deliberately NOT `mkdir -p ... && chmod 700 ...`: under `set -e` only the LAST command
 # of an && list is fatal, so a failing mkdir there was silent and left the box with a
 # bind source that never got its 0700.
-mkdir -p "$AIRLOCK_TMP"
+if ! mkdir -p "$AIRLOCK_TMP" 2>/dev/null; then
+  echo "claude-airlock: cannot create the per-project scratch dir $AIRLOCK_TMP" >&2
+  echo "  Check ownership of $AIRLOCK_TMP_BASE, or point AIRLOCK_TMP_BASE elsewhere" >&2
+  echo "  (env only - it must match on host and box, so the config file cannot set it)." >&2
+  exit 1
+fi
 chmod 700 "$AIRLOCK_TMP"
 
 # --- Shared-mount refcount: who else has this project's dirs mounted right now? ---
@@ -789,21 +827,7 @@ chmod 700 "$AIRLOCK_TMP"
 SESS_DIR="$STATE_DIR/sessions"
 mkdir -p "$SESS_DIR"
 SESS_FILE="$SESS_DIR/$$"
-
-# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
-# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
-# everything through the final ") " first; starttime is then the 20th remaining field.
-# Storing it makes a pidfile identify a PROCESS, not just a number: without it a
-# recycled pid reads as a live peer forever, and because these files live in persistent
-# state (not tmpfs) that would survive reboots and silently disable cleanup for good.
-_airlock_proc_start() {
-  local st
-  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
-  st="${st##*') '}"
-  printf '%s' "$st" | cut -d' ' -f20
-}
-
-_airlock_proc_start "$$" > "$SESS_FILE"
+printf '%s' "$SELF_START" > "$SESS_FILE"
 
 # True when another live session holds this project's scratch and artifact mounts.
 # Entries whose process is gone are pruned as we go, so a SIGKILLed session (trap never
@@ -831,17 +855,52 @@ _airlock_peer_sessions() {
   return $rc
 }
 
-# Env-files are per-session and removed on exit, but a SIGKILLed session leaves one
-# behind holding an OAuth token. Sweep the dead ones now that we can tell live from
-# dead. Only files whose owning pid is gone are touched.
-for _ef in "$STATE_DIR"/engine-env.*; do
-  [ -e "$_ef" ] || continue
-  _efpid="${_ef##*engine-env.}"
-  case "$_efpid" in ''|*[!0-9]*) continue ;; esac
-  [ "$_efpid" = "$$" ] && continue
-  [ -n "$(_airlock_proc_start "$_efpid")" ] || rm -f "$_ef"
-done
-unset _ef _efpid
+# The lock path is needed by the cleanup below; the lock itself is taken much later,
+# after the prompts, and LOCK_HELD stays 0 until then so an early exit never removes a
+# lock this session does not own.
+LOCK="$STATE_DIR/session.lock"
+LOCK_HELD=0
+
+# Cleanup runs from here on. Installed immediately after registration rather than after
+# the prompts: the egress-approval and concurrent-session reads sit between, and
+# answering N to "Open another anyway?" used to exit leaving this session's pidfile and
+# its token-bearing env-file behind.
+_airlock_cleanup() {
+  if [ "$LOCK_HELD" = 1 ]; then rm -f "$LOCK"; fi
+  rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
+  # Deregister BEFORE counting peers, so the last session out doesn't see itself.
+  rm -f "$SESS_FILE"
+  # Everything below removes a directory that a SIBLING box may still have mounted, so
+  # none of it may run while another session is live. Removing a mount SOURCE strands
+  # that box on an orphaned inode; removing a mount TARGET (the artifact dirs) is worse
+  # still - vfs_rmdir calls detach_mounts() and tears the sibling's mount down outright.
+  if _airlock_peer_sessions; then return 0; fi
+  local m p
+  # Artifact mountpoints WE created. The record is per project and on disk, not a shell
+  # array: only the session that created the path knows it created it, and that session
+  # is often not the last one out - an array leaks the directory permanently, because an
+  # existing (empty) .venv also stops every future session from registering it.
+  for m in "$STATE_DIR"/artifacts-created/*; do
+    [ -e "$m" ] || continue
+    p="$(cat "$m" 2>/dev/null || true)"
+    if [ -z "$p" ] || [ ! -e "$p" ]; then rm -f "$m"; continue; fi
+    # rmdir, NOT rm -rf, and the peer check does not make that safe on its own. The two
+    # guard different writers: the peer check covers a sibling box (whose writes land in
+    # $store, so the host view of this path is empty), while rmdir's refusal covers the
+    # HOST populating it during the session - the user's other terminal running
+    # `python -m venv .venv`, an LSP, direnv, uv, a host-side build. Both are required.
+    if rmdir "$p" 2>/dev/null; then rm -f "$m"; fi
+  done
+  rmdir "$STATE_DIR/artifacts-created" 2>/dev/null || true
+  # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
+  # so we don't litter /tmp with empties but never delete a kept artifact.
+  rmdir "$AIRLOCK_TMP" 2>/dev/null || true
+  # Only ever tidy up the tool's OWN default base. With a custom base this would be
+  # removing a directory the user made for their own reasons.
+  if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
+  rmdir "$SESS_DIR" 2>/dev/null || true
+}
+trap _airlock_cleanup EXIT INT TERM
 
 # Per-project egress posture (host-controlled, tamper-proof — the mode file lives in
 # STATE_DIR, never mounted into the box). Default 'minimal' = Anthropic core only;
@@ -983,7 +1042,6 @@ fi
 # the same session live in two places can corrupt the shared history file.
 # Lock format: "<pid> <kind> <epoch>", shared with the claude-host wrapper so
 # airlock and raw host claude cross-detect each other on the same project.
-LOCK="$STATE_DIR/session.lock"
 if [ "$AIRLOCK_SHELL" != 1 ]; then
   if [ -f "$LOCK" ]; then
     read -r oldpid oldkind _ < "$LOCK" 2>/dev/null || true
@@ -996,47 +1054,8 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
     fi
   fi
   printf '%s airlock %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" > "$LOCK"
+  LOCK_HELD=1                                    # only now may cleanup remove it
 fi
-
-# --- Scratch-dir refcount: who else has $AIRLOCK_TMP mounted right now? ---
-# $AIRLOCK_TMP is ONE host dir shared by every box on this project, bind-mounted into
-# each of them. rmdir'ing it at exit unlinks it out from under a sibling's LIVE mount,
-# and that sibling is then stuck on an orphaned inode for the life of its container:
-# reads come back empty, writes fail ENOENT. It reads as "cache is empty", not as
-# "my mount is dead", so the surviving box cannot even detect it.
-# So every session registers a pidfile here and only the LAST one out removes the dir.
-# Registered for `shell` sessions too, unlike session.lock above: this counts who has
-# the dir MOUNTED, not who writes history, and a `shell` exit orphans a `claude` box
-# just as effectively.
-# Cleanup: drop the lock, and remove any empty artifact mountpoints we had to
-# create on the host (populated in the shadow-mount section below).
-ARTIFACT_CLEANUP=()
-_airlock_cleanup() {
-  [ "$AIRLOCK_SHELL" = 1 ] || rm -f "$LOCK"
-  rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
-  # Deregister BEFORE counting peers, so the last session out doesn't see itself.
-  rm -f "$SESS_FILE"
-  # Everything below removes a directory that a SIBLING box may still have mounted, so
-  # none of it may run while another session is live. Removing a mount SOURCE strands
-  # that box on an orphaned inode; removing a mount TARGET (the artifact dirs) is worse
-  # still - vfs_rmdir calls detach_mounts() and tears the sibling's mount down outright.
-  if _airlock_peer_sessions; then return 0; fi
-  local p
-  for p in "${ARTIFACT_CLEANUP[@]:-}"; do
-    # NB: rmdir succeeding here does NOT mean the box left this empty. The box writes
-    # into $store, which is mounted OVER this path, so the host view is empty even when
-    # the box's copy is full. Only the peer check above makes this safe.
-    if [ -d "$p" ]; then rmdir "$p" 2>/dev/null || true; fi
-  done
-  # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
-  # so we don't litter /tmp with empties but never delete a kept artifact.
-  rmdir "$AIRLOCK_TMP" 2>/dev/null || true
-  # Only ever tidy up the tool's OWN default base. With a custom base this would be
-  # removing a directory the user made for their own reasons.
-  if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
-  rmdir "$SESS_DIR" 2>/dev/null || true
-}
-trap _airlock_cleanup EXIT INT TERM
 
 # --- Assemble engine args ---
 # Least-privilege capabilities: drop the engine's broad default set and re-add only what
@@ -1106,7 +1125,13 @@ for d in $AIRLOCK_ARTIFACT_DIRS; do
   store="$STATE_DIR/artifacts/$(printf '%s' "$d" | sed 's#/#__#g')"
   mkdir -p "$store"
   if [ ! -e "$host_path" ]; then
-    mkdir -p "$host_path" && ARTIFACT_CLEANUP+=( "$host_path" )
+    mkdir -p "$host_path"
+    # Recorded on disk, not in a shell array: the session that creates this is often not
+    # the last one out, and only the last one out may remove it.
+    mkdir -p "$STATE_DIR/artifacts-created"
+    # `path-` prefix is load-bearing: these names come from $AIRLOCK_ARTIFACT_DIRS, which
+    # is mostly dotfiles (.venv), and the cleanup's `*` glob would skip every one of them.
+    printf '%s\n' "$host_path" > "$STATE_DIR/artifacts-created/path-$(printf '%s' "$d" | sed 's#/#__#g')"
   fi
   args+=( -v "$store:$host_path:rw" )
 done
