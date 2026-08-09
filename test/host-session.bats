@@ -542,3 +542,22 @@ EOF
   [[ "$output" != *"$SHELLP"* ]]
   kill "$HOSTP" "$SHELLP" 2>/dev/null || true
 }
+
+@test "concurrent launches both get the settings baseline" {
+  proj="$(mkproj concurrentsettings)"
+  # The reset of a corrupt/empty settings.json used to TRUNCATE the shared file in place,
+  # so a sibling reading it mid-merge silently lost the airlock baseline - no error, just
+  # a box running without the intended permissions and env.
+  : > "$(state_dir "$proj")/dot-claude/settings.json" 2>/dev/null || true
+  _launch "$proj" shell >/dev/null 2>&1 & A=$!
+  _launch "$proj" shell >/dev/null 2>&1 & B=$!
+  rca=0; wait "$A" || rca=$?
+  rcb=0; wait "$B" || rcb=$?
+  [ "$rca" -eq 0 ]
+  [ "$rcb" -eq 0 ]
+  run bash -c 'jq -e ".permissions.allow | length > 0" "$1" >/dev/null 2>&1 && echo BASELINE' \
+      _ "$(state_dir "$proj")/dot-claude/settings.json"
+  [ "$output" = BASELINE ]
+  run bash -c 'ls "$1"/dot-claude/*.tmp* 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
+  [ "$output" -eq 0 ]
+}

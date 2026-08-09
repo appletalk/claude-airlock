@@ -1191,7 +1191,14 @@ _repo="$(dirname "$(dirname "$_self")")"
 # defaults. Airlock defaults win on conflicts; other keys Claude wrote are kept.
 if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; then
   _bs="$STATE_DIR/dot-claude/settings.json"
-  [ -s "$_bs" ] && jq -e . "$_bs" >/dev/null 2>&1 || echo '{}' > "$_bs"
+  # Atomic reset, for the same reason as every other write on this path: a plain redirect
+  # TRUNCATES the shared destination, so a sibling launch reading it mid-merge gets an
+  # empty file, its jq fails, and that box silently runs without the airlock settings
+  # baseline. No error, no signal - which is what makes it worth fixing over a window
+  # only a few syscalls wide.
+  if ! { [ -s "$_bs" ] && jq -e . "$_bs" >/dev/null 2>&1; }; then
+    echo '{}' > "$_bs.tmp.$$" && mv -f "$_bs.tmp.$$" "$_bs"
+  fi
   if jq -s '
     .[0] as $e | .[1] as $d
     | ($e * $d)
