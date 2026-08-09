@@ -32,6 +32,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Shell lint + test, and image conversion.
+#
+# shellcheck and bats are what this repo's OWN gates run (`make lint`, `make test`,
+# hooks/pre-commit). Without them in the image, developing claude-airlock from inside
+# a box means the pre-commit hook takes its lenient "tool not found — skipping" branch
+# and exits 0 having checked NOTHING — the same silent-no-op this image's validator
+# policy exists to prevent. apt is deliberate: CI installs both with apt too, so the
+# box and CI cannot drift onto different versions.
+#
+# ImageMagick and Pillow back `airlock paste`: WSLg offers BMP, the Claude API takes
+# PNG/JPEG/GIF/WebP, so without a converter a paste on that platform fails. They also
+# let an agent generate image fixtures and VERIFY what it produced (real format, real
+# dimensions) rather than trusting a file it just wrote.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      shellcheck \
+      bats \
+      imagemagick \
+      python3-pil \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # PostgreSQL (server + client) for projects with DB-backed tests. Present but
 # NOT running — it costs only disk until a project starts it on demand with
 # `airlock-pg-start` (localhost:5432). Postgres is the only DB in the stack, so

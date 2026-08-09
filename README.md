@@ -447,7 +447,10 @@ version + sha256 in `image/dev/Dockerfile`.
 | `ansible-lint` | playbook/role lint (`ANSIBLE_LINT_NODEPS=1` is set image-wide, see below) |
 | `vector validate --no-environment` | config parse + topology, no component/health checks |
 | `alloy fmt -t`, `alloy validate` | Alloy syntax + formatting, component references and argument schemas |
-| `Invoke-ScriptAnalyzer` (pwsh) | PowerShell script lint |
+| `Invoke-ScriptAnalyzer` (pwsh) | PowerShell script lint. Bundles Windows/PS-5.1 **compatibility profiles**, so `PSUseCompatibleSyntax`/`PSUseCompatibleCommands` can catch 7.x-only syntax that would fail on a 5.1 guest |
+| `shellcheck` | shell lint — also what this repo's own `make lint` and pre-commit hook run |
+| `bats` | shell test runner — this repo's own `make test` |
+| `magick` (ImageMagick), Pillow (`python3-pil`) | image conversion + inspection; backs `airlock paste` on platforms whose clipboard offers BMP |
 
 Deliberately **out of scope**, because they need the network and would otherwise degrade
 to a no-op inside a box: `terraform init`/`validate`, `tflint --init` (external rulesets),
