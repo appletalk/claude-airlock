@@ -100,12 +100,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends unzip \
 
 # promtool from the Prometheus release tarball. Only the promtool binary is
 # extracted; the prometheus server itself is ~half the tarball and we never run it.
-ARG PROMETHEUS_VERSION=3.13.1
+ARG PROMETHEUS_VERSION=3.13.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=amd64; sha=962b812371aff838d152b6ff2d56fdb7a6396f5542f48ebf73421b9721f0d103 ;; \
-      arm64) parch=arm64; sha=fbd8e5e0f6ad2e7d053e717739186caee4fd0cab2cf9335bfc86c292fe2a2bfe ;; \
+      amd64) parch=amd64; sha=0e8c4d46101bd025ea8265e377d2caabc57f488fc1be1c367f37db69ea41be6f ;; \
+      arm64) parch=arm64; sha=7cecb17a6f41d59814e1a0581a1f81f79051ad5973d1ecf39e23a9f747d6572a ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     d="prometheus-${PROMETHEUS_VERSION}.linux-${parch}"; \
@@ -169,12 +169,12 @@ RUN set -eux; \
 # Note the size: this is a ~450MB binary (every component plus the embedded UI are
 # linked in, and Go binaries don't strip usefully). It is the single largest tool
 # in the image -- roughly promtool + terraform + vector combined.
-ARG ALLOY_VERSION=1.18.0
+ARG ALLOY_VERSION=1.18.1
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) sha=92f4c950aec4ec16a7fdbf6f805be4334d4d5fbbe458eecf514319c1c491bef4 ;; \
-      arm64) sha=e20f8570628818a15192d34372839017a4c446269b5d96036ad976ebf7a7728a ;; \
+      amd64) sha=fac853cbc3983a50a2368f9a685b31f74392ae86dd6155461b11a911c07b483c ;; \
+      arm64) sha=499446cfe22514d6c9f00af953d98162526ea818e84c4e452f8fddbbfa8676d6 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-${arch}.zip" -o /tmp/alloy.zip; \

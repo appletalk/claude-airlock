@@ -12,7 +12,7 @@ BIN="$TOOLDIR/bin"
 mkdir -p "$BIN"
 
 SC_VER="0.11.0"
-BATS_VER="v1.13.0"
+BATS_VER="v1.14.0"
 arch="$(uname -m)"
 
 if [ ! -x "$BIN/shellcheck" ]; then
