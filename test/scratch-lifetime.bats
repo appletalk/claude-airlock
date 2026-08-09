@@ -124,6 +124,38 @@ register_dead_peer() {
   [ ! -e "$proj/.venv" ]
 }
 
+@test "an artifact dir the HOST populated during the session survives" {
+  proj="$(mkproj hostwriter)"
+  # The engine stub stands in for the box being up; meanwhile something on the host
+  # writes into .venv - the user's other terminal running `python -m venv .venv`, an
+  # LSP, direnv, a host-side build. The launcher created the dir, so it is registered,
+  # and this is a LONE session, so the peer check does not protect it. Only rmdir's
+  # refusal to remove a non-empty dir stands between that work and deletion.
+  cat > "$STUBBIN/podman" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$PWD/.venv/bin" && : > "$PWD/.venv/pyvenv.cfg"
+exit 0
+EOF
+  cp "$STUBBIN/podman" "$STUBBIN/docker"
+  chmod +x "$STUBBIN/podman" "$STUBBIN/docker"
+  _launch "$proj"
+  [ -f "$proj/.venv/pyvenv.cfg" ]
+}
+
+@test "an artifact dir is not leaked when its creator exits first" {
+  proj="$(mkproj artorder)"
+  # Session A creates and records .venv, then a peer (B) is live when A exits, so A
+  # removes nothing. B is then the last one out and must still clean up A's directory:
+  # the record has to outlive A, or the empty .venv is left forever - and its mere
+  # existence stops every future session from registering it too.
+  register_live_peer "$proj"
+  _launch "$proj"
+  [ -d "$proj/.venv" ]                       # A left it alone: B still has it mounted
+  kill "$PEER_PID" 2>/dev/null; wait "$PEER_PID" 2>/dev/null || true
+  _launch "$proj"                            # a later session is now the last one out
+  [ ! -e "$proj/.venv" ]
+}
+
 @test "an artifact dir the project already had is never touched" {
   proj="$(mkproj artkept)"
   mkdir -p "$proj/.venv"; touch "$proj/.venv/preexisting"
@@ -136,17 +168,18 @@ register_dead_peer() {
 @test "a claude session registers itself while it runs" {
   proj="$(mkproj reg)"
   _launch "$proj"
-  run live_sessions
-  [ -n "$output" ]
+  # THIS launcher's pid under THIS project's slug - not merely "some pidfile existed",
+  # which any peer registered by another test would satisfy.
+  launcher_registered "$proj"
 }
 
 @test "a shell session registers too - it holds the same mounts" {
   proj="$(mkproj shellreg)"
+  register_live_peer "$proj"          # a peer is present, so a loose assertion would pass
   _launch "$proj" shell
   # session.lock deliberately skips `shell`; this refcount must NOT, or a shell exit
   # tears down a live claude box. Observed at engine time because cleanup unlinks it.
-  run live_sessions
-  [ -n "$output" ]
+  launcher_registered "$proj"
 }
 
 # --- the env-file (shared path, carries the OAuth token) ---------------------------
@@ -157,21 +190,62 @@ register_dead_peer() {
   # Two boxes on one project must not share this path: cleanup rm -f's it, and the
   # engine does not read it until long after it is written.
   run bash -c 'sed -n "/engine-env/p" "$1"' _ "$ENGINE_ARGS_FILE"
-  [[ "$output" =~ engine-env\.[0-9]+$ ]]
+  # <pid>.<starttime>: the start time is what stops a recycled pid from making a stale
+  # token file look owned.
+  [[ "$output" =~ engine-env\.[0-9]+\.[0-9]+$ ]]
 }
 
 @test "a dead session's env-file is swept, a live peer's is not" {
   proj="$(mkproj envsweep)"
   sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
   sleep 300 & PEER_PID=$!
-  echo live > "$sdir/engine-env.$PEER_PID"
+  echo live > "$sdir/engine-env.$PEER_PID.$(proc_start "$PEER_PID")"
   sleep 300 & dead=$!
   kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
-  echo stale > "$sdir/engine-env.$dead"
+  echo stale > "$sdir/engine-env.$dead.999999"
   _launch "$proj"
   # A SIGKILLed session leaves a token file behind; a live one must keep its own.
-  [ ! -e "$sdir/engine-env.$dead" ]
-  [ -e "$sdir/engine-env.$PEER_PID" ]
+  [ ! -e "$sdir/engine-env.$dead.999999" ]
+  [ -e "$sdir/engine-env.$PEER_PID.$(proc_start "$PEER_PID")" ]
+}
+
+@test "an env-file whose pid was RECYCLED is swept - it holds a token" {
+  proj="$(mkproj envrecycle)"
+  sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
+  sleep 300 & PEER_PID=$!
+  # Live pid, wrong start time: what a recycled pid looks like. Sweeping on bare pid
+  # existence keeps this forever, and it is strictly worse than the old fixed path,
+  # which the next launch truncated unconditionally.
+  echo 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-SECRET' > "$sdir/engine-env.$PEER_PID.999999"
+  _launch "$proj"
+  [ ! -e "$sdir/engine-env.$PEER_PID.999999" ]
+}
+
+@test "a legacy env-file with no owner is swept" {
+  proj="$(mkproj envlegacy)"
+  sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
+  echo 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-SECRET' > "$sdir/engine-env"
+  _launch "$proj"
+  [ ! -e "$sdir/engine-env" ]
+}
+
+# --- the abort path -----------------------------------------------------------------
+
+@test "declining the concurrent-session prompt leaves nothing behind" {
+  proj="$(mkproj abort)"
+  register_live_peer "$proj"
+  # Make the lock look like a live airlock session so the prompt fires, then answer N.
+  printf '%s airlock 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
+  # _launch feeds /dev/null on stdin, so the prompt reads EOF and takes the abort branch.
+  run _launch "$proj"
+  [ "$status" -ne 0 ]
+  # The peer's lock must survive - this session never took it.
+  [ -e "$(state_dir "$proj")/session.lock" ]
+  # and no pidfile or token-bearing env-file may be left by the aborted session
+  run bash -c 'ls "$1" 2>/dev/null | wc -l' _ "$(sessions_dir "$proj")"
+  [ "$output" -eq 1 ]
+  run bash -c 'ls "$1"/engine-env.* 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
+  [ "$output" -eq 0 ]
 }
 
 # --- failure surfacing --------------------------------------------------------------
