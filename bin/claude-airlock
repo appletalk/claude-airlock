@@ -924,6 +924,11 @@ _airlock_dir_id() { stat -c '%i:%Z' "$1" 2>/dev/null || true; }
 # answering N to "Open another anyway?" used to exit leaving this session's pidfile and
 # its token-bearing env-file behind.
 _airlock_cleanup() {
+  # The trap covers EXIT INT TERM, and on SIGTERM the handler runs and then EXIT runs it
+  # AGAIN (measured). Everything here must be safe to repeat, and the ownership releases
+  # are not: by the second pass a file can already belong to a different session.
+  [ "${CLEANUP_DONE:-0}" = 1 ] && return 0
+  CLEANUP_DONE=1
   # Only if the lock is still OURS. A second session overwrites it with its own pid after
   # the user answers y - the normal path when two boxes on one project is the design - and
   # the first to exit would otherwise delete the live session's lock, leaving a third
@@ -934,12 +939,19 @@ _airlock_cleanup() {
     if [ "${_lpid:-}" = "$$" ]; then rm -f "$LOCK"; fi
   fi
   rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
-  # Release any artifact stores we hold read-write, so the next session can take them.
-  # Unconditional: these are ours by definition, and holding one after exit would force
-  # every later box read-only until the pid happened to be reused.
-  local o
+  # Release the artifact stores we hold read-write, so the next session can take them -
+  # but only where the file still records US. "Ours by definition" is exactly the
+  # assumption the lock release above refuses to make, and it is wrong for the same
+  # reason: on a repeated cleanup pass the owner can already belong to another session,
+  # and deleting it lets a third session take rw alongside them. That is the corruption
+  # this ownership exists to prevent.
+  local o _opid
   for o in "${STORE_OWNED[@]:-}"; do
-    [ -n "$o" ] && rm -f "$o"
+    [ -n "$o" ] || continue
+    [ -f "$o" ] || continue
+    _opid=""
+    read -r _opid _ < "$o" 2>/dev/null || true
+    if [ "${_opid:-}" = "$$" ]; then rm -f "$o"; fi
   done
   # Deregister BEFORE counting peers, so the last session out doesn't see itself.
   rm -f "$SESS_FILE"
@@ -1122,15 +1134,19 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   jq "$_tfilter" "$_bs" > "$_bs.tmp" 2>/dev/null && mv "$_bs.tmp" "$_bs"
 fi
 
-# --- Concurrent-session guard: warn if this project is already open (airlock) ---
-# Note: only detects other *airlock* sessions, not a raw host `claude`. Running
-# the same session live in two places can corrupt the shared history file.
-# Lock format: "<pid> <kind> <epoch>", shared with the claude-host wrapper so
-# airlock and raw host claude cross-detect each other on the same project.
+# --- Concurrent-session guard: warn if this project is already open ---
+# Detects both airlock boxes and a raw host `claude`: the wrapper writes this same file
+# and, since it now registers in sessions/ too, both are visible to the mount refcount.
+# Running the same session live in two places can corrupt the shared history file.
+# Lock format: "<pid> <kind> <epoch> <starttime>", shared with the claude-host wrapper.
+# The 4th field is what stops a recycled pid from prompting on every launch forever;
+# locks written by older versions have three fields, so an absent one falls back to a
+# bare liveness check rather than being treated as a mismatch.
 if [ "$AIRLOCK_SHELL" != 1 ]; then
   if [ -f "$LOCK" ]; then
-    read -r oldpid oldkind _ < "$LOCK" 2>/dev/null || true
-    if [ -n "${oldpid:-}" ] && kill -0 "$oldpid" 2>/dev/null; then
+    read -r oldpid oldkind _ oldstart < "$LOCK" 2>/dev/null || true
+    if [ -n "${oldpid:-}" ] && [ -n "$(_airlock_proc_start "$oldpid")" ] \
+       && { [ -z "${oldstart:-}" ] || [ "$oldstart" = "$(_airlock_proc_start "$oldpid")" ]; }; then
       echo "claude-airlock: a ${oldkind:-} session for this project may already be open (pid $oldpid)." >&2
       echo "Two live sessions on one project can corrupt shared --resume history." >&2
       printf "Open another anyway? [y/N] " >&2
@@ -1138,7 +1154,7 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
       case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted." >&2; exit 1 ;; esac
     fi
   fi
-  printf '%s airlock %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" > "$LOCK"
+  printf '%s airlock %s %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" "$SELF_START" > "$LOCK"
   LOCK_HELD=1                                    # only now may cleanup remove it
 fi
 
@@ -1229,16 +1245,32 @@ for d in $AIRLOCK_ARTIFACT_DIRS; do
   # cache still works for everyone reading it.
   owner="$store.owner"
   owner_pid=""; owner_start=""
-  [ -f "$owner" ] && read -r owner_pid owner_start _ < "$owner" 2>/dev/null
-  if [ -n "${owner_pid:-}" ] && [ "$owner_pid" != "$$" ] \
+  # `|| true` is load-bearing, not defensive noise. read returns 1 at EOF-without-newline,
+  # and under `set -e` that is FATAL as the last command of an && list: a 0-byte or
+  # truncated .owner file made the launcher exit 1 with no output at all, leaving the
+  # project unlaunchable until someone found an invisible dotfile under ~/.config. A
+  # 0-byte read is reachable by design - the writer below truncates at open - so the very
+  # race this ownership exists to prevent was killing launches instead.
+  if [ -f "$owner" ]; then
+    read -r owner_pid owner_start _ < "$owner" 2>/dev/null || true
+  fi
+  case "${owner_pid:-}" in ''|*[!0-9]*) owner_pid=""; owner_start="" ;; esac
+  if [ -n "$owner_pid" ] && [ "$owner_pid" != "$$" ] \
      && [ -n "$(_airlock_proc_start "$owner_pid")" ] \
      && { [ -z "${owner_start:-}" ] || [ "$owner_start" = "$(_airlock_proc_start "$owner_pid")" ]; }; then
     echo "claude-airlock: $d is already held read-write by session $owner_pid; mounting it READ-ONLY here." >&2
     echo "  Two sessions installing into one $d at the same time corrupts it silently." >&2
-    echo "  Installs in this box will fail; run them in the other session, or close it first." >&2
+    # Mounts are fixed at container start, so this box stays read-only for its whole life -
+    # closing the other session does NOT upgrade it.
+    echo "  Installs in this box will fail. Run them in session $owner_pid, or close that" >&2
+    echo "  session and RESTART this box. Ownership is recorded in $owner." >&2
     args+=( -v "$store:$host_path:ro" )
   else
-    printf '%s %s\n' "$$" "$SELF_START" > "$owner"
+    # Written atomically: a plain redirect truncates at open, so a peer starting inside
+    # that window reads a 0-byte file. mv within one directory is atomic, so a reader
+    # sees either the old contents or the new, never an empty file.
+    printf '%s %s\n' "$$" "$SELF_START" > "$owner.tmp.$$"
+    mv -f "$owner.tmp.$$" "$owner"
     STORE_OWNED+=( "$owner" )
     args+=( -v "$store:$host_path:rw" )
   fi
@@ -1413,8 +1445,9 @@ fi
 # that exits - a declined concurrent-session prompt, a rejected egress entry - mounted
 # nothing, and must not rmdir a directory some other kind of session is using. "No
 # registered peers" is not "nobody there": the lock format is deliberately shared with a
-# raw host `claude`, which uses $AIRLOCK_TMP under the same name but never registers a
-# pidfile here.
+# raw host `claude`, which uses $AIRLOCK_TMP under the same name. The wrapper registers
+# in sessions/ via `airlock session`, so it IS counted - but only if that call succeeded,
+# which is why its failure is reported rather than swallowed.
 MOUNTED=1
 if [ "$AIRLOCK_SHELL" = 1 ]; then
   "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" bash -l

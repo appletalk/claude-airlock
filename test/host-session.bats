@@ -234,3 +234,86 @@ EOF
   run engine_args
   [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
 }
+
+# --- .owner file robustness (a malformed one must never kill the launch) --------------
+
+@test "a ZERO-BYTE owner file does not make the project unlaunchable" {
+  proj="$(mkproj ownerempty)"
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  : > "$(state_dir "$proj")/artifacts/.venv.owner"
+  # read returns 1 at EOF, and under `set -e` as the last command of an && list that was
+  # FATAL: exit 1, no output at all, engine never invoked. Reachable by design, because
+  # the writer truncates at open - so the race this ownership exists to prevent was
+  # killing launches instead.
+  run _launch "$proj"
+  [ "$status" -eq 0 ]
+  run engine_args
+  [ -n "$output" ]
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
+}
+
+@test "an owner file with no trailing newline is read, not fatal" {
+  proj="$(mkproj ownernonl)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  printf '%s %s' "$PEER_PID" "$(proc_start "$PEER_PID")" \
+    > "$(state_dir "$proj")/artifacts/.venv.owner"
+  run _launch "$proj"
+  [ "$status" -eq 0 ]
+  run engine_args
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:ro"* ]]
+}
+
+@test "a garbage owner file is ignored rather than trusted" {
+  proj="$(mkproj ownergarbage)"
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  printf 'not-a-pid whatever\n' > "$(state_dir "$proj")/artifacts/.venv.owner"
+  _launch "$proj"
+  run engine_args
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
+}
+
+@test "the owner file is written atomically - no window where it reads empty" {
+  proj="$(mkproj owneratomic)"
+  _launch "$proj"
+  run bash -c 'ls "$1"/artifacts/.venv.owner.tmp.* 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
+  [ "$output" -eq 0 ]
+}
+
+@test "a stale lock whose pid was RECYCLED does not prompt forever" {
+  proj="$(mkproj lockrecycled)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")"
+  # Live pid, wrong start time. Under a bare kill -0 this prompts on every launch, and
+  # _launch feeds /dev/null, so the prompt reads EOF and aborts the run.
+  printf '%s airlock 0 999999\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
+  run _launch "$proj"
+  [ "$status" -eq 0 ]
+}
+
+@test "the launcher writes a 4-field lock carrying its start time" {
+  proj="$(mkproj launcherlock)"
+  LOCKCOPY="$BATS_TEST_TMPDIR/lockcopy"
+  # Observed mid-run: cleanup removes the lock on the way out.
+  printf '#!/usr/bin/env bash\ncp "%s/session.lock" "%s" 2>/dev/null\nexit 0\n' \
+    "$(state_dir "$proj")" "$LOCKCOPY" > "$STUBBIN/podman"
+  cp "$STUBBIN/podman" "$STUBBIN/docker"; chmod +x "$STUBBIN/podman" "$STUBBIN/docker"
+  _launch "$proj"
+  run cat "$LOCKCOPY"
+  [[ "$output" =~ ^[0-9]+\ airlock\ [0-9]+\ [0-9]+$ ]]
+}
+
+@test "a store owner taken over mid-session is not released by the old holder" {
+  proj="$(mkproj ownersteal)"
+  OWNER="$(state_dir "$proj")/artifacts/.venv.owner"
+  # The stub stands in for the box running while ANOTHER session takes the owner file -
+  # the shape a repeated cleanup pass produces, since the trap fires twice on SIGTERM.
+  # Releasing it then would let a third session take rw alongside the new holder, which
+  # is the corruption this ownership exists to prevent.
+  printf '#!/usr/bin/env bash\nprintf "999001 555\\n" > "%s"\nexit 0\n' "$OWNER" > "$STUBBIN/podman"
+  cp "$STUBBIN/podman" "$STUBBIN/docker"; chmod +x "$STUBBIN/podman" "$STUBBIN/docker"
+  _launch "$proj"
+  [ -e "$OWNER" ]
+  run cat "$OWNER"
+  [[ "$output" == 999001* ]]
+}
