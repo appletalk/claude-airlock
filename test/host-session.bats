@@ -156,3 +156,81 @@ EOF
   run cat "$(state_dir "$proj")/session.lock"
   [[ "$output" == 999001* ]]
 }
+
+# --- artifact store ownership ---------------------------------------------------------
+# Two boxes on one project mount the SAME store. Concurrent installs into one venv
+# corrupt it with no signature - no error, just a half-written package tree. Cleanup
+# ordering cannot fix that, so ownership is advisory: one writer, everyone else reads.
+
+@test "a lone session takes the artifact store read-write" {
+  proj="$(mkproj storerw)"
+  _launch "$proj"
+  run engine_args
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
+}
+
+@test "a store held by a LIVE session is mounted read-only, with a reason" {
+  proj="$(mkproj storero)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  printf '%s %s\n' "$PEER_PID" "$(proc_start "$PEER_PID")" \
+    > "$(state_dir "$proj")/artifacts/.venv.owner"
+  run _launch "$proj"
+  [[ "$output" == *"READ-ONLY"* ]]
+  [[ "$output" == *"corrupts it silently"* ]]
+  run engine_args
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:ro"* ]]
+  [[ "$output" != *"artifacts/.venv:$proj/.venv:rw"* ]]
+}
+
+@test "a STALE owner does not lock every later session out" {
+  proj="$(mkproj storestale)"
+  sleep 60 & dead=$!
+  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  printf '%s 999999\n' "$dead" > "$(state_dir "$proj")/artifacts/.venv.owner"
+  _launch "$proj"
+  run engine_args
+  # A SIGKILLed session must not leave the store read-only forever.
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
+}
+
+@test "an owner whose pid was RECYCLED does not hold the store" {
+  proj="$(mkproj storerecycle)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  # live pid, wrong start time - the recycled-pid shape
+  printf '%s 999999\n' "$PEER_PID" > "$(state_dir "$proj")/artifacts/.venv.owner"
+  _launch "$proj"
+  run engine_args
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
+}
+
+@test "the store is released on exit so the next session gets it rw" {
+  proj="$(mkproj storerelease)"
+  _launch "$proj"
+  [ ! -e "$(state_dir "$proj")/artifacts/.venv.owner" ]
+}
+
+@test "a legacy owner file with no start time still holds the store while alive" {
+  proj="$(mkproj storelegacylive)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  printf '%s\n' "$PEER_PID" > "$(state_dir "$proj")/artifacts/.venv.owner"
+  _launch "$proj"
+  run engine_args
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:ro"* ]]
+}
+
+@test "a legacy owner file whose pid is DEAD does not hold the store forever" {
+  proj="$(mkproj storelegacydead)"
+  sleep 60 & dead=$!
+  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  mkdir -p "$(state_dir "$proj")/artifacts"
+  # No start time to compare, so bare liveness is the ONLY thing standing between this
+  # and a store that is read-only for every future session.
+  printf '%s\n' "$dead" > "$(state_dir "$proj")/artifacts/.venv.owner"
+  _launch "$proj"
+  run engine_args
+  [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
+}
