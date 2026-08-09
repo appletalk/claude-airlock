@@ -73,8 +73,15 @@ the bottom of this file apply too):
 - **Config validators are installed, and they are SYNTAX/LINT ONLY.** These run
   offline, at any egress level — use them freely on infrastructure-as-code:
   `promtool check config|rules`, `promtool test rules`, `terraform fmt -check`,
-  `tflint`, `ansible-lint`, `vector validate --no-environment`, and
-  `Invoke-ScriptAnalyzer` under `pwsh`. What is **deliberately not available** is
+  `tflint`, `ansible-lint`, `vector validate --no-environment`,
+  `Invoke-ScriptAnalyzer` under `pwsh`, `shellcheck`, and `bats`. Image tooling
+  (`magick`, Pillow) is there too — use it to VERIFY an image you produced (real
+  format, real dimensions) rather than trusting the file you just wrote.
+  **Targeting Windows PowerShell 5.1?** PSScriptAnalyzer ships the 5.1 compatibility
+  profiles: enable `PSUseCompatibleSyntax`/`PSUseCompatibleCommands` against
+  `win-48_x64_10.0.17763.0_5.1.17763.316_x64_4.0.30319.42000_framework`, or 7.x-only
+  syntax lints clean here and fails on the guest.
+  What is **deliberately not available** is
   anything that must download a dependency graph first: `terraform init` and
   `terraform validate` (providers), `tflint --init` (external rulesets),
   `ansible-galaxy collection install`, and bare `vector validate` (opens sinks and
