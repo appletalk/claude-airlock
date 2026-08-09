@@ -292,8 +292,11 @@ alpaste                  # zsh: same, and puts the path on your clipboard
 Then Ctrl+V into the agent's prompt. You are pasting **text** — the agent opens the file
 itself. Or say *"check the latest paste"* and let it list the directory.
 
-Pastes land in `$AIRLOCK_TMP/pastes/` as `YYYYMMDD-HHMMSS.png` (host local time), newest
-50 retained, cleared with the rest of the scratch dir on reboot.
+Pastes land in `$AIRLOCK_TMP/pastes/` as `YYYYMMDD-HHMMSSmmm.png` (host local time),
+newest 20 retained, cleared with the rest of the scratch dir on reboot. One fixed name
+shape is deliberate — it makes lexical order chronological, so listing needs no `ls -t`.
+Files that do **not** match that shape are ignored by `paste list` and are **never**
+pruned: this tool does not delete files it did not write.
 
 **Setup.** `bin/install.sh` asks which project pastes belong to and writes it to your host
 config; set it by hand if you skipped the prompt:

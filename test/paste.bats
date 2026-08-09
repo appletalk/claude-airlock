@@ -53,7 +53,7 @@ _paste() {
   local proj="$1"; shift
   cd "$proj" || return 1
   env -i \
-    PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" \
+    PATH="${PATH_OVERRIDE:-$STUBBIN:/usr/bin:/usr/sbin:/bin}" \
     HOME="$AIRLOCK_HOME" \
     TERM=xterm \
     AIRLOCK_ENGINE="$ENGINE" \
@@ -61,6 +61,7 @@ _paste() {
     AIRLOCK_TMP_BASE="$TMP_BASE" \
     PNG_B64="$PNG_B64" \
     ${CLIPTEST:+CLIPTEST="$CLIPTEST"} \
+    ${AIRLOCK_CONFIG:+AIRLOCK_CONFIG="$AIRLOCK_CONFIG"} \
     ${WAYLAND_DISPLAY:+WAYLAND_DISPLAY="$WAYLAND_DISPLAY"} \
     ${DISPLAY:+DISPLAY="$DISPLAY"} \
     ${AIRLOCK_PASTE_PROJECT:+AIRLOCK_PASTE_PROJECT="$AIRLOCK_PASTE_PROJECT"} \
@@ -68,6 +69,19 @@ _paste() {
 }
 
 pastes_dir() { printf '%s' "$TMP_BASE/$(_slug "$1")/pastes"; }
+
+# Replace the real /usr/bin with symlinks to exactly the binaries the paste path needs,
+# minus the clipboard tools. A "tool is not installed" test must not pass merely because
+# the CI runner happens to lack xclip: on a developer's desktop the same test takes a
+# different branch, and against a live Wayland socket it would read their real clipboard.
+minimal_path() {
+  MINBIN="$BATS_TEST_TMPDIR/minbin"; mkdir -p "$MINBIN"
+  local b src
+  for b in bash sed date mkdir chmod mktemp head od tr grep cp mv rm ls cat python3; do
+    src="$(command -v "$b" 2>/dev/null)" && ln -sf "$src" "$MINBIN/$b"
+  done
+  PATH_OVERRIDE="$STUBBIN:$MINBIN"
+}
 
 @test "paste refuses without AIRLOCK_PASTE_PROJECT and says how to set it" {
   p="$(mkproj)"
@@ -98,13 +112,15 @@ pastes_dir() { printf '%s' "$TMP_BASE/$(_slug "$1")/pastes"; }
 
 @test "a Wayland session without wl-paste names the package to install" {
   p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0
-  run _paste "$p"                              # no stubs installed
+  minimal_path                                 # never rely on the HOST lacking wl-paste
+  run _paste "$p"
   [ "$status" -ne 0 ]
   [[ "$output" == *"wl-clipboard"* ]]
 }
 
 @test "an X11 session without xclip names the package to install" {
   p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" DISPLAY=:0
+  minimal_path
   run _paste "$p"
   [ "$status" -ne 0 ]
   [[ "$output" == *"xclip"* ]]
@@ -203,26 +219,26 @@ EOF
   p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
   stub_clipboard
   d="$(pastes_dir "$p")"; mkdir -p "$d"
-  for n in 20260101-000001 20260101-000002 20260101-000003; do
+  for n in 20260101-000000001 20260101-000000002 20260101-000000003; do
     base64 -d <<<"$PNG_B64" > "$d/$n.png"
   done
   run _paste "$p" list 2
   [ "${#lines[@]}" -eq 2 ]
-  [[ "${lines[0]}" == *"20260101-000003.png" ]]
-  [[ "${lines[1]}" == *"20260101-000002.png" ]]
+  [[ "${lines[0]}" == *"20260101-000000003.png" ]]
+  [[ "${lines[1]}" == *"20260101-000000002.png" ]]
 }
 
-@test "only the newest 50 pastes are retained" {
+@test "only the newest 20 pastes are retained" {
   p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
   stub_clipboard
   d="$(pastes_dir "$p")"; mkdir -p "$d"
-  for i in $(seq 1 55); do base64 -d <<<"$PNG_B64" > "$d/$(printf '20260101-%06d' "$i").png"; done
-  run _paste "$p"                                  # the 56th
+  for i in $(seq 1 25); do base64 -d <<<"$PNG_B64" > "$d/$(printf '20260101-%09d' "$i").png"; done
+  run _paste "$p"                                  # the 26th
   [ "$status" -eq 0 ]
   run _paste "$p" list 999
-  [ "${#lines[@]}" -eq 50 ]
-  [ ! -e "$d/20260101-000001.png" ]                # oldest pruned
-  [ -e "$d/20260101-000055.png" ]                  # newest kept
+  [ "${#lines[@]}" -eq 20 ]
+  [ ! -e "$d/20260101-000000001.png" ]             # oldest pruned
+  [ -e "$d/20260101-000000025.png" ]               # newest kept
 }
 
 @test "--project overrides the configured default" {
@@ -232,4 +248,149 @@ EOF
   run _paste "$p" --project "$other"
   [ "$status" -eq 0 ]
   [[ "$output" == "$(pastes_dir "$other")/"* ]]
+}
+
+# --- regressions found by review (2026-08-09) ------------------------------------
+
+@test "a clipboard tool that FAILS is reported, not a silent exit" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  # The real failure mode: `wl-paste --list-types` exits nonzero. Under `set -e` an
+  # assignment from a command substitution took that status and killed the script with
+  # no output at all, so the "no image on the clipboard" branch was unreachable.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STUBBIN/wl-paste"; chmod +x "$STUBBIN/wl-paste"
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [ -n "$output" ]                                   # the whole point: it must SAY something
+  [[ "$output" == *"no image on the clipboard"* ]]
+}
+
+@test "a clipboard read that fails after type detection is reported" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  cat > "$STUBBIN/wl-paste" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --list-types ] && { echo "image/png"; exit 0; }
+exit 4
+EOF
+  chmod +x "$STUBBIN/wl-paste"
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [ -n "$output" ]
+  [[ "$output" == *"reading the clipboard failed"* ]] || [[ "$output" == *"produced no data"* ]]
+}
+
+@test "the prune never deletes the paste it just wrote" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  d="$(pastes_dir "$p")"; mkdir -p "$d"
+  # Hand-copied files, which the tool's own error message tells people to drop here.
+  # 's' sorts after every digit, so a lexical prune would take the NEW file instead.
+  for i in $(seq 1 25); do base64 -d <<<"$PNG_B64" > "$d/screenshot-$i.png"; done
+  run _paste "$p"
+  [ "$status" -eq 0 ]
+  [ -e "$output" ]                                   # the printed path must still exist
+  new="$output"
+  run _paste "$p" list 1
+  [ "$output" = "$new" ]                             # and be the newest
+  # And the foreign files are left strictly alone - never listed out of order, never
+  # pruned. Deleting a file this tool did not write would be the worst surprise of all.
+  [ -e "$d/screenshot-1.png" ]
+  [ -e "$d/screenshot-25.png" ]
+  run _paste "$p" list 999
+  [ "${#lines[@]}" -eq 1 ]
+}
+
+@test "the prune spares the new paste even when 20+ others sort after it" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  d="$(pastes_dir "$p")"; mkdir -p "$d"
+  # Future-dated pastes: a clock that moved backwards (timezone change, NTP correcting a
+  # fast clock) puts the NEW file first in lexical order, so a prune that does not
+  # exclude it deletes the very paste it just printed and still exits 0.
+  for i in $(seq 1 25); do base64 -d <<<"$PNG_B64" > "$d/$(printf '20990101-%09d' "$i").png"; done
+  run _paste "$p"
+  [ "$status" -eq 0 ]
+  [ -e "$output" ]                                   # printed path must exist afterwards
+}
+
+@test "a converter that writes garbage and exits 0 is rejected" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=bmp
+  stub_clipboard
+  cat > "$STUBBIN/magick" <<'EOF'
+#!/usr/bin/env bash
+out="${2#png:}"; printf 'NOT-A-PNG-AT-ALL' > "$out"; exit 0
+EOF
+  chmod +x "$STUBBIN/magick"
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a PNG"* ]]
+  run _paste "$p" list
+  [ -z "$output" ]                                   # nothing published
+}
+
+@test "filenames have ONE shape, so list order is creation order reversed" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  run _paste "$p"; first="$output"
+  run _paste "$p"; second="$output"
+  run _paste "$p"; third="$output"
+  [ "$first" != "$second" ] && [ "$second" != "$third" ]
+  for f in "$first" "$second" "$third"; do
+    [[ "$(basename "$f")" =~ ^[0-9]{8}-[0-9]{9}\.png$ ]]   # YYYYMMDD-HHMMSSmmm.png
+  done
+  run _paste "$p" list 3
+  [ "${lines[0]}" = "$third" ]
+  [ "${lines[1]}" = "$second" ]
+  [ "${lines[2]}" = "$first" ]
+}
+
+@test "a RELATIVE paste project is refused, not resolved against \$PWD" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="somewhere/relative" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ABSOLUTE path"* ]]
+}
+
+@test "AIRLOCK_TMP_BASE set in the CONFIG is refused (host and box would diverge)" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  export AIRLOCK_CONFIG="$BATS_TEST_TMPDIR/cfg"
+  printf 'AIRLOCK_TMP_BASE=%s\n' "$BATS_TEST_TMPDIR/from-config" > "$AIRLOCK_CONFIG"
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must come from the"* ]]
+  [ ! -d "$BATS_TEST_TMPDIR/from-config" ]
+}
+
+@test "--copy does not hang a command substitution" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  # Real wl-copy/xclip -i fork a selection owner that keeps running and INHERITS stdout,
+  # so `out=$(airlock paste --copy)` blocks until the clipboard next changes.
+  cat > "$STUBBIN/wl-copy" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+sleep 30 &          # the selection owner, holding whatever fds it inherited
+exit 0
+EOF
+  chmod +x "$STUBBIN/wl-copy"
+
+  # bats' own `run` captures through a temp file, not a pipe, so it CANNOT reproduce
+  # this. The capture has to be a real command substitution, in its own script.
+  cat > "$BATS_TEST_TMPDIR/capture.sh" <<EOF
+#!/usr/bin/env bash
+out="\$(env -i \
+  PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" TERM=xterm \
+  AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
+  AIRLOCK_TMP_BASE="$TMP_BASE" PNG_B64="$PNG_B64" CLIPTEST=png \
+  WAYLAND_DISPLAY=wayland-0 AIRLOCK_PASTE_PROJECT="$p" \
+  bash "$AIRLOCK" paste --copy)"
+printf '%s' "\$out"
+EOF
+  run timeout 15 bash "$BATS_TEST_TMPDIR/capture.sh"
+  [ "$status" -ne 124 ]                              # 124 = timed out = the hang
+  [ "$status" -eq 0 ]
+  [ -e "$output" ]
 }

@@ -49,7 +49,7 @@ fi
 # terminal is free, so keying it off $PWD would silently write pastes into a directory
 # the running box never mounts. Ask once, here, rather than failing at first use.
 # Skipped when stdin is not a TTY, so CI and scripted installs stay non-interactive.
-if [ -t 0 ] && ! grep -q '^[[:space:]]*AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
+if [ -t 0 ] && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
   echo
   echo "==> Which project should 'airlock paste' write clipboard images into?"
   echo "    They land in that project's \$AIRLOCK_TMP/pastes/, where its box can read them."
@@ -72,6 +72,12 @@ if [ -t 0 ] && ! grep -q '^[[:space:]]*AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/conf
     '${HOME}')    PASTE_PROJECT="$HOME" ;;
     '${HOME}/'*)  PASTE_PROJECT="$HOME/${PASTE_PROJECT#\$\{HOME\}/}" ;;
   esac
+  # Absolutise. A relative path would be stored verbatim and later resolved against
+  # whatever directory `airlock paste` is run from - reintroducing the exact $PWD
+  # dependence this setting exists to remove, and writing to the wrong project silently.
+  if [ -n "$PASTE_PROJECT" ] && [ -d "$PASTE_PROJECT" ]; then
+    PASTE_PROJECT="$(cd "$PASTE_PROJECT" && pwd)"
+  fi
   if [ -n "$PASTE_PROJECT" ] && [ ! -d "$PASTE_PROJECT" ]; then
     echo "    not a directory: $PASTE_PROJECT — skipping." >&2
     echo "    Set it later in $CONFIG_DIR/config, e.g.:" >&2
