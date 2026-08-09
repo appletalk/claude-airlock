@@ -44,7 +44,19 @@ register_live_peer() {
   mkdir -p "$sdir"
   sleep 300 &
   PEER_PID=$!
-  proc_start "$PEER_PID" > "$sdir/$PEER_PID"
+  # "<starttime> <kind>". `shell` = holds the MOUNTS but writes no history, which is what
+  # every mount-protection test needs: a history-writing peer would make the launcher
+  # stop at the concurrent-session prompt instead of exercising the refcount.
+  printf '%s shell\n' "$(proc_start "$PEER_PID")" > "$sdir/$PEER_PID"
+}
+
+# A peer that DOES write history, so the concurrent-session warning fires.
+register_history_peer() {
+  local sdir; sdir="$(sessions_dir "$1")"
+  mkdir -p "$sdir"
+  sleep 300 &
+  PEER_PID=$!
+  printf '%s host\n' "$(proc_start "$PEER_PID")" > "$sdir/$PEER_PID"
 }
 
 # Register a pidfile whose process is already gone, as a SIGKILLed box would leave.
@@ -55,7 +67,7 @@ register_dead_peer() {
   dead=$!
   kill "$dead" 2>/dev/null
   wait "$dead" 2>/dev/null || true
-  echo 999999 > "$sdir/$dead"
+  printf '999999 shell\n' > "$sdir/$dead"
   printf '%s' "$dead"
 }
 
@@ -93,7 +105,7 @@ register_dead_peer() {
   # check this pins the project's cleanup forever, and these files outlive reboots.
   sleep 300 &
   PEER_PID=$!
-  echo 999999 > "$sdir/$PEER_PID"
+  printf '999999 shell\n' > "$sdir/$PEER_PID"
   _launch "$proj"
   [ ! -d "$(scratch_dir "$proj")" ]
   [ ! -e "$sdir/$PEER_PID" ]
@@ -256,8 +268,11 @@ EOF
 
 @test "declining the concurrent-session prompt leaves nothing behind" {
   proj="$(mkproj abort)"
-  register_live_peer "$proj"
-  # Make the lock look like a live airlock session so the prompt fires, then answer N.
+  # A HISTORY-writing peer: the warning is answered from the registry now, and only a
+  # session that can corrupt --resume history triggers it. A `shell` peer holds the same
+  # mounts and deliberately does not.
+  register_history_peer "$proj"
+  # The lock is still written for cross-tool compatibility, but nothing reads it.
   printf '%s airlock 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
   # _launch feeds /dev/null on stdin, so the prompt reads EOF and takes the abort branch.
   run _launch "$proj"
@@ -305,8 +320,11 @@ EOF
   proj="$(mkproj declined)"
   # A raw host `claude` shares the lock format and uses $AIRLOCK_TMP under the same
   # name, but registers no pidfile - so "no registered peers" is not "nobody there".
-  mkdir -p "$(scratch_dir "$proj")" "$(state_dir "$proj")"
+  mkdir -p "$(scratch_dir "$proj")" "$(sessions_dir "$proj")"
   sleep 300 & PEER_PID=$!
+  # A history-writing peer in the REGISTRY - that is what the warning reads now. The lock
+  # is still written for cross-tool compatibility but nothing consults it.
+  printf '%s host\n' "$(proc_start "$PEER_PID")" > "$(sessions_dir "$proj")/$PEER_PID"
   printf '%s claude 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
   run _launch "$proj"                  # stdin is /dev/null -> prompt reads EOF -> abort
   [ "$status" -ne 0 ]

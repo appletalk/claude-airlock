@@ -93,7 +93,7 @@ _airlock_peers_in() {
     pid="${f##*/}"
     [ "$pid" = "$self" ] && continue
     case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
-    want="$(cat "$f" 2>/dev/null || true)"
+    want=""; read -r want _ < "$f" 2>/dev/null || true
     have="$(_airlock_proc_start "$pid")"
     # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
     # as "dead" and prune a live peer's entry. An empty stored token means a file from
@@ -141,6 +141,26 @@ _airlock_release_artifacts() {
   rmdir "$dir/artifacts-created" 2>/dev/null || true
 }
 
+# True when a live session other than $2 in registry $1 WRITES SHELL HISTORY - i.e. any
+# kind except `shell`. Deliberately a different population from _airlock_peers_in: that one
+# answers "who holds the mounts" (an `airlock shell` does), this one answers "who can
+# corrupt --resume history" (an `airlock shell` cannot, it runs bash). Conflating the two
+# makes a shell session warn about history it never touches. Prunes nothing - the caller
+# runs _airlock_peers_in first, which does.
+_airlock_history_peers() {
+  local dir="$1" self="$2" f pid kind rc=1
+  for f in "$dir"/*; do
+    [ -e "$f" ] || continue
+    pid="${f##*/}"
+    [ "$pid" = "$self" ] && continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kind=""; read -r _ kind < "$f" 2>/dev/null || true
+    [ "${kind:-}" = shell ] && continue
+    rc=0
+  done
+  return $rc
+}
+
 # `airlock session register|release <pid>` — the host `claude` wrapper's hook into the
 # refcount. A raw host session mounts nothing, but it USES $AIRLOCK_TMP under the same
 # name, so without this it is invisible to every box's cleanup and its scratch dir gets
@@ -155,7 +175,9 @@ if [ "${1:-}" = "session" ]; then
     register)
       [ -n "$_xpid" ] || { echo "usage: airlock session register <pid>" >&2; exit 1; }
       mkdir -p "$_xdir"
-      _airlock_proc_start "$_xpid" > "$_xdir/$_xpid" ;;
+      # "<starttime> <kind>". The kind is what lets the concurrent-session warning tell a
+      # history writer from an `airlock shell`, which holds the mounts but not history.
+      printf '%s %s\n' "$(_airlock_proc_start "$_xpid")" "${4:-host}" > "$_xdir/$_xpid" ;;
     release)
       [ -n "$_xpid" ] || { echo "usage: airlock session release <pid>" >&2; exit 1; }
       rm -f "$_xdir/$_xpid"
@@ -274,7 +296,7 @@ _gate_shares() {
     if [ "$_ok" = 1 ]; then                                 # record at this level, clear the other
       grep -qxF "$_s" "$_store" || printf '%s\n' "$_s" >> "$_store"
       if [ -s "$_other" ] && grep -qxF "$_s" "$_other"; then
-        grep -vxF "$_s" "$_other" > "$_other.tmp" 2>/dev/null || true; mv "$_other.tmp" "$_other"
+        grep -vxF "$_s" "$_other" > "$_other.tmp.$$" 2>/dev/null || true; mv "$_other.tmp.$$" "$_other"
       fi
       _dst+=( "$_abs" )
     fi
@@ -354,7 +376,7 @@ if [ "${1:-}" = "share" ]; then
       _shrm=0
       for _shf in "$_shstore" "$_shstore_rw"; do
         if [ -f "$_shf" ] && grep -qxF "$_shk" "$_shf"; then
-          grep -vxF "$_shk" "$_shf" > "$_shf.tmp" || true; mv "$_shf.tmp" "$_shf"; _shrm=1
+          grep -vxF "$_shk" "$_shf" > "$_shf.tmp.$$" || true; mv "$_shf.tmp.$$" "$_shf"; _shrm=1
         fi
       done
       if [ "$_shrm" = 1 ]; then echo "airlock: revoked share $_shk (next launch re-prompts)"
@@ -945,7 +967,8 @@ chmod 700 "$AIRLOCK_TMP"
 SESS_DIR="$STATE_DIR/sessions"
 mkdir -p "$SESS_DIR"
 SESS_FILE="$SESS_DIR/$$"
-printf '%s' "$SELF_START" > "$SESS_FILE"
+if [ "$AIRLOCK_SHELL" = 1 ]; then _selfkind=shell; else _selfkind=airlock; fi
+printf '%s %s\n' "$SELF_START" "$_selfkind" > "$SESS_FILE"
 
 # One implementation, shared with the host wrapper via `airlock session` - see the
 # primitives above the subcommand dispatch.
@@ -965,9 +988,14 @@ STORE_OWNED=()   # artifact stores this session holds read-write; released on ex
 # answering N to "Open another anyway?" used to exit leaving this session's pidfile and
 # its token-bearing env-file behind.
 _airlock_cleanup() {
-  # The trap covers EXIT INT TERM, and on SIGTERM the handler runs and then EXIT runs it
-  # AGAIN (measured). Everything here must be safe to repeat, and the ownership releases
-  # are not: by the second pass a file can already belong to a different session.
+  # Deaf while cleaning. A second signal arriving mid-cleanup used to re-enter here, hit
+  # the idempotence flag, return immediately, and then `exit` - aborting the in-flight
+  # pass so its tail never ran. The window is ~1ms of syscalls and the worst loss is the
+  # token-bearing env-file, but it is a real truncation.
+  trap '' INT TERM HUP QUIT PIPE
+  # The handlers below exit, which fires the EXIT trap and re-enters this function.
+  # Everything here must be safe to repeat, and the ownership releases are not: by the
+  # second pass a file can already belong to a different session.
   [ "${CLEANUP_DONE:-0}" = 1 ] && return 0
   CLEANUP_DONE=1
   # Only if the lock is still OURS. A second session overwrites it with its own pid after
@@ -1023,12 +1051,23 @@ _airlock_cleanup() {
 # the run, not merely interrupt it. This also closes a pre-existing hazard on the same
 # path: a signal at a prompt deleted ENV_FILE and SESS_FILE and then launched the box
 # anyway, with a --env-file that no longer existed and no refcount registration.
-# 130/143 are the conventional 128+SIGINT / 128+SIGTERM statuses. HUP is included because
-# closing the terminal otherwise leaves everything behind.
+#
+# Trapping a signal bash would otherwise treat as fatal matters MID-RUN, not at exit. On
+# the default disposition bash runs the EXIT trap immediately and re-raises, so a HUP
+# while the engine is running removed the scratch dir with the container child still
+# alive (measured: GONE 0.5s after the signal) - the removed-mount-source hazard this
+# whole design exists to avoid. Trapped, the signal is deferred until the engine returns.
+# QUIT (Ctrl-\) and PIPE take the same path and so get the same treatment.
+#
+# `|| true` decouples the status: under `set -e`, `_airlock_cleanup; exit 143` would exit
+# with cleanup's status if it were ever non-zero, and the intended 128+signal would never
+# be reached. Every path returns 0 today; this stops that from being load-bearing.
 trap _airlock_cleanup EXIT
-trap '_airlock_cleanup; exit 130' INT
-trap '_airlock_cleanup; exit 143' TERM
-trap '_airlock_cleanup; exit 129' HUP
+trap '_airlock_cleanup || true; exit 130' INT
+trap '_airlock_cleanup || true; exit 143' TERM
+trap '_airlock_cleanup || true; exit 129' HUP
+trap '_airlock_cleanup || true; exit 131' QUIT
+trap '_airlock_cleanup || true; exit 141' PIPE
 
 # Per-project egress posture (host-controlled, tamper-proof — the mode file lives in
 # STATE_DIR, never mounted into the box). Default 'minimal' = Anthropic core only;
@@ -1084,8 +1123,9 @@ HISTSLUG="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g')"
 # --- First-run identity/prefs seed (once); then always enforce friction-skips ---
 if [ ! -s "$STATE_DIR/claude.json" ] || ! jq -e . "$STATE_DIR/claude.json" >/dev/null 2>&1; then
   if [ -f "$HOME/.claude.json" ] && command -v jq >/dev/null 2>&1; then
-    jq 'del(.projects, .mcpServers)' "$HOME/.claude.json" > "$STATE_DIR/claude.json.tmp" 2>/dev/null \
-      && mv "$STATE_DIR/claude.json.tmp" "$STATE_DIR/claude.json" \
+    jq 'del(.projects, .mcpServers)' "$HOME/.claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null \
+      && mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json" \
+      || rm -f "$STATE_DIR/claude.json.tmp.$$" \
       || echo '{}' > "$STATE_DIR/claude.json"
   else
     echo '{}' > "$STATE_DIR/claude.json"
@@ -1095,14 +1135,17 @@ fi
 # path. Must NOT gate on oauthAccount, which Claude writes itself at runtime.
 if command -v jq >/dev/null 2>&1; then
   HOST_THEME="$(jq -r '.theme // "dark"' "$HOME/.claude.json" 2>/dev/null)"; [ "$HOST_THEME" = "null" ] && HOST_THEME="dark"
-  jq --arg theme "$HOST_THEME" --arg ws "$WORKSPACE" '
+  if jq --arg theme "$HOST_THEME" --arg ws "$WORKSPACE" '
       .hasCompletedOnboarding = true
     | .theme = (.theme // $theme)
     | .copyOnSelect = false
     | .projects[$ws] = ((.projects[$ws] // {}) +
         {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true, projectOnboardingSeenCount: 1})
-  ' "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp" 2>/dev/null \
-     && mv "$STATE_DIR/claude.json.tmp" "$STATE_DIR/claude.json"
+  ' "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
+    mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json"
+  else
+    rm -f "$STATE_DIR/claude.json.tmp.$$"
+  fi
 fi
 
 # On the Playwright image, give the box Claude the Playwright MCP (browser tools),
@@ -1115,8 +1158,11 @@ if command -v jq >/dev/null 2>&1; then
   else
     _mcp='if has("mcpServers") then .mcpServers |= del(.playwright) else . end'
   fi
-  jq "$_mcp" "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp" 2>/dev/null \
-    && mv "$STATE_DIR/claude.json.tmp" "$STATE_DIR/claude.json"
+  if jq "$_mcp" "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
+    mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json"
+  else
+    rm -f "$STATE_DIR/claude.json.tmp.$$"
+  fi
 fi
 
 # Prime the box with airlock conventions (empty shadow venv/node_modules are
@@ -1133,13 +1179,16 @@ _repo="$(dirname "$(dirname "$_self")")"
 if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; then
   _bs="$STATE_DIR/dot-claude/settings.json"
   [ -s "$_bs" ] && jq -e . "$_bs" >/dev/null 2>&1 || echo '{}' > "$_bs"
-  jq -s '
+  if jq -s '
     .[0] as $e | .[1] as $d
     | ($e * $d)
     | .permissions.allow = ((($e.permissions.allow // []) + ($d.permissions.allow // [])) | unique)
     | .permissions.deny  = ((($e.permissions.deny  // []) + ($d.permissions.deny  // [])) | unique)
-  ' "$_bs" "$_repo/config/box-settings.json" > "$_bs.tmp" 2>/dev/null \
-    && mv "$_bs.tmp" "$_bs"
+  ' "$_bs" "$_repo/config/box-settings.json" > "$_bs.tmp.$$" 2>/dev/null; then
+    mv "$_bs.tmp.$$" "$_bs"
+  else
+    rm -f "$_bs.tmp.$$"
+  fi
 
   # Telemetry posture (`airlock telemetry`), enforced HERE because settings.json is what
   # Claude actually reads for it — and because the merge above ($e * $d) only ADDS keys,
@@ -1162,32 +1211,37 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   else
     _tfilter='.env |= ((. // {}) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
   fi
-  jq "$_tfilter" "$_bs" > "$_bs.tmp" 2>/dev/null && mv "$_bs.tmp" "$_bs"
+  if jq "$_tfilter" "$_bs" > "$_bs.tmp.$$" 2>/dev/null; then
+    mv "$_bs.tmp.$$" "$_bs"
+  else
+    rm -f "$_bs.tmp.$$"
+  fi
 fi
 
 # --- Concurrent-session guard: warn if this project is already open ---
-# Detects both airlock boxes and a raw host `claude`: the wrapper writes this same file
-# and, since it now registers in sessions/ too, both are visible to the mount refcount.
-# Running the same session live in two places can corrupt the shared history file.
-# Lock format: "<pid> <kind> <epoch> <starttime>", shared with the claude-host wrapper.
-# The 4th field is what stops a recycled pid from prompting on every launch forever;
-# locks written by older versions have three fields, so an absent one falls back to a
-# bare liveness check rather than being treated as a mismatch.
+# Answered from the sessions/ REGISTRY, not from session.lock. The lock is a single slot:
+# a second session overwrote it with its own pid, so the first to exit destroyed the live
+# session's record and a third session got no warning at all - and it could only ever
+# describe ONE peer. The registry holds an entry per live participant, box and raw host
+# alike, is already start-time qualified against recycled pids, and prunes its own dead
+# entries. Our own pidfile is written well above this, hence the explicit self-exclusion.
+#
+# The lock is still WRITTEN below, unchanged in format, so an older launcher or wrapper
+# mid-upgrade keeps cross-detecting. Nothing here reads it any more.
 if [ "$AIRLOCK_SHELL" != 1 ]; then
-  if [ -f "$LOCK" ]; then
-    read -r oldpid oldkind _ oldstart < "$LOCK" 2>/dev/null || true
-    # Numeric or nothing. /proc/self and /proc/thread-self always exist and always report
-    # a live start time, so a lock reading "self" would make every launch prompt forever
-    # - and with non-tty stdin the prompt reads EOF and aborts the run outright.
-    case "${oldpid:-}" in ''|*[!0-9]*) oldpid=""; oldstart="" ;; esac
-    if [ -n "${oldpid:-}" ] && [ -n "$(_airlock_proc_start "$oldpid")" ] \
-       && { [ -z "${oldstart:-}" ] || [ "$oldstart" = "$(_airlock_proc_start "$oldpid")" ]; }; then
-      echo "claude-airlock: a ${oldkind:-} session for this project may already be open (pid $oldpid)." >&2
-      echo "Two live sessions on one project can corrupt shared --resume history." >&2
-      printf "Open another anyway? [y/N] " >&2
-      read -r ans || ans=""
-      case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted." >&2; exit 1 ;; esac
-    fi
+  _airlock_peers_in "$SESS_DIR" "$$" || true      # prunes dead entries as a side effect
+  if _airlock_history_peers "$SESS_DIR" "$$"; then
+    _peers=""
+    for _pf in "$SESS_DIR"/*; do
+      [ -e "$_pf" ] || continue
+      [ "${_pf##*/}" = "$$" ] && continue
+      _peers="$_peers${_pf##*/} "
+    done
+    echo "claude-airlock: another session for this project is already open (pid(s): ${_peers% })." >&2
+    echo "Two live sessions on one project can corrupt shared --resume history." >&2
+    printf "Open another anyway? [y/N] " >&2
+    read -r ans || ans=""
+    case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted." >&2; exit 1 ;; esac
   fi
   # Atomic, same reason as the owner file: a plain redirect truncates at open, and a peer
   # reading in that window sees a 0-byte lock and skips the warning entirely.
