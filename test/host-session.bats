@@ -489,11 +489,56 @@ EOF
   # temp paths, not the concurrent-session guard.
   _launch "$proj" shell >/dev/null 2>&1 & A=$!
   _launch "$proj" shell >/dev/null 2>&1 & B=$!
-  wait "$A"; rca=$?
-  wait "$B"; rcb=$?
+  # NOT `wait "$A"; rca=$?` - under bats' `set -e` a non-zero wait aborts the test at that
+  # line, so rca is never assigned and the assertions below can never fail. It detected
+  # the bug, but by a different mechanism than the one written, and a failing A left B's
+  # launcher stray.
+  rca=0; wait "$A" || rca=$?
+  rcb=0; wait "$B" || rcb=$?
   [ "$rca" -eq 0 ]
   [ "$rcb" -eq 0 ]
   # and neither left a temp file behind
   run bash -c 'ls "$1"/*.tmp* "$1"/dot-claude/*.tmp* 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
   [ "$output" -eq 0 ]
+}
+
+@test "a malformed host claude.json still yields a valid config for the box" {
+  proj="$(mkproj badjson)"
+  printf 'this is not json{{{\n' > "$AIRLOCK_HOME/.claude.json"
+  # $STATE_DIR/claude.json is bind-mounted into the box; if it does not exist the engine
+  # creates a DIRECTORY at that path instead. The `echo '{}'` fallback guarantees it - and
+  # was silently unreachable for one commit, because it sat behind `rm -f`, which always
+  # exits 0.
+  _launch "$proj"
+  [ -f "$(state_dir "$proj")/claude.json" ]
+  run bash -c 'jq -e . "$1" >/dev/null 2>&1 && echo VALID' _ "$(state_dir "$proj")/claude.json"
+  [ "$output" = VALID ]
+}
+
+@test "cleanup is deaf to signals while it runs" {
+  # Structural, not behavioural: the real check needs a second signal delivered while
+  # cleanup is provably mid-pass, which is doable with a blocking stub `rmdir` on a FIFO
+  # but is not written yet. This catches removal of the guard, not a subtle weakening of
+  # it, and it is non-flaky. Without the guard, a second signal re-enters cleanup, hits
+  # the idempotence flag and exits, truncating the pass in flight.
+  run bash -c '
+    awk "/^_airlock_cleanup\\(\\) \\{/{found=1; next}
+         found && !/^ *#/ && NF {print; exit}" "$1"' _ "$AIRLOCK"
+  [[ "$output" == *"trap ''"* ]]
+  [[ "$output" == *INT* && "$output" == *TERM* && "$output" == *HUP* ]]
+  [[ "$output" == *QUIT* && "$output" == *PIPE* ]]
+}
+
+@test "the warning names only the peers that actually triggered it" {
+  proj="$(mkproj warnnames)"
+  sleep 60 & HOSTP=$!
+  sleep 60 & SHELLP=$!
+  _launch "$proj" session register "$HOSTP" host
+  _launch "$proj" session register "$SHELLP" shell
+  run _launch "$proj"
+  # The shell peer holds the same mounts but writes no history, so naming it would be a
+  # lie about why we stopped.
+  [[ "$output" == *"$HOSTP"* ]]
+  [[ "$output" != *"$SHELLP"* ]]
+  kill "$HOSTP" "$SHELLP" 2>/dev/null || true
 }
