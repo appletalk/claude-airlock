@@ -918,6 +918,37 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
   printf '%s airlock %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" > "$LOCK"
 fi
 
+# --- Scratch-dir refcount: who else has $AIRLOCK_TMP mounted right now? ---
+# $AIRLOCK_TMP is ONE host dir shared by every box on this project, bind-mounted into
+# each of them. rmdir'ing it at exit unlinks it out from under a sibling's LIVE mount,
+# and that sibling is then stuck on an orphaned inode for the life of its container:
+# reads come back empty, writes fail ENOENT. It reads as "cache is empty", not as
+# "my mount is dead", so the surviving box cannot even detect it.
+# So every session registers a pidfile here and only the LAST one out removes the dir.
+# Registered for `shell` sessions too, unlike session.lock above: this counts who has
+# the dir MOUNTED, not who writes history, and a `shell` exit orphans a `claude` box
+# just as effectively.
+SESS_DIR="$STATE_DIR/sessions"
+mkdir -p "$SESS_DIR"
+SESS_FILE="$SESS_DIR/$$"
+: > "$SESS_FILE"
+
+# True when another live session holds this project's scratch dir. Entries whose pid is
+# gone are pruned as we go, so a SIGKILLed session (trap never ran) cannot pin the dir
+# forever. A recycled pid can cost us one leftover empty dir, which is the failure we
+# want on that side of the trade.
+_airlock_peer_sessions() {
+  local f pid rc=1
+  for f in "$SESS_DIR"/*; do
+    [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
+    pid="${f##*/}"
+    [ "$pid" = "$$" ] && continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
+    if kill -0 "$pid" 2>/dev/null; then rc=0; else rm -f "$f"; fi
+  done
+  return $rc
+}
+
 # Cleanup: drop the lock, and remove any empty artifact mountpoints we had to
 # create on the host (populated in the shadow-mount section below).
 ARTIFACT_CLEANUP=()
@@ -930,12 +961,18 @@ _airlock_cleanup() {
     # never delete an artifact dir the box actually populated.
     if [ -d "$p" ]; then rmdir "$p" 2>/dev/null || true; fi
   done
+  # Deregister BEFORE counting peers, so the last session out doesn't see itself.
+  rm -f "$SESS_FILE"
   # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
-  # so we don't litter /tmp with empties but never delete a kept artifact.
-  rmdir "$AIRLOCK_TMP" 2>/dev/null || true
-  # Only ever tidy up the tool's OWN default base. With a custom base this would be
-  # removing a directory the user made for their own reasons.
-  if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
+  # so we don't litter /tmp with empties but never delete a kept artifact. Skipped
+  # entirely while another box still has it mounted - see the refcount above.
+  if ! _airlock_peer_sessions; then
+    rmdir "$AIRLOCK_TMP" 2>/dev/null || true
+    # Only ever tidy up the tool's OWN default base. With a custom base this would be
+    # removing a directory the user made for their own reasons.
+    if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
+    rmdir "$SESS_DIR" 2>/dev/null || true
+  fi
 }
 trap _airlock_cleanup EXIT INT TERM
 
