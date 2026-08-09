@@ -1008,6 +1008,10 @@ _airlock_cleanup() {
     if [ "${_lpid:-}" = "$$" ]; then rm -f "$LOCK"; fi
   fi
   rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
+  # Our own per-process temp files. Unique names mean a hard kill in the create->mv window
+  # leaves one orphan PER PID forever, where the old fixed path left one reusable file -
+  # bounded litter became unbounded.
+  rm -f "$STATE_DIR"/*.tmp."$$" "$STATE_DIR"/dot-claude/*.tmp."$$" 2>/dev/null || true
   # Release the artifact stores we hold read-write, so the next session can take them -
   # but only where the file still records US. "Ours by definition" is exactly the
   # assumption the lock release above refuses to make, and it is wrong for the same
@@ -1123,10 +1127,16 @@ HISTSLUG="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g')"
 # --- First-run identity/prefs seed (once); then always enforce friction-skips ---
 if [ ! -s "$STATE_DIR/claude.json" ] || ! jq -e . "$STATE_DIR/claude.json" >/dev/null 2>&1; then
   if [ -f "$HOME/.claude.json" ] && command -v jq >/dev/null 2>&1; then
-    jq 'del(.projects, .mcpServers)' "$HOME/.claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null \
-      && mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json" \
-      || rm -f "$STATE_DIR/claude.json.tmp.$$" \
-      || echo '{}' > "$STATE_DIR/claude.json"
+    # The fifth of these, and the one that must not be an && || chain: `rm -f` always exits
+  # 0, so an `|| echo '{}'` fallback after it is unreachable. That fallback is the whole
+  # point of the block - $STATE_DIR/claude.json is bind-mounted into the box, and a
+  # missing source becomes a DIRECTORY in the container rather than a config file.
+  if jq 'del(.projects, .mcpServers)' "$HOME/.claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
+    mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json"
+  else
+    rm -f "$STATE_DIR/claude.json.tmp.$$"
+    echo '{}' > "$STATE_DIR/claude.json"
+  fi
   else
     echo '{}' > "$STATE_DIR/claude.json"
   fi
@@ -1134,7 +1144,10 @@ fi
 # Enforce (idempotent): onboarding done, a theme, and trust for the workspace
 # path. Must NOT gate on oauthAccount, which Claude writes itself at runtime.
 if command -v jq >/dev/null 2>&1; then
-  HOST_THEME="$(jq -r '.theme // "dark"' "$HOME/.claude.json" 2>/dev/null)"; [ "$HOST_THEME" = "null" ] && HOST_THEME="dark"
+  # `|| HOST_THEME=dark` matters: on a malformed ~/.claude.json jq exits 5, and under
+  # `set -e` that killed the launch with no message at all.
+  HOST_THEME="$(jq -r '.theme // "dark"' "$HOME/.claude.json" 2>/dev/null)" || HOST_THEME=dark
+  [ "${HOST_THEME:-}" = "null" ] && HOST_THEME="dark"
   if jq --arg theme "$HOST_THEME" --arg ws "$WORKSPACE" '
       .hasCompletedOnboarding = true
     | .theme = (.theme // $theme)
@@ -1231,11 +1244,17 @@ fi
 if [ "$AIRLOCK_SHELL" != 1 ]; then
   _airlock_peers_in "$SESS_DIR" "$$" || true      # prunes dead entries as a side effect
   if _airlock_history_peers "$SESS_DIR" "$$"; then
+    # Name only the peers that actually triggered this: a `shell` peer holds the mounts
+    # but writes no history, so listing it here would be a lie about why we stopped.
     _peers=""
     for _pf in "$SESS_DIR"/*; do
       [ -e "$_pf" ] || continue
-      [ "${_pf##*/}" = "$$" ] && continue
-      _peers="$_peers${_pf##*/} "
+      _pfp="${_pf##*/}"
+      [ "$_pfp" = "$$" ] && continue
+      case "$_pfp" in ''|*[!0-9]*) continue ;; esac
+      _pfk=""; read -r _ _pfk < "$_pf" 2>/dev/null || true
+      [ "${_pfk:-}" = shell ] && continue
+      _peers="$_peers$_pfp "
     done
     echo "claude-airlock: another session for this project is already open (pid(s): ${_peers% })." >&2
     echo "Two live sessions on one project can corrupt shared --resume history." >&2
