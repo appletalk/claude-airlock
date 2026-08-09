@@ -267,7 +267,10 @@ EOF
 @test "a garbage owner file is ignored rather than trusted" {
   proj="$(mkproj ownergarbage)"
   mkdir -p "$(state_dir "$proj")/artifacts"
-  printf 'not-a-pid whatever\n' > "$(state_dir "$proj")/artifacts/.venv.owner"
+  # `self` rather than a random string: /proc/self ALWAYS exists and always reports a
+  # live start time, so without the numeric guard this wedges the store read-only
+  # forever - self never dies. A payload with no /proc entry passes either way.
+  printf 'self whatever\n' > "$(state_dir "$proj")/artifacts/.venv.owner"
   _launch "$proj"
   run engine_args
   [[ "$output" == *"artifacts/.venv:$proj/.venv:rw"* ]]
@@ -331,4 +334,80 @@ EOF
   _launch "$proj" session release "$PEER_PID"
   [ ! -e "$proj/.venv" ]
   [ ! -d "$(state_dir "$proj")/artifacts-created" ]
+}
+
+# --- signals must END the run, not merely interrupt it --------------------------------
+
+@test "SIGTERM at a prompt ENDS the run instead of half-provisioning it" {
+  proj="$(mkproj sigterm)"
+  # The egress-approval prompt is the one that matters: its fall-through SKIPS the domain
+  # and the launch CONTINUES. In bash a signal handler runs and then the script carries on,
+  # so the old trap ran cleanup early - which does nothing, having mounted nothing - set the
+  # idempotence flag, and then let the run create .venv, the markers and the owner file,
+  # none of which were ever removed. The concurrent-session prompt does NOT reproduce this:
+  # an interrupted read there falls through to "Aborted." and exits anyway.
+  write_config "$proj" "egress = example.com"
+  # stdin must stay OPEN, not be /dev/null: the prompt would read EOF instantly and leave
+  # no window for the signal. `exec` makes the pid we signal the launcher itself.
+  ( cd "$proj" && exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+      TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
+      AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
+      ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
+      bash "$AIRLOCK" ) < <(sleep 30) >/dev/null 2>&1 &
+  LPID=$!
+  for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
+  sleep 0.5
+  kill -TERM "$LPID" 2>/dev/null
+  wait "$LPID" 2>/dev/null || true
+  sleep 0.3
+  # The signal must END the run: no box launched, and nothing provisioned or left behind.
+  run engine_args
+  [ -z "$output" ]
+  [ ! -e "$proj/.venv" ]
+  [ ! -d "$(state_dir "$proj")/artifacts-created" ]
+  run bash -c 'ls "$1"/artifacts/*.owner 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
+  [ "$output" -eq 0 ]
+  # The dir itself may remain - it is only rmdir'd in the last-one-out branch, which needs
+  # a mount. What must not remain is this session's pidfile.
+  run bash -c 'ls -A "$1" 2>/dev/null | wc -l' _ "$(sessions_dir "$proj")"
+  [ "$output" -eq 0 ]
+}
+
+@test "a session.lock reading 'self' does not prompt forever" {
+  proj="$(mkproj lockself)"
+  mkdir -p "$(state_dir "$proj")"
+  # /proc/self always exists and always reports a live start time, so without the numeric
+  # guard this prompts on every launch - and with non-tty stdin the prompt reads EOF and
+  # aborts the run outright. Same shape as the .owner guard.
+  # THREE fields, i.e. the legacy shape: with no start time recorded the reader falls back
+  # to bare liveness, and that is the only path where the numeric guard is load-bearing.
+  # A 4-field lock is caught by the start-time mismatch regardless.
+  printf 'self airlock 0\n' > "$(state_dir "$proj")/session.lock"
+  run _launch "$proj"
+  [ "$status" -eq 0 ]
+}
+
+@test "session register works with no container engine on PATH" {
+  proj="$(mkproj noengine)"
+  # The wrapper calls this on every host session, including on machines that only source
+  # the integration for the lock warning. Below the engine check it failed, so every such
+  # session printed a warning about a risk that cannot exist without a box.
+  cd "$proj" || return 1
+  run env -i PATH="/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+      AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" bash "$AIRLOCK" session register 4242
+  [ "$status" -eq 0 ]
+  [ -e "$(sessions_dir "$proj")/4242" ]
+}
+
+@test "the wrapper takes no lock when the scratch dir cannot be created" {
+  proj="$(mkproj wrapnolock)"
+  touch "$BATS_TEST_TMPDIR/notadir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$STUBBIN/claude"; chmod +x "$STUBBIN/claude"
+  # That failure path returns BEFORE the always-block that would release anything, so a
+  # lock taken ahead of it survives - recording this interactive shell, which lives for
+  # days with a matching start time and is therefore unprunable.
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" TERM=xterm \
+    AIRLOCK_TMP_BASE="$BATS_TEST_TMPDIR/notadir/sub" \
+    zsh -c "source '$ZSH_LIB' >/dev/null 2>&1; cd '$proj' || exit 1; claude" </dev/null || true
+  [ ! -e "$(state_dir "$proj")/session.lock" ]
 }
