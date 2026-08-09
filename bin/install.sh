@@ -44,6 +44,30 @@ if [ ! -f "$CONFIG_DIR/config" ]; then
   echo "    wrote default config -> $CONFIG_DIR/config"
 fi
 
+# `airlock paste` needs ONE project to write clipboard images into — see README
+# ("Pasting images into a box"). There is no safe default: it is typed from whatever
+# terminal is free, so keying it off $PWD would silently write pastes into a directory
+# the running box never mounts. Ask once, here, rather than failing at first use.
+# Skipped when stdin is not a TTY, so CI and scripted installs stay non-interactive.
+if [ -t 0 ] && ! grep -q '^[[:space:]]*AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
+  echo
+  echo "==> Which project should 'airlock paste' write clipboard images into?"
+  echo "    They land in that project's \$AIRLOCK_TMP/pastes/, where its box can read them."
+  echo "    Leave blank to skip — paste will then tell you how to set it."
+  printf '    project path: '
+  read -r PASTE_PROJECT || PASTE_PROJECT=""
+  PASTE_PROJECT="${PASTE_PROJECT/#\~/$HOME}"
+  if [ -n "$PASTE_PROJECT" ] && [ ! -d "$PASTE_PROJECT" ]; then
+    echo "    not a directory: $PASTE_PROJECT — skipping (set it in the config later)." >&2
+    PASTE_PROJECT=""
+  fi
+  if [ -n "$PASTE_PROJECT" ]; then
+    printf '\n# Project that "airlock paste" writes clipboard images into (set at install).\nAIRLOCK_PASTE_PROJECT=%q\n' \
+      "$PASTE_PROJECT" >> "$CONFIG_DIR/config"
+    echo "    set AIRLOCK_PASTE_PROJECT=$PASTE_PROJECT"
+  fi
+fi
+
 # Claude Code must be CURRENT after every install run, not whatever version the
 # image happened to cache. The install layer sits at the end of the base image
 # with no changing inputs of its own, so a plain rebuild always hits the cache.

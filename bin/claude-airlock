@@ -51,6 +51,13 @@ CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
+# Base directory for per-project scratch ($AIRLOCK_TMP). Env-only, not a config knob:
+# the zsh `claude` wrapper computes the same path independently, so it must come from the
+# environment for both to agree. Host and box always agree regardless, because the
+# launcher resolves this once and injects the result into the container. Exists so the
+# test suite can run hermetically, and for hosts where /tmp is unsuitable.
+AIRLOCK_TMP_BASE="${AIRLOCK_TMP_BASE:-/tmp/airlock}"
+
 case "$AIRLOCK_ENGINE" in
   podman|docker) ;;
   *) echo "claude-airlock: AIRLOCK_ENGINE must be 'podman' or 'docker' (got '$AIRLOCK_ENGINE')." >&2; exit 1 ;;
@@ -388,9 +395,152 @@ fi
 # compute the slug — this is the single source of truth for the path.
 if [ "${1:-}" = "tmp" ]; then
   _tslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
-  _tdir="/tmp/airlock/$_tslug"
+  _tdir="$AIRLOCK_TMP_BASE/$_tslug"
   mkdir -p "$_tdir" && chmod 700 "$_tdir"
   printf '%s\n' "$_tdir"
+  exit 0
+fi
+
+# `airlock paste` saves the host clipboard IMAGE into a project's scratch dir as a
+# timestamped PNG and prints the path.
+#
+# The box has no clipboard and cannot be given one safely. Claude Code's paste path shells
+# out to xclip/wl-paste, and no clipboard reaches a container without mounting the host
+# X11/Wayland socket — which would hand the box a continuous read of everything you copy
+# (passwords included) and, on X11, a way to inject input into other apps. So the image
+# crosses as a FILE, at a path both sides already agree on, and you paste the path. The
+# agent opens the file; nothing reads your clipboard but you.
+#
+# The target project is REQUIRED and comes from AIRLOCK_PASTE_PROJECT (host config), not
+# from $PWD: you type this in whatever terminal is free while the agent holds the other
+# one, and a $PWD default would silently write pastes into a directory that box never
+# mounts.
+if [ "${1:-}" = "paste" ]; then
+  shift
+  _pcopy=0 _plist=0 _pn=10 _pproj="${AIRLOCK_PASTE_PROJECT:-}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --copy)    _pcopy=1 ;;
+      --project) _pproj="${2:?usage: airlock paste --project DIR}"; shift ;;
+      list)      _plist=1; case "${2:-}" in ''|*[!0-9]*) ;; *) _pn="$2"; shift ;; esac ;;
+      *) echo "usage: airlock paste [--copy] [--project DIR]  |  airlock paste list [N]" >&2; exit 1 ;;
+    esac
+    shift
+  done
+
+  if [ -z "$_pproj" ]; then
+    echo "claude-airlock: AIRLOCK_PASTE_PROJECT is not set." >&2
+    echo "  Pastes go to ONE project's scratch dir; there is no sensible default." >&2
+    echo "  Set it in $CONFIG_FILE, e.g.:" >&2
+    echo "      AIRLOCK_PASTE_PROJECT=\"\$HOME/development/myproject\"" >&2
+    echo "  or override for one call:  airlock paste --project /path/to/project" >&2
+    exit 1
+  fi
+  [ -d "$_pproj" ] || { echo "claude-airlock: paste project not found: $_pproj" >&2; exit 1; }
+
+  # Same slug the launcher and `airlock tmp` use — this stays the single source of truth.
+  _pslug="$(printf '%s' "$(cd "$_pproj" && pwd)" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _pdir="$AIRLOCK_TMP_BASE/$_pslug/pastes"
+  mkdir -p "$_pdir" && chmod 700 "$AIRLOCK_TMP_BASE/$_pslug"
+
+  # Names are `YYYYMMDD-HHMMSS[-N].png`, so the shell's lexical glob order IS chronological
+  # order — no `ls -t` (SC2012) and no GNU-only `find -printf` needed.
+  if [ "$_plist" = 1 ]; then
+    _pfiles=("$_pdir"/*.png)
+    [ -e "${_pfiles[0]}" ] || exit 0
+    _pcount=${#_pfiles[@]}
+    _pstart=$(( _pcount > _pn ? _pcount - _pn : 0 ))
+    for (( _pj=_pcount-1; _pj>=_pstart; _pj-- )); do printf '%s\n' "${_pfiles[_pj]}"; done
+    exit 0
+  fi
+
+  # Clipboard backend by SESSION, not by which binary happens to exist: under XWayland
+  # both can be installed and the native one is the correct reader.
+  _pclip=""
+  if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-paste >/dev/null 2>&1; then
+    _pclip=wayland
+  elif [ -n "${DISPLAY:-}" ] && command -v xclip >/dev/null 2>&1; then
+    _pclip=x11
+  elif [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    echo "claude-airlock: Wayland session but wl-paste is missing (install wl-clipboard)." >&2; exit 1
+  elif [ -n "${DISPLAY:-}" ]; then
+    echo "claude-airlock: X11 session but xclip is missing (install xclip)." >&2; exit 1
+  else
+    echo "claude-airlock: no graphical session (\$WAYLAND_DISPLAY and \$DISPLAY are both unset)." >&2
+    echo "  There is no clipboard to read here. Copy the file into $_pdir instead." >&2
+    exit 1
+  fi
+
+  _paste_types() {
+    case "$_pclip" in
+      wayland) wl-paste --list-types 2>/dev/null ;;
+      x11)     xclip -selection clipboard -t TARGETS -o 2>/dev/null ;;
+    esac
+  }
+  _paste_read() {
+    case "$_pclip" in
+      wayland) wl-paste --type "$1" 2>/dev/null ;;
+      x11)     xclip -selection clipboard -t "$1" -o 2>/dev/null ;;
+    esac
+  }
+
+  _ptmp="$(mktemp "${TMPDIR:-/tmp}/airlock-paste.XXXXXX")" || exit 1
+  trap 'rm -f "$_ptmp"' EXIT
+
+  # PNG if the source offers it (most Linux screenshot tools do). WSLg offers BMP only,
+  # which is why the conversion branch below is not optional on that platform.
+  _ptypes="$(_paste_types)"
+  case "$_ptypes" in
+    *image/png*) _paste_read image/png > "$_ptmp" ;;
+    *image/bmp*) _paste_read image/bmp > "$_ptmp" ;;
+    *image/*)    _paste_read "$(printf '%s\n' "$_ptypes" | grep -m1 '^image/')" > "$_ptmp" ;;
+    *) echo "claude-airlock: no image on the clipboard (offered: ${_ptypes:-nothing})" >&2; exit 1 ;;
+  esac
+  [ -s "$_ptmp" ] || { echo "claude-airlock: the clipboard read produced no data." >&2; exit 1; }
+
+  _pstamp="$(date +%Y%m%d-%H%M%S)"
+  _pout="$_pdir/$_pstamp.png"
+  _pi=2
+  while [ -e "$_pout" ]; do _pout="$_pdir/$_pstamp-$_pi.png"; _pi=$((_pi + 1)); done
+
+  # Any failure past this point REMOVES the output: a missing file must mean "the grab
+  # failed", never "you are looking at an older paste".
+  _pfail() { rm -f "$_pout"; echo "claude-airlock: $*" >&2; exit 1; }
+
+  # The Claude API accepts PNG/JPEG/GIF/WebP - BMP has to be converted or it is unreadable.
+  if [ "$(head -c 4 "$_ptmp" | od -An -tx1 | tr -d ' \n')" = "89504e47" ]; then
+    cp "$_ptmp" "$_pout" || _pfail "could not write $_pout"
+  elif command -v magick >/dev/null 2>&1; then
+    magick "$_ptmp" png:"$_pout" || _pfail "magick could not convert the clipboard image"
+  elif command -v convert >/dev/null 2>&1; then
+    convert "$_ptmp" png:"$_pout" || _pfail "convert could not convert the clipboard image"
+  elif command -v ffmpeg >/dev/null 2>&1; then
+    ffmpeg -y -loglevel error -i "$_ptmp" "$_pout" || _pfail "ffmpeg could not convert the clipboard image"
+  elif python3 -c 'import PIL' 2>/dev/null; then
+    python3 -c 'import sys
+from PIL import Image
+Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pout" || _pfail "Pillow could not convert the clipboard image"
+  else
+    _pfail "the clipboard offered [$(printf '%s' "$_ptypes" | tr '\n' ' ')] and no PNG converter is installed (python3-pil, imagemagick or ffmpeg)"
+  fi
+  [ -s "$_pout" ] || _pfail "conversion produced an empty file"
+
+  # Retain the newest 50 (lexical order = chronological, as above).
+  _pfiles=("$_pdir"/*.png)
+  if [ -e "${_pfiles[0]}" ] && [ "${#_pfiles[@]}" -gt 50 ]; then
+    rm -f "${_pfiles[@]:0:$(( ${#_pfiles[@]} - 50 ))}"
+  fi
+
+  if [ "$_pcopy" = 1 ]; then
+    case "$_pclip" in
+      wayland) command -v wl-copy >/dev/null 2>&1 && printf '%s' "$_pout" | wl-copy \
+                 || echo "claude-airlock: --copy needs wl-copy (wl-clipboard); path printed only." >&2 ;;
+      x11)     printf '%s' "$_pout" | xclip -selection clipboard -i \
+                 || echo "claude-airlock: --copy failed; path printed only." >&2 ;;
+    esac
+  fi
+
+  printf '%s\n' "$_pout"
   exit 0
 fi
 
@@ -543,7 +693,7 @@ fi
 # leaks between projects. It lives on the host's tmpfs: survives session exit, cleared
 # on reboot. An inter-session cache, not durable storage; bare /tmp stays ephemeral so
 # build/test temp files don't eat host RAM.
-AIRLOCK_TMP="/tmp/airlock/$slug"
+AIRLOCK_TMP="$AIRLOCK_TMP_BASE/$slug"
 mkdir -p "$AIRLOCK_TMP" && chmod 700 "$AIRLOCK_TMP"
 
 # Per-project egress posture (host-controlled, tamper-proof — the mode file lives in
@@ -716,7 +866,7 @@ _airlock_cleanup() {
   # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
   # so we don't litter /tmp with empties but never delete a kept artifact.
   rmdir "$AIRLOCK_TMP" 2>/dev/null || true
-  rmdir /tmp/airlock 2>/dev/null || true
+  rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true
 }
 trap _airlock_cleanup EXIT INT TERM
 

@@ -30,6 +30,20 @@ AIRLOCK_IMAGE=claude-airlock:dev
 # approved once on the host. Keep this in your host config, not in project files.
 AIRLOCK_SHARE_BASE="$HOME/development"
 
+# Project that `airlock paste` writes clipboard images into. REQUIRED to use paste —
+# there is no default and none can be inferred.
+#
+# A box cannot read your clipboard (Claude Code shells out to xclip/wl-paste, and giving
+# a container the X11/Wayland socket would let it read everything you copy). `airlock
+# paste` bridges that as a FILE instead: it saves the clipboard image into this project's
+# $AIRLOCK_TMP/pastes/ and prints the path, which you paste as text — the agent opens the
+# file. `bin/install.sh` offers to set this for you.
+#
+# It is NOT keyed off $PWD on purpose: you run paste from whatever terminal is free while
+# the agent holds the other one, and a $PWD default would quietly write into a directory
+# that box never mounts. Override for one call with `airlock paste --project DIR`.
+# AIRLOCK_PASTE_PROJECT="$HOME/development/myproject"
+
 # Broad read-only roots mounted at /roots/<name> for cross-project inspection.
 # EMPTY by default (no other project is visible unless a project `share =`s it and
 # you approve it). Only set this if you deliberately want every listed tree readable
