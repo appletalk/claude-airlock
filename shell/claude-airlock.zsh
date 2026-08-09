@@ -5,6 +5,8 @@
 #
 # Provides:
 #   airlock          run Claude Code inside the sandbox for the current project
+#   alpaste          put the clipboard image where a box can read it (short for
+#                    `airlock paste --copy`; `alpaste list [N]` shows recent ones)
 #   claude           your normal host Claude, plus a cross-session lock warning
 #   command claude   always bypasses the guard to reach the raw binary
 #
@@ -13,14 +15,27 @@
 # there is a single source of truth.
 
 # Resolve the repo's launcher relative to THIS file, so `airlock` works whether
-# or not bin/claude-airlock is on PATH.
-_airlock_launcher="${${(%):-%x}:A:h:h}/bin/claude-airlock"
-if [[ -x "$_airlock_launcher" ]]; then
-  alias airlock="$_airlock_launcher"
+# or not bin/claude-airlock is on PATH. Kept (not unset) because `alpaste` needs it:
+# an alias would not expand inside a function body defined here.
+_AIRLOCK_LAUNCHER="${${(%):-%x}:A:h:h}/bin/claude-airlock"
+if [[ -x "$_AIRLOCK_LAUNCHER" ]]; then
+  alias airlock="$_AIRLOCK_LAUNCHER"
 else
-  alias airlock='claude-airlock'   # fall back to PATH (installed by bin/install.sh)
+  _AIRLOCK_LAUNCHER='claude-airlock'   # fall back to PATH (installed by bin/install.sh)
+  alias airlock='claude-airlock'
 fi
-unset _airlock_launcher
+
+# Short name for the clipboard bridge, with --copy on by default: after it runs, the
+# PATH is on your clipboard, so Ctrl+V into the agent's prompt pastes text and the agent
+# opens the file. `alpaste list [N]` lists recent pastes and must NOT copy anything.
+alpaste() {
+  emulate -L zsh
+  if [[ "${1:-}" == list ]]; then
+    "$_AIRLOCK_LAUNCHER" paste "$@"
+  else
+    "$_AIRLOCK_LAUNCHER" paste --copy "$@"
+  fi
+}
 
 # Lock-aware host Claude (guard only — runs your normal claude, no sandbox).
 # Warns if an airlock (or another host) session is already live for this project,
@@ -46,12 +61,14 @@ claude() {
   # Same per-project scratch dir the box gets, at the same path, exported the same way.
   # Sessions are shared host<->box, so both sides must agree on where persistent scratch
   # lives — otherwise host Claude writes to bare /tmp and the box can't see it.
-  export AIRLOCK_TMP="/tmp/airlock/$slug"
+  # AIRLOCK_TMP_BASE mirrors the launcher's own default; both read it from the
+  # environment so an override cannot make the two sides disagree.
+  export AIRLOCK_TMP="${AIRLOCK_TMP_BASE:-/tmp/airlock}/$slug"
   mkdir -p "$AIRLOCK_TMP" && chmod 700 "$AIRLOCK_TMP"
   command claude "$@"
   rc=$?
   rm -f "$lock"
   rmdir "$AIRLOCK_TMP" 2>/dev/null   # only if the session left it empty
-  rmdir /tmp/airlock 2>/dev/null
+  rmdir "${AIRLOCK_TMP_BASE:-/tmp/airlock}" 2>/dev/null
   return $rc
 }

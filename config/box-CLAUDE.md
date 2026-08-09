@@ -29,6 +29,16 @@ the bottom of this file apply too):
   storage**. Artifacts that belong to the project go in the project directory (at a
   gitignored path if they shouldn't be committed); durable knowledge goes in memory.
 
+- **The human cannot paste an image at you; they run `airlock paste`.** You have no
+  clipboard — reading one needs `xclip`/`wl-paste` talking to a host display socket the
+  box deliberately does not get. Instead they run `airlock paste` (or `alpaste`) on the
+  host, which drops a timestamped PNG in **`$AIRLOCK_TMP/pastes/`** and puts the *path* on
+  their clipboard; what arrives in your prompt is text, and you open the file. When they
+  say **"check the latest paste"** (or "the latest 3"), list that directory newest-first
+  and read the top N. Filenames are `YYYYMMDD-HHMMSS.png` in **host local time**, which
+  can be hours off the box clock — judge freshness by mtime, never by comparing a filename
+  to `date`. Never suggest Ctrl+V for an image; it cannot work and never will.
+
 - **A missing file is a missing precondition, not an empty result.** If an input you
   depend on isn't there — an index, a cache, a prior run's output — do **not** silently
   proceed as though it were empty. Treating an absent dedup/index file as "nothing to

@@ -197,8 +197,12 @@ airlock egress github pypi      an explicit subset (replaces)
 airlock egress add|rm <groups>  edit the group set incrementally
 
 airlock tmp                     print (and create) this project's $AIRLOCK_TMP scratch dir
+airlock paste                   save the clipboard IMAGE where a box can read it
+airlock paste --copy            ...and put the path on the clipboard (what `alpaste` does)
+airlock paste list [N]          list recent pastes, newest first
 airlock doctor                  verify this host can actually contain a box (live test)
 
+alpaste                         zsh shortcut for `airlock paste --copy`
 command claude                  raw host Claude (bypasses the airlock guard)
 ```
 
@@ -268,6 +272,50 @@ on where scratch lives.
 Claude only *follows* the convention if told to. The box is briefed automatically
 (`config/box-CLAUDE.md` is copied in on every launch). For **host** Claude, paste
 [`config/host-CLAUDE.md`](config/host-CLAUDE.md) into your global `~/.claude/CLAUDE.md`.
+
+## Pasting images into a box — `airlock paste`
+
+**Ctrl+V of an image does not work in a box, and deliberately never will.** Claude Code
+reads the clipboard by shelling out to `xclip` / `wl-paste`, and no clipboard crosses into
+a container unless you mount the host's X11 or Wayland socket. That mount is the thing
+this project exists to avoid: it would let the box read *everything* you copy — passwords
+included, continuously — and on X11 also inject synthetic input into your other windows.
+Screenshots are not worth a hole of that shape.
+
+So the image crosses as a **file**, at a path both sides already agree on:
+
+```
+airlock paste            # saves the clipboard image, prints the path
+alpaste                  # zsh: same, and puts the path on your clipboard
+```
+
+Then Ctrl+V into the agent's prompt. You are pasting **text** — the agent opens the file
+itself. Or say *"check the latest paste"* and let it list the directory.
+
+Pastes land in `$AIRLOCK_TMP/pastes/` as `YYYYMMDD-HHMMSS.png` (host local time), newest
+50 retained, cleared with the rest of the scratch dir on reboot.
+
+**Setup.** `bin/install.sh` asks which project pastes belong to and writes it to your host
+config; set it by hand if you skipped the prompt:
+
+```
+AIRLOCK_PASTE_PROJECT="$HOME/development/myproject"
+```
+
+It is **required, with no default, and is not `$PWD`.** You run `paste` from whatever
+terminal is free while the agent holds the other one, so a `$PWD` default would quietly
+write into a directory that box never mounts — you would hand the agent a path it cannot
+open. Point it at one project and override per call with `--project DIR`.
+
+**Requirements.** `wl-clipboard` on Wayland or `xclip` on X11 (the session decides, so
+XWayland picks the native reader). A PNG on the clipboard is used as-is, which is the
+normal case on Linux desktops. WSLg offers **BMP only**, and the Claude API accepts
+PNG/JPEG/GIF/WebP — so there, one of `python3-pil`, `imagemagick` or `ffmpeg` is needed to
+convert. Without one, `paste` fails and writes nothing rather than saving an unreadable
+file.
+
+**Every failure removes the output file.** A missing paste always means *the grab failed*,
+never *here is an older image you are about to mistake for the new one*.
 
 ## Security model
 
