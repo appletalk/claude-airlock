@@ -205,6 +205,40 @@ _airlock_peers_in() {
   return $rc
 }
 
+# Identity of a directory, so a recorded path cannot become a standing licence to delete
+# whatever later occupies it. Inode catches delete-and-recreate; ctime catches a dir that
+# was populated and then emptied. Empty when the path is gone.
+_airlock_dir_id() { stat -c '%i:%Z' "$1" 2>/dev/null || true; }
+
+# Remove the artifact mountpoints THIS PROJECT created, given its state dir. Shared by
+# the launcher's cleanup and by `session release`, because either can be the last one
+# out: a host session that outlives every box must still tidy up what those boxes made,
+# and when it did not, an empty .venv was left behind forever - its existence then stops
+# any future session from re-registering it.
+# Callers must have established that no peers remain before calling this.
+_airlock_release_artifacts() {
+  local dir="$1" m p want
+  for m in "$dir"/artifacts-created/*; do
+    [ -e "$m" ] || continue
+    # One redirection, two lines: path then identity. Separate `read < "$m"` calls would
+    # each reopen the file and both return line 1.
+    p=""; want=""
+    { IFS= read -r p; IFS= read -r want; } < "$m" 2>/dev/null || true
+    if [ -z "${p:-}" ] || [ ! -e "$p" ]; then rm -f "$m"; continue; fi
+    # The directory must still be the one we created. Without this the marker authorises
+    # deleting that path forever: a user who empties .venv to rebuild it would have the
+    # directory removed under them by whichever session happens to be last out.
+    if [ -n "${want:-}" ] && [ "$want" != "$(_airlock_dir_id "$p")" ]; then continue; fi
+    # rmdir, NOT rm -rf, and the peer check does not make that safe on its own. The two
+    # guard different writers: the peer check covers a sibling box (whose writes land in
+    # $store, so the host view of this path is empty), while rmdir's refusal covers the
+    # HOST populating it during the session - the user's other terminal running
+    # `python -m venv .venv`, an LSP, direnv, uv, a host-side build. Both are required.
+    if rmdir "$p" 2>/dev/null; then rm -f "$m"; fi
+  done
+  rmdir "$dir/artifacts-created" 2>/dev/null || true
+}
+
 # `airlock session register|release <pid>` — the host `claude` wrapper's hook into the
 # refcount. A raw host session mounts nothing, but it USES $AIRLOCK_TMP under the same
 # name, so without this it is invisible to every box's cleanup and its scratch dir gets
@@ -225,6 +259,10 @@ if [ "${1:-}" = "session" ]; then
       rm -f "$_xdir/$_xpid"
       # Same last-one-out rule the launcher follows: only tidy when nobody else holds it.
       if ! _airlock_peers_in "$_xdir" "$_xpid"; then
+        # A host session can outlive every box, and then IT is the last one out - so it
+        # owes the same artifact cleanup the launcher does. Skipping this left an empty
+        # .venv behind permanently (measured against real containers).
+        _airlock_release_artifacts "$HOME/.config/claude-airlock/state/$_xslug"
         rmdir "$_xtmp" 2>/dev/null || true
         if [ "${AIRLOCK_TMP_BASE:-/tmp/airlock}" = /tmp/airlock ]; then
           rmdir /tmp/airlock 2>/dev/null || true
@@ -914,10 +952,6 @@ LOCK_HELD=0
 MOUNTED=0
 STORE_OWNED=()   # artifact stores this session holds read-write; released on exit
 
-# Identity of a directory, so a recorded path cannot become a standing licence to delete
-# whatever later occupies it. Inode catches delete-and-recreate; ctime catches a dir that
-# was populated and then emptied. Empty when the path is gone.
-_airlock_dir_id() { stat -c '%i:%Z' "$1" 2>/dev/null || true; }
 
 # Cleanup runs from here on. Installed immediately after registration rather than after
 # the prompts: the egress-approval and concurrent-session reads sit between, and
@@ -965,30 +999,7 @@ _airlock_cleanup() {
   # that box on an orphaned inode; removing a mount TARGET (the artifact dirs) is worse
   # still - vfs_rmdir calls detach_mounts() and tears the sibling's mount down outright.
   if _airlock_peer_sessions; then return 0; fi
-  local m p want
-  # Artifact mountpoints WE created. The record is per project and on disk, not a shell
-  # array: only the session that created the path knows it created it, and that session
-  # is often not the last one out - an array leaks the directory permanently, because an
-  # existing (empty) .venv also stops every future session from registering it.
-  for m in "$STATE_DIR"/artifacts-created/*; do
-    [ -e "$m" ] || continue
-    # One redirection, two lines: path then identity. Separate `read < "$m"` calls would
-    # each reopen the file and both return line 1.
-    p=""; want=""
-    { IFS= read -r p; IFS= read -r want; } < "$m" 2>/dev/null || true
-    if [ -z "${p:-}" ] || [ ! -e "$p" ]; then rm -f "$m"; continue; fi
-    # The directory must still be the one we created. Without this the marker authorises
-    # deleting that path forever: a user who empties .venv to rebuild it would have the
-    # directory removed under them by whichever session happens to be last out.
-    if [ -n "${want:-}" ] && [ "$want" != "$(_airlock_dir_id "$p")" ]; then continue; fi
-    # rmdir, NOT rm -rf, and the peer check does not make that safe on its own. The two
-    # guard different writers: the peer check covers a sibling box (whose writes land in
-    # $store, so the host view of this path is empty), while rmdir's refusal covers the
-    # HOST populating it during the session - the user's other terminal running
-    # `python -m venv .venv`, an LSP, direnv, uv, a host-side build. Both are required.
-    if rmdir "$p" 2>/dev/null; then rm -f "$m"; fi
-  done
-  rmdir "$STATE_DIR/artifacts-created" 2>/dev/null || true
+  _airlock_release_artifacts "$STATE_DIR"
   # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
   # so we don't litter /tmp with empties but never delete a kept artifact.
   rmdir "$AIRLOCK_TMP" 2>/dev/null || true
