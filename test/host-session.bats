@@ -53,17 +53,18 @@ midrun() { cat "$BATS_TEST_TMPDIR/midrun" 2>/dev/null; }
 @test "session register writes a pidfile carrying the process start time" {
   proj="$(mkproj reg)"
   sleep 60 & PEER_PID=$!
-  _launch "$proj" session register "$PEER_PID"
+  _launch "$proj" session register "$PEER_PID" shell
   [ -e "$(sessions_dir "$proj")/$PEER_PID" ]
-  run cat "$(sessions_dir "$proj")/$PEER_PID"
-  [ "$output" = "$(proc_start "$PEER_PID")" ]
+  # "<starttime> <kind>"
+  run bash -c 'read -r st kind _ < "$1"; echo "$st|$kind"' _ "$(sessions_dir "$proj")/$PEER_PID"
+  [ "$output" = "$(proc_start "$PEER_PID")|shell" ]
 }
 
 @test "session release keeps the scratch dir while another session is live" {
   proj="$(mkproj rel)"
   sleep 60 & PEER_PID=$!
   mkdir -p "$(scratch_dir "$proj")"
-  _launch "$proj" session register "$PEER_PID"
+  _launch "$proj" session register "$PEER_PID" shell
   _launch "$proj" session release 99999          # some other session leaving
   [ -d "$(scratch_dir "$proj")" ]
 }
@@ -90,7 +91,7 @@ midrun() { cat "$BATS_TEST_TMPDIR/midrun" 2>/dev/null; }
 @test "a registered HOST session stops a box from removing the shared dirs" {
   proj="$(mkproj hostpeer)"
   sleep 60 & PEER_PID=$!
-  _launch "$proj" session register "$PEER_PID"   # stands in for a live host claude
+  _launch "$proj" session register "$PEER_PID" shell   # stands in for a live host claude
   mkdir -p "$(scratch_dir "$proj")"
   ino_before="$(stat -c %i "$(scratch_dir "$proj")")"
   _launch "$proj"                                 # a full box launch, which then exits
@@ -122,7 +123,7 @@ midrun() { cat "$BATS_TEST_TMPDIR/midrun" 2>/dev/null; }
 @test "the host wrapper does NOT remove a scratch dir another session still holds" {
   proj="$(mkproj hostkeep)"
   sleep 60 & PEER_PID=$!
-  _launch "$proj" session register "$PEER_PID"
+  _launch "$proj" session register "$PEER_PID" shell
   mkdir -p "$(scratch_dir "$proj")"
   ino_before="$(stat -c %i "$(scratch_dir "$proj")")"
   _host_claude "$proj"
@@ -324,7 +325,7 @@ EOF
 @test "a HOST session that is last out cleans up what a box created" {
   proj="$(mkproj hostlastartifact)"
   sleep 60 & PEER_PID=$!
-  _launch "$proj" session register "$PEER_PID"   # a live host session
+  _launch "$proj" session register "$PEER_PID" shell   # a live host session
   _launch "$proj"                                 # a box runs, creates .venv, exits
   [ -d "$proj/.venv" ]                            # kept: the host session still holds it
   # The host session is now the last one out, so IT owes the artifact cleanup. Skipping
@@ -410,4 +411,89 @@ EOF
     AIRLOCK_TMP_BASE="$BATS_TEST_TMPDIR/notadir/sub" \
     zsh -c "source '$ZSH_LIB' >/dev/null 2>&1; cd '$proj' || exit 1; claude" </dev/null || true
   [ ! -e "$(state_dir "$proj")/session.lock" ]
+}
+
+# --- the concurrent-session warning comes from the registry (S1/S2) -------------------
+
+@test "a live HOST session triggers the concurrent-session warning" {
+  proj="$(mkproj warnhost)"
+  sleep 60 & PEER_PID=$!
+  # S1: a raw host claude took the single-slot lock but was otherwise invisible. It now
+  # registers, so the warning sees it like any other participant.
+  _launch "$proj" session register "$PEER_PID" host
+  run _launch "$proj"
+  [ "$status" -ne 0 ]                       # stdin is /dev/null, so the prompt aborts
+  [[ "$output" == *"already open"* ]]
+  [[ "$output" == *"$PEER_PID"* ]]
+}
+
+@test "an airlock shell peer does NOT trigger the history warning" {
+  proj="$(mkproj warnshell)"
+  sleep 60 & PEER_PID=$!
+  # It holds the same mounts, but it runs bash - it cannot corrupt --resume history.
+  # Conflating the two populations is what made the registry the wrong source at first.
+  _launch "$proj" session register "$PEER_PID" shell
+  run _launch "$proj"
+  [ "$status" -eq 0 ]
+}
+
+@test "the warning names EVERY live peer, not just one" {
+  proj="$(mkproj warnmulti)"
+  sleep 60 & P1=$!
+  sleep 60 & P2=$!
+  _launch "$proj" session register "$P1" host
+  _launch "$proj" session register "$P2" airlock
+  # S2: the single-slot lock could only ever describe one peer, and a second session
+  # overwrote the first's record entirely.
+  run _launch "$proj"
+  [[ "$output" == *"$P1"* ]]
+  [[ "$output" == *"$P2"* ]]
+  kill "$P1" "$P2" 2>/dev/null || true
+}
+
+@test "a dead peer does not trigger the warning" {
+  proj="$(mkproj warndead)"
+  sleep 60 & dead=$!
+  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  _launch "$proj" session register "$dead" host
+  run _launch "$proj"
+  [ "$status" -eq 0 ]
+}
+
+@test "SIGQUIT also ends the run rather than provisioning through it" {
+  proj="$(mkproj sigquit)"
+  # QUIT and PIPE take bash's run-the-EXIT-trap-then-re-raise path just like HUP, so they
+  # need the same treatment; the commit's own reasoning implies it.
+  write_config "$proj" "egress = example.com"
+  ( cd "$proj" && exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+      TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
+      AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
+      ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
+      bash "$AIRLOCK" ) < <(sleep 30) >/dev/null 2>&1 &
+  LPID=$!
+  for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
+  sleep 0.5
+  kill -QUIT "$LPID" 2>/dev/null
+  wait "$LPID" 2>/dev/null || true
+  sleep 0.3
+  run engine_args
+  [ -z "$output" ]
+  [ ! -e "$proj/.venv" ]
+}
+
+@test "two launches starting together do not collide on a shared temp path" {
+  proj="$(mkproj concurrent)"
+  # Every jq rewrite used a FIXED $FILE.tmp, so two launches on one project wrote and
+  # mv'd the same path; a measured 38 of 80 simultaneous launches died on it. `shell`
+  # mode because it takes no lock and raises no history warning - this is about the
+  # temp paths, not the concurrent-session guard.
+  _launch "$proj" shell >/dev/null 2>&1 & A=$!
+  _launch "$proj" shell >/dev/null 2>&1 & B=$!
+  wait "$A"; rca=$?
+  wait "$B"; rcb=$?
+  [ "$rca" -eq 0 ]
+  [ "$rcb" -eq 0 ]
+  # and neither left a temp file behind
+  run bash -c 'ls "$1"/*.tmp* "$1"/dot-claude/*.tmp* 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
+  [ "$output" -eq 0 ]
 }
