@@ -25,10 +25,18 @@ help: ## Show this help
 install: ## install the launcher + build base/dev images (see bin/install.sh)
 	@bash bin/install.sh
 
-lint: ## shellcheck the launcher + firewall + helper scripts
+lint: ## shellcheck the launcher + firewall + helper scripts (+ zsh -n on the integration)
 	@command -v "$(SHELLCHECK)" >/dev/null 2>&1 \
 	  || { echo "shellcheck not found — 'make bootstrap' or install it"; exit 1; }
 	"$(SHELLCHECK)" $(SHELL_SCRIPTS)
+	@# shellcheck cannot parse zsh, so the shell integration had NO gate at all.
+	@# `zsh -n` at least catches a syntax error before it breaks everyone's rc file.
+	@if command -v zsh >/dev/null 2>&1; then \
+	  echo "==> zsh -n shell/claude-airlock.zsh"; \
+	  zsh -n shell/claude-airlock.zsh; \
+	else \
+	  echo "!! zsh not found — shell/claude-airlock.zsh not syntax-checked"; \
+	fi
 
 test: ## run the bats suite against BOTH engines (podman + docker)
 	@command -v "$(BATS)" >/dev/null 2>&1 \

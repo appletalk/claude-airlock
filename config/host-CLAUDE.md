@@ -25,6 +25,11 @@ nothing has to be computed. But Claude only *uses* it if you tell it to. Hence t
   durable storage**.
 - Bare `/tmp` is still fine for genuine **within-run scratch** that is regenerated on
   every run.
+- **`$AIRLOCK_TMP/pastes/` holds clipboard screenshots** dropped by `airlock paste`
+  (the user may call it `alpaste`), newest 20, named `YYYYMMDD-HHMMSSmmm.png` in host
+  local time. When the user says **"check the latest paste"** (or "the latest 3"), list
+  that directory newest-first and read the top N. It exists because a BOX cannot read a
+  clipboard; you can, but the same folder is where the images are either way.
 - **A missing input file is a missing precondition, not an empty result.** If you can
   deterministically rebuild it, rebuild it and say so; otherwise stop and report the
   exact path you expected. Silently treating an absent index/cache as "nothing to skip"

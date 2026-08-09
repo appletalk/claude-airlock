@@ -47,16 +47,29 @@ AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
 # engine-args section below about why we must NOT trust the container's default route.
 AIRLOCK_PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
 
+# Snapshot before sourcing the config: `${VAR:-default}` afterwards cannot tell an
+# environment value from one the config just set, which is how "env-only" silently
+# became a config knob.
+_AIRLOCK_TMP_BASE_ENV="${AIRLOCK_TMP_BASE:-}"
+
 CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
-# Base directory for per-project scratch ($AIRLOCK_TMP). Env-only, not a config knob:
-# the zsh `claude` wrapper computes the same path independently, so it must come from the
-# environment for both to agree. Host and box always agree regardless, because the
-# launcher resolves this once and injects the result into the container. Exists so the
-# test suite can run hermetically, and for hosts where /tmp is unsuitable.
-AIRLOCK_TMP_BASE="${AIRLOCK_TMP_BASE:-/tmp/airlock}"
+# Base directory for per-project scratch ($AIRLOCK_TMP). Env-only, and now ENFORCED
+# rather than merely documented: the zsh `claude` wrapper computes the same path and
+# reads only the environment, so a value set in the config would move the launcher's
+# scratch dir while leaving host Claude's where it was - silently splitting the two
+# sides that every other part of this design assumes agree. Exists so the test suite
+# can run hermetically, and for hosts where /tmp is unsuitable.
+if [ -n "${AIRLOCK_TMP_BASE:-}" ] && [ "${AIRLOCK_TMP_BASE}" != "$_AIRLOCK_TMP_BASE_ENV" ]; then
+  echo "claude-airlock: AIRLOCK_TMP_BASE is set in $CONFIG_FILE; it must come from the" >&2
+  echo "  environment instead. The host 'claude' wrapper reads only the environment, so a" >&2
+  echo "  config-only value puts host and box on DIFFERENT scratch dirs with no warning." >&2
+  echo "  Export it from your shell rc, or remove it from the config." >&2
+  exit 1
+fi
+AIRLOCK_TMP_BASE="${_AIRLOCK_TMP_BASE_ENV:-/tmp/airlock}"
 
 case "$AIRLOCK_ENGINE" in
   podman|docker) ;;
@@ -436,6 +449,13 @@ if [ "${1:-}" = "paste" ]; then
     echo "  or override for one call:  airlock paste --project /path/to/project" >&2
     exit 1
   fi
+  case "$_pproj" in
+    /*) ;;
+    *)  echo "claude-airlock: the paste project must be an ABSOLUTE path (got '$_pproj')." >&2
+        echo "  A relative path resolves against whatever directory you happen to be in," >&2
+        echo "  which is the \$PWD dependence this setting exists to avoid." >&2
+        exit 1 ;;
+  esac
   [ -d "$_pproj" ] || { echo "claude-airlock: paste project not found: $_pproj" >&2; exit 1; }
 
   # Same slug the launcher and `airlock tmp` use — this stays the single source of truth.
@@ -443,11 +463,27 @@ if [ "${1:-}" = "paste" ]; then
   _pdir="$AIRLOCK_TMP_BASE/$_pslug/pastes"
   mkdir -p "$_pdir" && chmod 700 "$AIRLOCK_TMP_BASE/$_pslug"
 
-  # Names are `YYYYMMDD-HHMMSS[-N].png`, so the shell's lexical glob order IS chronological
-  # order — no `ls -t` (SC2012) and no GNU-only `find -printf` needed.
+  # Collect only files this tool created: `YYYYMMDD-HHMMSSmmm.png`, one fixed shape, so
+  # the shell's lexical glob order IS chronological order (no `ls -t`/SC2012, no GNU-only
+  # `find -printf`). Anything else in the directory - a hand-copied screenshot, a stray
+  # download - is ignored rather than listed out of order, and is NEVER pruned: deleting
+  # a file we did not write would be the worst kind of surprise.
+  _collect_pastes() {
+    _pfiles=()
+    local f b
+    for f in "$_pdir"/*.png; do
+      [ -e "$f" ] || continue
+      b="${f##*/}"
+      case "$b" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].png)
+          _pfiles+=("$f") ;;
+      esac
+    done
+  }
+
   if [ "$_plist" = 1 ]; then
-    _pfiles=("$_pdir"/*.png)
-    [ -e "${_pfiles[0]}" ] || exit 0
+    _collect_pastes
+    [ "${#_pfiles[@]}" -gt 0 ] || exit 0
     _pcount=${#_pfiles[@]}
     _pstart=$(( _pcount > _pn ? _pcount - _pn : 0 ))
     for (( _pj=_pcount-1; _pj>=_pstart; _pj-- )); do printf '%s\n' "${_pfiles[_pj]}"; done
@@ -467,7 +503,8 @@ if [ "${1:-}" = "paste" ]; then
     echo "claude-airlock: X11 session but xclip is missing (install xclip)." >&2; exit 1
   else
     echo "claude-airlock: no graphical session (\$WAYLAND_DISPLAY and \$DISPLAY are both unset)." >&2
-    echo "  There is no clipboard to read here. Copy the file into $_pdir instead." >&2
+    echo "  There is no clipboard to read here. Copy the image into" >&2
+    echo "  $AIRLOCK_TMP_BASE/$_pslug/ and give the agent that path directly." >&2
     exit 1
   fi
 
@@ -484,58 +521,88 @@ if [ "${1:-}" = "paste" ]; then
     esac
   }
 
+  # Work file has no .png suffix, so the *.png glob (list, retention) cannot see a
+  # half-written paste. The finished image is moved into place at the very end.
   _ptmp="$(mktemp "${TMPDIR:-/tmp}/airlock-paste.XXXXXX")" || exit 1
-  trap 'rm -f "$_ptmp"' EXIT
+  _pwork="$_pdir/.paste.$$.work"
+  trap 'rm -f "$_ptmp" "$_pwork"' EXIT INT TERM HUP
 
-  # PNG if the source offers it (most Linux screenshot tools do). WSLg offers BMP only,
-  # which is why the conversion branch below is not optional on that platform.
-  _ptypes="$(_paste_types)"
+  # `|| true` is load-bearing under `set -e`: an assignment takes the substitution's
+  # exit status, so a failing wl-paste/xclip would kill the script HERE, silently,
+  # and the "no image on the clipboard" message below could never print. An empty
+  # or failing clipboard is the single most common way this command is used wrong.
+  _ptypes="$(_paste_types || true)"
+  _pread=0
   case "$_ptypes" in
-    *image/png*) _paste_read image/png > "$_ptmp" ;;
-    *image/bmp*) _paste_read image/bmp > "$_ptmp" ;;
-    *image/*)    _paste_read "$(printf '%s\n' "$_ptypes" | grep -m1 '^image/')" > "$_ptmp" ;;
+    *image/png*) _paste_read image/png > "$_ptmp" || _pread=$? ;;
+    *image/bmp*) _paste_read image/bmp > "$_ptmp" || _pread=$? ;;
+    *image/*)    _paste_read "$(printf '%s\n' "$_ptypes" | grep -m1 '^image/')" > "$_ptmp" || _pread=$? ;;
     *) echo "claude-airlock: no image on the clipboard (offered: ${_ptypes:-nothing})" >&2; exit 1 ;;
   esac
+  [ "$_pread" -eq 0 ] || { echo "claude-airlock: reading the clipboard failed (exit $_pread)." >&2; exit 1; }
   [ -s "$_ptmp" ] || { echo "claude-airlock: the clipboard read produced no data." >&2; exit 1; }
 
-  _pstamp="$(date +%Y%m%d-%H%M%S)"
-  _pout="$_pdir/$_pstamp.png"
-  _pi=2
-  while [ -e "$_pout" ]; do _pout="$_pdir/$_pstamp-$_pi.png"; _pi=$((_pi + 1)); done
+  # Milliseconds, and every name the same shape, so the lexical glob order used by
+  # `list` and by retention really is chronological. A collision suffix would break
+  # that: '-' (0x2D) sorts BEFORE '.' (0x2E), so `...-2.png` precedes `....png` and
+  # two pastes in one second would be listed backwards.
+  _pout=""
+  for _pi in 1 2 3 4 5; do
+    _pcand="$_pdir/$(date +%Y%m%d-%H%M%S%3N).png"
+    if [ ! -e "$_pcand" ]; then _pout="$_pcand"; break; fi
+  done
+  [ -n "$_pout" ] || { echo "claude-airlock: could not find a free filename in $_pdir." >&2; exit 1; }
 
-  # Any failure past this point REMOVES the output: a missing file must mean "the grab
-  # failed", never "you are looking at an older paste".
-  _pfail() { rm -f "$_pout"; echo "claude-airlock: $*" >&2; exit 1; }
+  # Any failure past this point removes BOTH work file and output: a missing paste
+  # must mean "the grab failed", never "you are looking at an older one".
+  _pfail() { rm -f "$_pwork" "$_pout"; echo "claude-airlock: $*" >&2; exit 1; }
 
   # The Claude API accepts PNG/JPEG/GIF/WebP - BMP has to be converted or it is unreadable.
   if [ "$(head -c 4 "$_ptmp" | od -An -tx1 | tr -d ' \n')" = "89504e47" ]; then
-    cp "$_ptmp" "$_pout" || _pfail "could not write $_pout"
+    cp "$_ptmp" "$_pwork" || _pfail "could not write to $_pdir"
   elif command -v magick >/dev/null 2>&1; then
-    magick "$_ptmp" png:"$_pout" || _pfail "magick could not convert the clipboard image"
+    magick "$_ptmp" png:"$_pwork" || _pfail "magick could not convert the clipboard image"
   elif command -v convert >/dev/null 2>&1; then
-    convert "$_ptmp" png:"$_pout" || _pfail "convert could not convert the clipboard image"
+    convert "$_ptmp" png:"$_pwork" || _pfail "convert could not convert the clipboard image"
   elif command -v ffmpeg >/dev/null 2>&1; then
-    ffmpeg -y -loglevel error -i "$_ptmp" "$_pout" || _pfail "ffmpeg could not convert the clipboard image"
+    ffmpeg -y -loglevel error -i "$_ptmp" "$_pwork" || _pfail "ffmpeg could not convert the clipboard image"
   elif python3 -c 'import PIL' 2>/dev/null; then
     python3 -c 'import sys
 from PIL import Image
-Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pout" || _pfail "Pillow could not convert the clipboard image"
+Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pwork" || _pfail "Pillow could not convert the clipboard image"
   else
     _pfail "the clipboard offered [$(printf '%s' "$_ptypes" | tr '\n' ' ')] and no PNG converter is installed (python3-pil, imagemagick or ffmpeg)"
   fi
-  [ -s "$_pout" ] || _pfail "conversion produced an empty file"
 
-  # Retain the newest 50 (lexical order = chronological, as above).
-  _pfiles=("$_pdir"/*.png)
-  if [ -e "${_pfiles[0]}" ] && [ "${#_pfiles[@]}" -gt 50 ]; then
-    rm -f "${_pfiles[@]:0:$(( ${#_pfiles[@]} - 50 ))}"
+  # Check what was PRODUCED, not merely that something was. A converter that exits 0
+  # having written garbage is the failure that matters, and size alone cannot see it.
+  [ -s "$_pwork" ] || _pfail "conversion produced an empty file"
+  [ "$(head -c 4 "$_pwork" | od -An -tx1 | tr -d ' \n')" = "89504e47" ] \
+    || _pfail "conversion produced a file that is not a PNG"
+
+  # Atomic publish: same filesystem, so nothing ever observes a partial *.png.
+  mv -f "$_pwork" "$_pout" || _pfail "could not move the image into $_pdir"
+
+  # Retain the newest 20. EXCLUDES the file just written - it is not always the
+  # lexically-last entry (a clock moved backwards, or hand-copied files whose names
+  # sort after any timestamp), and pruning it would delete the paste we just printed.
+  _collect_pastes
+  _pkeep=()
+  for _pf in "${_pfiles[@]}"; do
+    [ "$_pf" = "$_pout" ] || _pkeep+=("$_pf")
+  done
+  if [ "${#_pkeep[@]}" -gt 19 ]; then
+    rm -f "${_pkeep[@]:0:$(( ${#_pkeep[@]} - 19 ))}"
   fi
 
+  # Redirect the clipboard writer's stdout: xclip -i and wl-copy fork a selection
+  # owner that INHERITS stdout and lives until the clipboard changes, which hangs
+  # `out=$(airlock paste --copy)` indefinitely.
   if [ "$_pcopy" = 1 ]; then
     case "$_pclip" in
-      wayland) command -v wl-copy >/dev/null 2>&1 && printf '%s' "$_pout" | wl-copy \
+      wayland) command -v wl-copy >/dev/null 2>&1 && printf '%s' "$_pout" | wl-copy >/dev/null 2>&1 \
                  || echo "claude-airlock: --copy needs wl-copy (wl-clipboard); path printed only." >&2 ;;
-      x11)     printf '%s' "$_pout" | xclip -selection clipboard -i \
+      x11)     printf '%s' "$_pout" | xclip -selection clipboard -i >/dev/null 2>&1 \
                  || echo "claude-airlock: --copy failed; path printed only." >&2 ;;
     esac
   fi
@@ -866,7 +933,9 @@ _airlock_cleanup() {
   # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
   # so we don't litter /tmp with empties but never delete a kept artifact.
   rmdir "$AIRLOCK_TMP" 2>/dev/null || true
-  rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true
+  # Only ever tidy up the tool's OWN default base. With a custom base this would be
+  # removing a directory the user made for their own reasons.
+  if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
 }
 trap _airlock_cleanup EXIT INT TERM
 

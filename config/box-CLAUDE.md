@@ -35,9 +35,11 @@ the bottom of this file apply too):
   host, which drops a timestamped PNG in **`$AIRLOCK_TMP/pastes/`** and puts the *path* on
   their clipboard; what arrives in your prompt is text, and you open the file. When they
   say **"check the latest paste"** (or "the latest 3"), list that directory newest-first
-  and read the top N. Filenames are `YYYYMMDD-HHMMSS.png` in **host local time**, which
-  can be hours off the box clock — judge freshness by mtime, never by comparing a filename
-  to `date`. Never suggest Ctrl+V for an image; it cannot work and never will.
+  and read the top N. Filenames are `YYYYMMDD-HHMMSSmmm.png` in **host local time**,
+  which can be hours off the box clock — judge freshness by mtime, never by comparing a
+  filename to `date`. Only the newest 20 are kept, and only files in that exact naming
+  shape: anything else you or the human put in that directory is ignored by `paste list`
+  and never deleted by it. Never suggest Ctrl+V for an image; it cannot work and never will.
 
 - **A missing file is a missing precondition, not an empty result.** If an input you
   depend on isn't there — an index, a cache, a prior run's output — do **not** silently

@@ -69,6 +69,7 @@ claude() {
   rc=$?
   rm -f "$lock"
   rmdir "$AIRLOCK_TMP" 2>/dev/null   # only if the session left it empty
-  rmdir "${AIRLOCK_TMP_BASE:-/tmp/airlock}" 2>/dev/null
+  # Only tidy the tool's own default base, never a directory the user chose.
+  [[ "${AIRLOCK_TMP_BASE:-/tmp/airlock}" == /tmp/airlock ]] && rmdir /tmp/airlock 2>/dev/null
   return $rc
 }
