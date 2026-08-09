@@ -229,6 +229,29 @@ EOF
   [ ! -e "$sdir/engine-env" ]
 }
 
+@test "a legacy env-file belonging to a LIVE session is not swept" {
+  proj="$(mkproj envlegacylive)"
+  sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
+  sleep 300 & PEER_PID=$!
+  # engine-env.<pid> with no start time is the shape written by the previous version.
+  # Upgrading airlock and then opening a second box must not delete the running
+  # session's env-file - it would die reading a missing --env-file, which is exactly
+  # the failure per-session naming was introduced to prevent.
+  echo live > "$sdir/engine-env.$PEER_PID"
+  _launch "$proj"
+  [ -e "$sdir/engine-env.$PEER_PID" ]
+}
+
+@test "a legacy env-file whose owner is gone is still swept" {
+  proj="$(mkproj envlegacydead)"
+  sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
+  sleep 300 & dead=$!
+  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  echo 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-SECRET' > "$sdir/engine-env.$dead"
+  _launch "$proj"
+  [ ! -e "$sdir/engine-env.$dead" ]
+}
+
 # --- the abort path -----------------------------------------------------------------
 
 @test "declining the concurrent-session prompt leaves nothing behind" {
@@ -246,6 +269,72 @@ EOF
   [ "$output" -eq 1 ]
   run bash -c 'ls "$1"/engine-env.* 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
   [ "$output" -eq 0 ]
+}
+
+# --- lock ownership -----------------------------------------------------------------
+
+@test "a session does not delete a lock another session took over" {
+  proj="$(mkproj lockown)"
+  # The engine stub stands in for this session being up; meanwhile a SECOND session
+  # prompts, the user answers y, and it overwrites the lock with its own pid. That is
+  # the normal path when two boxes on one project is the design - so the first to exit
+  # must not delete the live session's lock.
+  cat > "$STUBBIN/podman" <<'EOF'
+#!/usr/bin/env bash
+for l in "$HOME"/.config/claude-airlock/state/*/session.lock; do
+  [ -e "$l" ] && printf '999001 airlock 0\n' > "$l"
+done
+exit 0
+EOF
+  cp "$STUBBIN/podman" "$STUBBIN/docker"; chmod +x "$STUBBIN/podman" "$STUBBIN/docker"
+  _launch "$proj"
+  [ -e "$(state_dir "$proj")/session.lock" ]
+  run cat "$(state_dir "$proj")/session.lock"
+  [[ "$output" == 999001* ]]
+}
+
+@test "a session does remove its own lock" {
+  proj="$(mkproj lockmine)"
+  _launch "$proj"
+  [ ! -e "$(state_dir "$proj")/session.lock" ]
+}
+
+# --- a run that mounted nothing -----------------------------------------------------
+
+@test "a declined run does not clean up after a NON-airlock session" {
+  proj="$(mkproj declined)"
+  # A raw host `claude` shares the lock format and uses $AIRLOCK_TMP under the same
+  # name, but registers no pidfile - so "no registered peers" is not "nobody there".
+  mkdir -p "$(scratch_dir "$proj")" "$(state_dir "$proj")"
+  sleep 300 & PEER_PID=$!
+  printf '%s claude 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
+  run _launch "$proj"                  # stdin is /dev/null -> prompt reads EOF -> abort
+  [ "$status" -ne 0 ]
+  # This run mounted nothing, so it has no business removing that session's scratch dir.
+  [ -d "$(scratch_dir "$proj")" ]
+  [ -e "$(state_dir "$proj")/session.lock" ]
+}
+
+# --- marker identity ----------------------------------------------------------------
+
+@test "a marker does not authorise deleting a DIFFERENT dir at the same path" {
+  proj="$(mkproj markerid)"
+  mkdir -p "$(state_dir "$proj")/artifacts-created"
+  mkdir -p "$proj/.venv"
+  # A marker recording the path but an identity that no longer matches: what you get
+  # after the user empties and rebuilds .venv, or deletes and recreates it. The path is
+  # not a standing licence to delete whatever later occupies it.
+  printf '%s\n%s\n' "$proj/.venv" "999999:999999" \
+    > "$(state_dir "$proj")/artifacts-created/path-.venv"
+  _launch "$proj"
+  [ -d "$proj/.venv" ]
+}
+
+@test "a marker whose dir still matches is honoured" {
+  proj="$(mkproj markermatch)"
+  _launch "$proj"
+  # created and recorded by this same run, identity intact -> removed as before
+  [ ! -e "$proj/.venv" ]
 }
 
 # --- failure surfacing --------------------------------------------------------------

@@ -770,17 +770,24 @@ fi
 # fixed path, which the next launch truncated unconditionally.
 ENV_FILE="$STATE_DIR/engine-env.$$.$SELF_START"
 (umask 077; : > "$ENV_FILE")
-# Sweep env-files whose owning process is gone, including any left by older versions
-# (bare `engine-env`, or `engine-env.<pid>` with no start time - neither can be proven
-# live, and both may hold a token, so they go).
+# Sweep env-files whose owning process is gone. Three shapes, three rules - the point is
+# never to delete a file a LIVE session is about to hand to the engine, because that
+# session then dies reading a missing --env-file.
 for _ef in "$STATE_DIR"/engine-env "$STATE_DIR"/engine-env.*; do
   [ -e "$_ef" ] || continue
   [ "$_ef" = "$ENV_FILE" ] && continue
   _eftag="${_ef##*/engine-env}"; _eftag="${_eftag#.}"
   case "$_eftag" in
+    # <pid>.<starttime>: ours. Gone or recycled unless the start time still matches.
     *.*) _efpid="${_eftag%%.*}"
          [ "$(_airlock_proc_start "$_efpid")" = "${_eftag#*.}" ] || rm -f "$_ef" ;;
-    *)   rm -f "$_ef" ;;                          # legacy shape: no provable owner
+    # <pid>: written by the previous version. Its owner may still be running - "upgrade
+    # airlock, then open a second box" hits exactly that - so only sweep once the pid is
+    # gone. Residual (legacy file AND recycled pid) is far narrower than deleting live.
+    [0-9]*) [ -n "$(_airlock_proc_start "$_eftag")" ] || rm -f "$_ef" ;;
+    # bare `engine-env`: no pid at all, so ownership can never be established, and it may
+    # hold a token. It goes.
+    *)   rm -f "$_ef" ;;
   esac
 done
 unset _ef _eftag _efpid
@@ -857,33 +864,59 @@ _airlock_peer_sessions() {
 
 # The lock path is needed by the cleanup below; the lock itself is taken much later,
 # after the prompts, and LOCK_HELD stays 0 until then so an early exit never removes a
-# lock this session does not own.
+# lock this session does not own. MOUNTED stays 0 until the engine actually runs.
 LOCK="$STATE_DIR/session.lock"
 LOCK_HELD=0
+MOUNTED=0
+
+# Identity of a directory, so a recorded path cannot become a standing licence to delete
+# whatever later occupies it. Inode catches delete-and-recreate; ctime catches a dir that
+# was populated and then emptied. Empty when the path is gone.
+_airlock_dir_id() { stat -c '%i:%Z' "$1" 2>/dev/null || true; }
 
 # Cleanup runs from here on. Installed immediately after registration rather than after
 # the prompts: the egress-approval and concurrent-session reads sit between, and
 # answering N to "Open another anyway?" used to exit leaving this session's pidfile and
 # its token-bearing env-file behind.
 _airlock_cleanup() {
-  if [ "$LOCK_HELD" = 1 ]; then rm -f "$LOCK"; fi
+  # Only if the lock is still OURS. A second session overwrites it with its own pid after
+  # the user answers y - the normal path when two boxes on one project is the design - and
+  # the first to exit would otherwise delete the live session's lock, leaving a third
+  # session with no concurrent-session warning at all.
+  if [ "$LOCK_HELD" = 1 ] && [ -f "$LOCK" ]; then
+    local _lpid
+    read -r _lpid _ < "$LOCK" 2>/dev/null || true
+    if [ "${_lpid:-}" = "$$" ]; then rm -f "$LOCK"; fi
+  fi
   rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
   # Deregister BEFORE counting peers, so the last session out doesn't see itself.
   rm -f "$SESS_FILE"
+  # Nothing below is ours to remove unless we actually mounted these directories. A run
+  # that exited at a prompt mounted nothing, and "no registered peers" is not "nobody
+  # there" - a raw host `claude` shares the lock and the scratch dir but registers no
+  # pidfile here.
+  if [ "$MOUNTED" != 1 ]; then return 0; fi
   # Everything below removes a directory that a SIBLING box may still have mounted, so
   # none of it may run while another session is live. Removing a mount SOURCE strands
   # that box on an orphaned inode; removing a mount TARGET (the artifact dirs) is worse
   # still - vfs_rmdir calls detach_mounts() and tears the sibling's mount down outright.
   if _airlock_peer_sessions; then return 0; fi
-  local m p
+  local m p want
   # Artifact mountpoints WE created. The record is per project and on disk, not a shell
   # array: only the session that created the path knows it created it, and that session
   # is often not the last one out - an array leaks the directory permanently, because an
   # existing (empty) .venv also stops every future session from registering it.
   for m in "$STATE_DIR"/artifacts-created/*; do
     [ -e "$m" ] || continue
-    p="$(cat "$m" 2>/dev/null || true)"
-    if [ -z "$p" ] || [ ! -e "$p" ]; then rm -f "$m"; continue; fi
+    # One redirection, two lines: path then identity. Separate `read < "$m"` calls would
+    # each reopen the file and both return line 1.
+    p=""; want=""
+    { IFS= read -r p; IFS= read -r want; } < "$m" 2>/dev/null || true
+    if [ -z "${p:-}" ] || [ ! -e "$p" ]; then rm -f "$m"; continue; fi
+    # The directory must still be the one we created. Without this the marker authorises
+    # deleting that path forever: a user who empties .venv to rebuild it would have the
+    # directory removed under them by whichever session happens to be last out.
+    if [ -n "${want:-}" ] && [ "$want" != "$(_airlock_dir_id "$p")" ]; then continue; fi
     # rmdir, NOT rm -rf, and the peer check does not make that safe on its own. The two
     # guard different writers: the peer check covers a sibling box (whose writes land in
     # $store, so the host view of this path is empty), while rmdir's refusal covers the
@@ -1131,7 +1164,10 @@ for d in $AIRLOCK_ARTIFACT_DIRS; do
     mkdir -p "$STATE_DIR/artifacts-created"
     # `path-` prefix is load-bearing: these names come from $AIRLOCK_ARTIFACT_DIRS, which
     # is mostly dotfiles (.venv), and the cleanup's `*` glob would skip every one of them.
-    printf '%s\n' "$host_path" > "$STATE_DIR/artifacts-created/path-$(printf '%s' "$d" | sed 's#/#__#g')"
+    # Line 1 is the path, line 2 its identity - the marker authorises removing THIS
+    # directory, not whatever later occupies the path.
+    printf '%s\n%s\n' "$host_path" "$(_airlock_dir_id "$host_path")" \
+      > "$STATE_DIR/artifacts-created/path-$(printf '%s' "$d" | sed 's#/#__#g')"
   fi
   args+=( -v "$store:$host_path:rw" )
 done
@@ -1300,6 +1336,14 @@ if [ -n "$PERMISSION_MODE" ]; then
   claude_args+=( --permission-mode "$PERMISSION_MODE" )
 fi
 
+# From here this session has actually MOUNTED the project's shared directories, so its
+# cleanup may remove them if it turns out to be the last one out. Before this point a run
+# that exits - a declined concurrent-session prompt, a rejected egress entry - mounted
+# nothing, and must not rmdir a directory some other kind of session is using. "No
+# registered peers" is not "nobody there": the lock format is deliberately shared with a
+# raw host `claude`, which uses $AIRLOCK_TMP under the same name but never registers a
+# pidfile here.
+MOUNTED=1
 if [ "$AIRLOCK_SHELL" = 1 ]; then
   "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" bash -l
 else
