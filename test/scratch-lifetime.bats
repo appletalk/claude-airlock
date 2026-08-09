@@ -1,22 +1,29 @@
 #!/usr/bin/env bats
-# Lifetime of $AIRLOCK_TMP, the per-project scratch dir.
+# Lifetime of the directories a project's boxes SHARE: $AIRLOCK_TMP (the scratch dir)
+# and the shadowed artifact mountpoints ($WORKSPACE/.venv, node_modules, ...).
 #
-# One host dir is bind-mounted into EVERY box on a project. Removing it at exit while a
-# sibling box still has it mounted does not just delete a directory - it unlinks the
-# inode out from under that live mount, and the sibling spends the rest of its life on
-# an orphan: reads empty, writes ENOENT. The box cannot tell that from "cache is empty",
-# which is what makes it dangerous rather than merely annoying.
+# Two boxes on one project is a supported setup, and both of these are one host
+# directory mounted into every one of them. Removing such a directory at exit is not a
+# tidy-up, it is an attack on the surviving box:
 #
-# So the rule these tests pin is: the LAST session out removes the dir, and only if the
-# session left it empty. Both halves matter, and the second half predates the refcount.
+#   - scratch dir: it is the mount SOURCE. rmdir leaves the sibling on an orphaned
+#     inode - Links: 0, reads empty, writes ENOENT - for the life of that container,
+#     and it reads as "the cache is empty" rather than "my mount is dead".
+#   - artifact dirs: it is the mount TARGET. vfs_rmdir calls detach_mounts() and tears
+#     the sibling's mount down outright, so .venv vanishes mid-session while its
+#     contents sit intact and unreachable in $STATE_DIR/artifacts.
+#
+# The artifact case is the nastier one: the box writes into $store, which is mounted
+# OVER the path, so the host view is ALWAYS empty and the "rmdir only removes it if
+# empty" reasoning never protects anything. It fires every time, not just sometimes.
+#
+# So: the LAST session out removes these, nobody else. For the scratch dir the
+# empty-only rmdir still applies on top, and that half predates the refcount.
 
 load helper
 
 setup() {
-  setup_airlock_env
-  # Never the real /tmp/airlock: the suite must not disturb a live session's scratch.
-  export AIRLOCK_TMP_BASE="$BATS_TEST_TMPDIR/airlock-tmp"
-  mkdir -p "$AIRLOCK_TMP_BASE"
+  setup_airlock_env      # exports a hermetic AIRLOCK_TMP_BASE for the whole suite
 }
 
 teardown() {
@@ -24,41 +31,48 @@ teardown() {
   return 0
 }
 
-# Path of the scratch dir the launcher will use for project $1.
 scratch_dir() { printf '%s' "$AIRLOCK_TMP_BASE/$(_slug "$1")"; }
+sessions_dir() { printf '%s' "$(state_dir "$1")/sessions"; }
+
+# The kernel start-time token the launcher stores, so a test can forge a matching or a
+# deliberately WRONG pidfile.
+proc_start() { local st; st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1; st="${st##*') '}"; printf '%s' "$st" | cut -d' ' -f20; }
 
 # Register a pidfile for a LIVE process that is not the launcher, as a sibling box would.
 register_live_peer() {
-  local sdir="$(state_dir "$1")/sessions"
+  local sdir; sdir="$(sessions_dir "$1")"
   mkdir -p "$sdir"
   sleep 300 &
   PEER_PID=$!
-  : > "$sdir/$PEER_PID"
+  proc_start "$PEER_PID" > "$sdir/$PEER_PID"
 }
 
 # Register a pidfile whose process is already gone, as a SIGKILLed box would leave.
 register_dead_peer() {
-  local sdir="$(state_dir "$1")/sessions" dead
+  local sdir dead; sdir="$(sessions_dir "$1")"
   mkdir -p "$sdir"
   sleep 300 &
   dead=$!
   kill "$dead" 2>/dev/null
   wait "$dead" 2>/dev/null || true
-  : > "$sdir/$dead"
+  echo 999999 > "$sdir/$dead"
   printf '%s' "$dead"
 }
+
+# --- the scratch dir (mount source) -----------------------------------------------
 
 @test "a lone session removes its empty scratch dir on exit" {
   proj="$(mkproj lone)"
   _launch "$proj"
   [ ! -d "$(scratch_dir "$proj")" ]
+  # and does not leave its own bookkeeping behind
+  [ ! -d "$(sessions_dir "$proj")" ]
 }
 
 @test "a live sibling session keeps the scratch dir mounted-safe" {
   proj="$(mkproj peer)"
   register_live_peer "$proj"
   _launch "$proj"
-  # The sibling still has this bind-mounted; unlinking it would orphan that mount.
   [ -d "$(scratch_dir "$proj")" ]
 }
 
@@ -67,8 +81,22 @@ register_dead_peer() {
   dead="$(register_dead_peer "$proj")"
   _launch "$proj"
   [ ! -d "$(scratch_dir "$proj")" ]
-  # The stale pidfile is pruned, not left to accumulate.
-  [ ! -e "$(state_dir "$proj")/sessions/$dead" ]
+  [ ! -e "$(sessions_dir "$proj")/$dead" ]
+}
+
+@test "a RECYCLED pid does not masquerade as a live peer" {
+  proj="$(mkproj recycled)"
+  sdir="$(sessions_dir "$proj")"
+  mkdir -p "$sdir"
+  # A live process, but the pidfile records a start time that is not its own - exactly
+  # what a pid recycled since the file was written looks like. Without the start-time
+  # check this pins the project's cleanup forever, and these files outlive reboots.
+  sleep 300 &
+  PEER_PID=$!
+  echo 999999 > "$sdir/$PEER_PID"
+  _launch "$proj"
+  [ ! -d "$(scratch_dir "$proj")" ]
+  [ ! -e "$sdir/$PEER_PID" ]
 }
 
 @test "a NON-EMPTY scratch dir survives even the last session out" {
@@ -76,25 +104,56 @@ register_dead_peer() {
   mkdir -p "$(scratch_dir "$proj")/pastes"
   touch "$(scratch_dir "$proj")/pastes/20260809-120000000.png"
   _launch "$proj"
-  # rmdir refuses a non-empty dir: a kept artifact is never collateral.
   [ -f "$(scratch_dir "$proj")/pastes/20260809-120000000.png" ]
+}
+
+# --- the artifact dirs (mount target) ---------------------------------------------
+
+@test "a live sibling keeps the artifact mountpoint from being torn out" {
+  proj="$(mkproj artpeer)"
+  register_live_peer "$proj"
+  _launch "$proj"
+  # The launcher created .venv (it did not exist) and registered it for cleanup. The
+  # sibling has it mounted; removing it detaches that mount mid-session.
+  [ -d "$proj/.venv" ]
+}
+
+@test "the last session out still removes the artifact mountpoint it created" {
+  proj="$(mkproj artlone)"
+  _launch "$proj"
+  [ ! -e "$proj/.venv" ]
+}
+
+@test "an artifact dir the project already had is never touched" {
+  proj="$(mkproj artkept)"
+  mkdir -p "$proj/.venv"; touch "$proj/.venv/preexisting"
+  _launch "$proj"
+  [ -f "$proj/.venv/preexisting" ]
+}
+
+# --- registration ------------------------------------------------------------------
+
+@test "a claude session registers itself while it runs" {
+  proj="$(mkproj reg)"
+  _launch "$proj"
+  run live_sessions
+  [ -n "$output" ]
+}
+
+@test "a shell session registers too - it holds the same mounts" {
+  proj="$(mkproj shellreg)"
+  _launch "$proj" shell
+  # session.lock deliberately skips `shell`; this refcount must NOT, or a shell exit
+  # tears down a live claude box. Observed at engine time because cleanup unlinks it.
+  run live_sessions
+  [ -n "$output" ]
 }
 
 @test "a session deregisters itself on exit" {
   proj="$(mkproj dereg)"
   register_live_peer "$proj"
   _launch "$proj"
-  # Exactly the peer's entry remains - the launcher left nothing of its own behind.
-  run bash -c 'ls "$1" | wc -l' _ "$(state_dir "$proj")/sessions"
+  run bash -c 'ls "$1" | wc -l' _ "$(sessions_dir "$proj")"
   [ "$output" -eq 1 ]
-  [ -e "$(state_dir "$proj")/sessions/$PEER_PID" ]
-}
-
-@test "a shell session counts too - it holds the same mount" {
-  proj="$(mkproj shellsess)"
-  register_live_peer "$proj"
-  _launch "$proj" shell
-  # session.lock deliberately skips `shell`; the scratch refcount must not, or a shell
-  # exit orphans a live claude box.
-  [ -d "$(scratch_dir "$proj")" ]
+  [ -e "$(sessions_dir "$proj")/$PEER_PID" ]
 }

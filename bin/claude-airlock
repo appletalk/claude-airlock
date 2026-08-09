@@ -931,20 +931,44 @@ fi
 SESS_DIR="$STATE_DIR/sessions"
 mkdir -p "$SESS_DIR"
 SESS_FILE="$SESS_DIR/$$"
-: > "$SESS_FILE"
 
-# True when another live session holds this project's scratch dir. Entries whose pid is
-# gone are pruned as we go, so a SIGKILLed session (trap never ran) cannot pin the dir
-# forever. A recycled pid can cost us one leftover empty dir, which is the failure we
-# want on that side of the trade.
+# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
+# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
+# everything through the final ") " first; starttime is then the 20th remaining field.
+# Storing it makes a pidfile identify a PROCESS, not just a number: without it a
+# recycled pid reads as a live peer forever, and because these files live in persistent
+# state (not tmpfs) that would survive reboots and silently disable cleanup for good.
+_airlock_proc_start() {
+  local st
+  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  st="${st##*') '}"
+  printf '%s' "$st" | cut -d' ' -f20
+}
+
+_airlock_proc_start "$$" > "$SESS_FILE"
+
+# True when another live session holds this project's scratch and artifact mounts.
+# Entries whose process is gone are pruned as we go, so a SIGKILLed session (trap never
+# ran) cannot pin the directories forever.
 _airlock_peer_sessions() {
-  local f pid rc=1
+  local f pid want have rc=1
   for f in "$SESS_DIR"/*; do
     [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
     pid="${f##*/}"
+    # Belt and braces: cleanup unlinks our own file before calling this, so we should
+    # never see ourselves - but the check keeps the function correct if that moves.
     [ "$pid" = "$$" ] && continue
     case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
-    if kill -0 "$pid" 2>/dev/null; then rc=0; else rm -f "$f"; fi
+    want="$(cat "$f" 2>/dev/null || true)"
+    have="$(_airlock_proc_start "$pid")"
+    # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
+    # as "dead" and prune a live peer's entry. An empty stored token means a pidfile
+    # from an older version - fall back to bare existence rather than discarding it.
+    if [ -n "$have" ] && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
+      rc=0
+    else
+      rm -f "$f"
+    fi
   done
   return $rc
 }
@@ -955,24 +979,27 @@ ARTIFACT_CLEANUP=()
 _airlock_cleanup() {
   [ "$AIRLOCK_SHELL" = 1 ] || rm -f "$LOCK"
   rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
-  local p
-  for p in "${ARTIFACT_CLEANUP[@]:-}"; do
-    # rmdir only removes it if the session left it empty, which is what we want —
-    # never delete an artifact dir the box actually populated.
-    if [ -d "$p" ]; then rmdir "$p" 2>/dev/null || true; fi
-  done
   # Deregister BEFORE counting peers, so the last session out doesn't see itself.
   rm -f "$SESS_FILE"
+  # Everything below removes a directory that a SIBLING box may still have mounted, so
+  # none of it may run while another session is live. Removing a mount SOURCE strands
+  # that box on an orphaned inode; removing a mount TARGET (the artifact dirs) is worse
+  # still - vfs_rmdir calls detach_mounts() and tears the sibling's mount down outright.
+  if _airlock_peer_sessions; then return 0; fi
+  local p
+  for p in "${ARTIFACT_CLEANUP[@]:-}"; do
+    # NB: rmdir succeeding here does NOT mean the box left this empty. The box writes
+    # into $store, which is mounted OVER this path, so the host view is empty even when
+    # the box's copy is full. Only the peer check above makes this safe.
+    if [ -d "$p" ]; then rmdir "$p" 2>/dev/null || true; fi
+  done
   # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
-  # so we don't litter /tmp with empties but never delete a kept artifact. Skipped
-  # entirely while another box still has it mounted - see the refcount above.
-  if ! _airlock_peer_sessions; then
-    rmdir "$AIRLOCK_TMP" 2>/dev/null || true
-    # Only ever tidy up the tool's OWN default base. With a custom base this would be
-    # removing a directory the user made for their own reasons.
-    if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
-    rmdir "$SESS_DIR" 2>/dev/null || true
-  fi
+  # so we don't litter /tmp with empties but never delete a kept artifact.
+  rmdir "$AIRLOCK_TMP" 2>/dev/null || true
+  # Only ever tidy up the tool's OWN default base. With a custom base this would be
+  # removing a directory the user made for their own reasons.
+  if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
+  rmdir "$SESS_DIR" 2>/dev/null || true
 }
 trap _airlock_cleanup EXIT INT TERM
 

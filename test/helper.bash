@@ -20,7 +20,12 @@ setup_airlock_env() {
   export STUBBIN="$BATS_TEST_TMPDIR/bin"
   export SHARE_BASE="$BATS_TEST_TMPDIR/base"
   export ENGINE_ARGS_FILE="$BATS_TEST_TMPDIR/engine-args"
-  mkdir -p "$AIRLOCK_HOME" "$STUBBIN" "$SHARE_BASE"
+  # Every full launch creates AND rmdirs $AIRLOCK_TMP_BASE/<slug>. Left at the default
+  # that is the REAL /tmp/airlock, so the suite would churn a live session's scratch
+  # base - and the last launch would also try to rmdir /tmp/airlock itself. Point the
+  # whole suite at the bats tmpdir; it is not scratch-lifetime.bats's private concern.
+  export AIRLOCK_TMP_BASE="$BATS_TEST_TMPDIR/airlock-tmp"
+  mkdir -p "$AIRLOCK_HOME" "$STUBBIN" "$SHARE_BASE" "$AIRLOCK_TMP_BASE"
 
   # Seed ~/.claude.json so the launcher's jq theme-read doesn't trip `set -e`.
   printf '{"theme":"dark"}\n' > "$AIRLOCK_HOME/.claude.json"
@@ -33,6 +38,13 @@ setup_airlock_env() {
 #!/usr/bin/env bash
 printf '%s\n' "\$@" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 printf '%s\n' "ENGINE_INVOKED=$_e" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
+# Snapshot the session pidfiles that exist WHILE this session is live. Cleanup unlinks
+# its own on the way out, so the engine call is the only point a test can observe that
+# a session registered itself at all.
+for _f in "\$HOME"/.config/claude-airlock/state/*/sessions/*; do
+  [ -e "\$_f" ] && printf 'SESSION=%s\n' "\${_f##*/}" >> "\${ENGINE_ARGS_FILE:-/dev/null}.sessions"
+done
+exit 0
 EOF
     chmod +x "$STUBBIN/$_e"
   done
@@ -110,3 +122,7 @@ engine_args() { cat "$ENGINE_ARGS_FILE" 2>/dev/null; }
 
 # Which engine binary the launcher actually invoked.
 invoked_engine() { sed -n 's/^ENGINE_INVOKED=//p' "$ENGINE_ARGS_FILE" 2>/dev/null | tail -1; }
+
+# Session pidfiles that existed at the moment the last launch reached the engine, i.e.
+# who had registered themselves as holding this project's mounts.
+live_sessions() { sed -n 's/^SESSION=//p' "$ENGINE_ARGS_FILE.sessions" 2>/dev/null; }
