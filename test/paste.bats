@@ -104,6 +104,11 @@ minimal_path() {
 
 @test "no graphical session is a clear refusal, not a crash" {
   p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p"
+  # _paste forwards DISPLAY/WAYLAND_DISPLAY when the caller has them, which is the point
+  # for the tests below - but it means this one only tested "no graphical session" on a
+  # machine that happens to have none. Green in a container, red on any desktop. Clear
+  # them explicitly rather than inheriting whatever the runner happens to be.
+  unset DISPLAY WAYLAND_DISPLAY
   stub_clipboard
   run _paste "$p"
   [ "$status" -ne 0 ]
@@ -111,7 +116,8 @@ minimal_path() {
 }
 
 @test "a Wayland session without wl-paste names the package to install" {
-  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0
+  p="$(mkproj)"; unset DISPLAY
+  export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0
   minimal_path                                 # never rely on the HOST lacking wl-paste
   run _paste "$p"
   [ "$status" -ne 0 ]
@@ -119,7 +125,9 @@ minimal_path() {
 }
 
 @test "an X11 session without xclip names the package to install" {
-  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" DISPLAY=:0
+  # Must be X11 ONLY: a runner with a live Wayland session would take the other branch.
+  p="$(mkproj)"; unset WAYLAND_DISPLAY
+  export AIRLOCK_PASTE_PROJECT="$p" DISPLAY=:0
   minimal_path
   run _paste "$p"
   [ "$status" -ne 0 ]

@@ -160,6 +160,84 @@ _gate_shares() {
 
 WORKSPACE="$PWD"
 
+# --- Shared-mount refcount primitives -------------------------------------------------
+# Defined up here, above the subcommand dispatch, because the host `claude` wrapper
+# delegates to them through the `session` subcommand: a raw host session holds exactly
+# the same $AIRLOCK_TMP as a box, so it has to be counted by the same code. Two
+# implementations of this would drift, and the direction they drift is data loss.
+
+# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
+# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
+# everything through the FINAL ") " first (greedy is required: a lazy match breaks on
+# such a comm, and every field after comm is numeric so it cannot over-strip); starttime
+# is then the 20th remaining field.
+# Pairing this with a pid is what makes a session file identify a PROCESS rather than a
+# number. Without it a recycled pid reads as live forever, and these files live in
+# persistent state rather than tmpfs, so that would survive reboots.
+_airlock_proc_start() {
+  local st
+  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  st="${st##*') '}"
+  printf '%s' "$st" | cut -d' ' -f20
+}
+
+# True when a session other than $2 is live in the registry $1. Entries whose process is
+# gone are pruned as we go, so a SIGKILLed session (trap never ran) cannot pin the shared
+# directories forever.
+_airlock_peers_in() {
+  local dir="$1" self="$2" f pid want have rc=1
+  for f in "$dir"/*; do
+    [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
+    pid="${f##*/}"
+    [ "$pid" = "$self" ] && continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
+    want="$(cat "$f" 2>/dev/null || true)"
+    have="$(_airlock_proc_start "$pid")"
+    # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
+    # as "dead" and prune a live peer's entry. An empty stored token means a file from
+    # an older version - fall back to bare existence rather than discarding it.
+    if [ -n "$have" ] && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
+      rc=0
+    else
+      rm -f "$f"
+    fi
+  done
+  return $rc
+}
+
+# `airlock session register|release <pid>` — the host `claude` wrapper's hook into the
+# refcount. A raw host session mounts nothing, but it USES $AIRLOCK_TMP under the same
+# name, so without this it is invisible to every box's cleanup and its scratch dir gets
+# removed out from under it. register/release are deliberately dumb: no config parsing,
+# no engine, no token.
+if [ "${1:-}" = "session" ]; then
+  _xslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _xdir="$HOME/.config/claude-airlock/state/$_xslug/sessions"
+  _xtmp="${AIRLOCK_TMP_BASE:-/tmp/airlock}/$_xslug"
+  _xpid="${3:-}"
+  case "${2:-}" in
+    register)
+      [ -n "$_xpid" ] || { echo "usage: airlock session register <pid>" >&2; exit 1; }
+      mkdir -p "$_xdir"
+      _airlock_proc_start "$_xpid" > "$_xdir/$_xpid" ;;
+    release)
+      [ -n "$_xpid" ] || { echo "usage: airlock session release <pid>" >&2; exit 1; }
+      rm -f "$_xdir/$_xpid"
+      # Same last-one-out rule the launcher follows: only tidy when nobody else holds it.
+      if ! _airlock_peers_in "$_xdir" "$_xpid"; then
+        rmdir "$_xtmp" 2>/dev/null || true
+        if [ "${AIRLOCK_TMP_BASE:-/tmp/airlock}" = /tmp/airlock ]; then
+          rmdir /tmp/airlock 2>/dev/null || true
+        fi
+        rmdir "$_xdir" 2>/dev/null || true
+      fi ;;
+    peers)   # diagnostic: does anyone else hold this project's shared dirs?
+      if _airlock_peers_in "$_xdir" "${_xpid:-0}"; then echo "peers: yes"; else echo "peers: none"; fi ;;
+    *) echo "usage: airlock session <register|release|peers> <pid>" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
 # `airlock shell` opens an interactive shell in the box instead of Claude — same
 # firewall, mounts, git identity, and Postgres, just bash. Doesn't take the
 # session lock (a shell can't corrupt --resume history).
@@ -689,20 +767,8 @@ slug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
 STATE_DIR="$HOME/.config/claude-airlock/state/$slug"
 mkdir -p "$STATE_DIR/dot-claude"
 
-# The kernel's start-time token for a pid (field 22 of /proc/<pid>/stat), or empty when
-# the pid is gone or /proc is unavailable. comm can contain spaces and parens, so cut
-# everything through the FINAL ") " first (greedy is required: a lazy match breaks on
-# such a comm, and every field after comm is numeric so it cannot over-strip); starttime
-# is then the 20th remaining field.
-# Pairing this with a pid is what makes a per-session file identify a PROCESS rather
-# than a number. Without it a recycled pid reads as live forever, and these files live
-# in persistent state rather than tmpfs, so that would survive reboots.
-_airlock_proc_start() {
-  local st
-  st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
-  st="${st##*') '}"
-  printf '%s' "$st" | cut -d' ' -f20
-}
+# _airlock_proc_start and _airlock_peers_in are defined above the subcommand dispatch,
+# because the host `claude` wrapper reaches them through `airlock session`.
 SELF_START="$(_airlock_proc_start "$$")"
 
 # --- Auth: shared long-lived OAuth token (CLAUDE_CODE_OAUTH_TOKEN) ---
@@ -836,31 +902,9 @@ mkdir -p "$SESS_DIR"
 SESS_FILE="$SESS_DIR/$$"
 printf '%s' "$SELF_START" > "$SESS_FILE"
 
-# True when another live session holds this project's scratch and artifact mounts.
-# Entries whose process is gone are pruned as we go, so a SIGKILLed session (trap never
-# ran) cannot pin the directories forever.
-_airlock_peer_sessions() {
-  local f pid want have rc=1
-  for f in "$SESS_DIR"/*; do
-    [ -e "$f" ] || continue                        # nullglob is off; skip the literal glob
-    pid="${f##*/}"
-    # Belt and braces: cleanup unlinks our own file before calling this, so we should
-    # never see ourselves - but the check keeps the function correct if that moves.
-    [ "$pid" = "$$" ] && continue
-    case "$pid" in ''|*[!0-9]*) continue ;; esac    # ignore anything not a pidfile
-    want="$(cat "$f" 2>/dev/null || true)"
-    have="$(_airlock_proc_start "$pid")"
-    # Liveness via /proc, not kill -0: kill -0 also fails with EPERM, which would read
-    # as "dead" and prune a live peer's entry. An empty stored token means a pidfile
-    # from an older version - fall back to bare existence rather than discarding it.
-    if [ -n "$have" ] && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
-      rc=0
-    else
-      rm -f "$f"
-    fi
-  done
-  return $rc
-}
+# One implementation, shared with the host wrapper via `airlock session` - see the
+# primitives above the subcommand dispatch.
+_airlock_peer_sessions() { _airlock_peers_in "$SESS_DIR" "$$"; }
 
 # The lock path is needed by the cleanup below; the lock itself is taken much later,
 # after the prompts, and LOCK_HELD stays 0 until then so an early exit never removes a
