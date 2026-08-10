@@ -465,14 +465,26 @@ EOF
   # QUIT and PIPE take bash's run-the-EXIT-trap-then-re-raise path just like HUP, so they
   # need the same treatment; the commit's own reasoning implies it.
   write_config "$proj" "egress = example.com"
+  # `set -m` is load-bearing, not tidiness. Without job control bash starts an ASYNC command
+  # with SIGINT and SIGQUIT set to SIG_IGN, and a signal ignored on entry cannot be trapped -
+  # so the launcher's `trap ... QUIT` was a silent no-op and the signal was never delivered.
+  # The test then failed against CORRECT code (a real user's foreground Ctrl-\ does fire it).
+  # TERM needs none of this, which is why only the QUIT twin failed.
+  set -m
   ( cd "$proj" && exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
       TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
       AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
       ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
       bash "$AIRLOCK" ) < <(sleep 30) >/dev/null 2>&1 &
   LPID=$!
+  set +m
   for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
   sleep 0.5
+  # Guard against the no-op regressing silently: SIGQUIT (bit 3, mask 0x4) must not be
+  # ignored, or the kill below is a no-op and the assertions pass/fail for the wrong reason.
+  # Checked HERE, not at `&`: the subshell still shows 0x4 until it execs the launcher.
+  run bash -c 'read -r _ m < <(grep ^SigIgn: /proc/"$1"/status); echo $(( 0x$m & 0x4 ))' _ "$LPID"
+  [ "$output" -eq 0 ]
   kill -QUIT "$LPID" 2>/dev/null
   wait "$LPID" 2>/dev/null || true
   sleep 0.3
