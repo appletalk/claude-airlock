@@ -90,6 +90,14 @@ HEAD. Everything is a stub-engine result unless stated.
 
     # G. two REAL boxes on one project, then the actual two-Otto workflow.
 
+**KNOWN FLAKE, seen 2026-08-10:** test 108, "two launches starting together do not
+collide on a shared temp path", failed once on `[ "$rcb" -eq 0 ]` and passed on an
+immediate re-run of the identical tree. It failed against GOOD code, which is the unsafe
+direction - review had predicted it could only be a weak detector, not a false alarm. If
+it fails during testing, re-run before believing it, and treat diagnosing it as in scope
+(a flaky test in the pre-commit hook blocks commits, which is usage-impacting). It is
+item 8 in the follow-up doc.
+
 `airlock shell` fed piped stdin never exits (podman `-it` gives it a pty, so bash never
 sees EOF). Use a short command like `--version` for scripted launches.
 
