@@ -493,6 +493,44 @@ EOF
   [ ! -e "$proj/.venv" ]
 }
 
+@test "SIGINT also ends the run rather than provisioning through it" {
+  proj="$(mkproj sigint)"
+  # The third of the untrappable-when-async pair. SIGINT is ignored on entry for the same
+  # reason SIGQUIT is (bash sets both SIG_IGN for an async command without job control), so
+  # without `set -m` this test would pass VACUOUSLY - the signal never arrives, the launcher
+  # sits at the prompt until stdin closes, and no engine is invoked either way. That is the
+  # dangerous direction, and it is why the guard below is not optional.
+  #
+  # Removing `trap ... INT` from the launcher is an EQUIVALENT MUTANT here - measured, not
+  # assumed: bash runs the EXIT trap on an untrapped SIGINT and exits 130 by itself, so rc,
+  # the pidfile and the lock come out identical either way. The explicit trap pins what bash
+  # already does. Do not "strengthen" this test to kill that mutation; there is no
+  # observable difference to assert on. What DOES kill it: changing the INT exit code away
+  # from 130, and dropping `set -m`.
+  write_config "$proj" "egress = example.com"
+  set -m
+  ( cd "$proj" && exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+      TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
+      AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
+      ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
+      bash "$AIRLOCK" ) < <(sleep 30) >/dev/null 2>&1 &
+  LPID=$!
+  set +m
+  for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
+  sleep 0.5
+  # SIGINT is bit 2, mask 0x2. Checked at the point of use, not at `&`.
+  run bash -c 'read -r _ m < <(grep ^SigIgn: /proc/"$1"/status); echo $(( 0x$m & 0x2 ))' _ "$LPID"
+  [ "$output" -eq 0 ]
+  kill -INT "$LPID" 2>/dev/null
+  rc=0; wait "$LPID" 2>/dev/null || rc=$?
+  sleep 0.3
+  # 130 is the INT branch specifically - 143/131 would mean a different trap ran.
+  [ "$rc" -eq 130 ]
+  run engine_args
+  [ -z "$output" ]
+  [ ! -e "$proj/.venv" ]
+}
+
 @test "two launches starting together do not collide on a shared temp path" {
   proj="$(mkproj concurrent)"
   # Every jq rewrite used a FIXED $FILE.tmp, so two launches on one project wrote and
@@ -560,7 +598,13 @@ EOF
   # The reset of a corrupt/empty settings.json used to TRUNCATE the shared file in place,
   # so a sibling reading it mid-merge silently lost the airlock baseline - no error, just
   # a box running without the intended permissions and env.
-  : > "$(state_dir "$proj")/dot-claude/settings.json" 2>/dev/null || true
+  # mkdir first: dot-claude/ does not exist before the first launch, so this redirect was a
+  # silent no-op (`No such file or directory`, swallowed by the `|| true`) and the reset
+  # branch was reached because the file was ABSENT, not empty - never the case named above.
+  mkdir -p "$(state_dir "$proj")/dot-claude"
+  : > "$(state_dir "$proj")/dot-claude/settings.json"
+  [ -e "$(state_dir "$proj")/dot-claude/settings.json" ]
+  [ ! -s "$(state_dir "$proj")/dot-claude/settings.json" ]
   _launch "$proj" shell >/dev/null 2>&1 & A=$!
   _launch "$proj" shell >/dev/null 2>&1 & B=$!
   rca=0; wait "$A" || rca=$?
