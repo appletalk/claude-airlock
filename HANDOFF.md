@@ -97,9 +97,13 @@ sees EOF). Use a short command like `--version` for scripted launches.
 
 **Fix only what is critical or usage-impacting.** Everything else gets filed and left.
 
-Seven follow-ups are listed below. **Do not fix these on this branch.** They are
-deliberate, batched input for a later ultra review pass, and Keith decides where they get
-tracked - do NOT file them on `appletalk/*`, which is his personal GitHub.
+Seven follow-ups are recorded in **`/home/keith/development/otto/airlock-followups.md`**,
+which outlives this file. They are listed again below for convenience. **Do not fix these
+on this branch** - they are deliberate, batched input for a later ultra review pass.
+
+Do NOT file them as GitHub issues. `appletalk/claude-airlock` is Keith's personal repo and
+the token is his work account; issues were filed there once by mistake and he had to
+delete them himself.
 
 1. **Cleanup's signal deafness has only a structural test.** The behavioural one needs a
    second signal delivered while cleanup is provably mid-pass: a stub `rmdir` that touches
