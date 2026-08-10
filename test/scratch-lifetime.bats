@@ -376,3 +376,30 @@ EOF
   [ "$output" -eq 1 ]
   [ -e "$(sessions_dir "$proj")/$PEER_PID" ]
 }
+
+@test "the cleanup sweep reaches per-process temps under artifacts/" {
+  proj="$(mkproj artitmp)"
+  # Force an orphan in the create->mv window, which normal operation never leaves: a stub
+  # `mv` that COPIES owner files instead of renaming, so the .tmp.<pid> source survives
+  # carrying the launcher's own pid - the only pid the sweep will ever match.
+  cat > "$STUBBIN/mv" <<EOF
+#!/usr/bin/env bash
+args=(); for a in "\$@"; do [ "\$a" = "-f" ] || args+=("\$a"); done
+if [ "\${#args[@]}" -eq 2 ] && case "\${args[1]}" in *.owner) true ;; *) false ;; esac; then
+  printf '%s\n' "\${args[0]}" >> "$BATS_TEST_TMPDIR/mvfired"
+  cp "\${args[0]}" "\${args[1]}"; exit \$?
+fi
+exec /usr/bin/mv "\$@"
+EOF
+  chmod +x "$STUBBIN/mv"
+  _launch "$proj"
+  rm -f "$STUBBIN/mv"
+  # The stub must actually have fired, or "no temps remain" holds because none was ever
+  # made and this test proves nothing. The owner file itself is released at exit, so its
+  # absence says nothing - the stub's own log is the only durable evidence.
+  run bash -c 'wc -l < "$1/mvfired" 2>/dev/null || echo 0' _ "$BATS_TEST_TMPDIR"
+  [ "$output" -gt 0 ]
+  # .venv is dot-prefixed and node_modules is not; a bare `*` glob only ever caught one.
+  run bash -c 'ls -A "$1"/artifacts 2>/dev/null | grep -c "\.tmp\." || true' _ "$(state_dir "$proj")"
+  [ "$output" -eq 0 ]
+}

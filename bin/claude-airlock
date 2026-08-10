@@ -1011,7 +1011,11 @@ _airlock_cleanup() {
   # Our own per-process temp files. Unique names mean a hard kill in the create->mv window
   # leaves one orphan PER PID forever, where the old fixed path left one reusable file -
   # bounded litter became unbounded.
-  rm -f "$STATE_DIR"/*.tmp."$$" "$STATE_DIR"/dot-claude/*.tmp."$$" 2>/dev/null || true
+  # artifacts/ needs BOTH globs: a store is named after the dir it shadows, so `.venv`
+  # yields a dot-prefixed .venv.owner.tmp.$$ that a bare `*` never matches, while
+  # node_modules yields an ordinary name. Omitting the directory missed both.
+  rm -f "$STATE_DIR"/*.tmp."$$" "$STATE_DIR"/dot-claude/*.tmp."$$" \
+        "$STATE_DIR"/artifacts/*.tmp."$$" "$STATE_DIR"/artifacts/.*.tmp."$$" 2>/dev/null || true
   # Release the artifact stores we hold read-write, so the next session can take them -
   # but only where the file still records US. "Ours by definition" is exactly the
   # assumption the lock release above refuses to make, and it is wrong for the same
