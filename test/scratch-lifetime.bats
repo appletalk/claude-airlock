@@ -272,7 +272,7 @@ EOF
   # session that can corrupt --resume history triggers it. A `shell` peer holds the same
   # mounts and deliberately does not.
   register_history_peer "$proj"
-  # The lock is still written for cross-tool compatibility, but nothing reads it.
+  # The lock is ALSO read as an additive fallback, for peers that register nothing.
   printf '%s airlock 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
   # _launch feeds /dev/null on stdin, so the prompt reads EOF and takes the abort branch.
   run _launch "$proj"

@@ -561,3 +561,42 @@ EOF
   run bash -c 'ls "$1"/dot-claude/*.tmp* 2>/dev/null | wc -l' _ "$(state_dir "$proj")"
   [ "$output" -eq 0 ]
 }
+
+@test "a lock-only peer (old wrapper, no registry entry) still warns" {
+  proj="$(mkproj lockonly)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")"
+  # Exactly what the OLD zsh wrapper writes: a 3-field lock and no pidfile. Not a
+  # transient upgrade state - every already-open terminal keeps the old `claude` function
+  # until re-sourced, and a wrapper pasted into an rc file never registers at all. main
+  # detected this; the registry-only warning did not, which made the branch worse than
+  # main for that case.
+  printf '%s host 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
+  run _launch "$proj"
+  [ "$status" -ne 0 ]                        # stdin is /dev/null, so the prompt aborts
+  [[ "$output" == *"already open"* ]]
+  [[ "$output" == *"$PEER_PID"* ]]
+}
+
+@test "a lock-only peer that is DEAD does not warn" {
+  proj="$(mkproj lockonlydead)"
+  sleep 60 & dead=$!
+  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  mkdir -p "$(state_dir "$proj")"
+  printf '%s host 0\n' "$dead" > "$(state_dir "$proj")/session.lock"
+  run _launch "$proj"
+  [ "$status" -eq 0 ]
+}
+
+@test "a registered peer is not counted twice via its lock" {
+  proj="$(mkproj nodouble)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")"
+  _launch "$proj" session register "$PEER_PID" host
+  printf '%s host 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
+  run _launch "$proj"
+  [[ "$output" == *"already open"* ]]
+  # named once, not twice
+  run bash -c 'grep -o "'"$PEER_PID"'" <<< "$1" | wc -l' _ "$output"
+  [ "$output" -eq 1 ]
+}
