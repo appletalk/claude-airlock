@@ -1183,8 +1183,21 @@ fi
 # doesn't misread the sandbox. Refreshed each launch.
 _self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 _repo="$(dirname "$(dirname "$_self")")"
-[ -f "$_repo/config/box-CLAUDE.md" ] && cp "$_repo/config/box-CLAUDE.md" "$STATE_DIR/dot-claude/CLAUDE.md"
-[ -f "$_repo/config/airlock-statusline.sh" ] && cp "$_repo/config/airlock-statusline.sh" "$STATE_DIR/dot-claude/airlock-statusline.sh"
+# Copy via a per-process temp + rename, the ninth site of the same class as the eight
+# below. A plain `cp` to a shared destination opens O_CREAT|O_EXCL when the file does not
+# yet exist, so two launches racing the FIRST creation give one of them
+# "cannot create regular file: File exists" and a non-zero launch. rename(2) cannot.
+_seed() {
+  [ -f "$1" ] || return 0
+  if cp "$1" "$2.tmp.$$"; then
+    mv -f "$2.tmp.$$" "$2"
+  else
+    rm -f "$2.tmp.$$"
+    return 1
+  fi
+}
+_seed "$_repo/config/box-CLAUDE.md" "$STATE_DIR/dot-claude/CLAUDE.md"
+_seed "$_repo/config/airlock-statusline.sh" "$STATE_DIR/dot-claude/airlock-statusline.sh"
 
 # Merge the airlock default settings.json baseline (env, attribution, permissions,
 # ...) into the box's settings each launch, so every session shares the same
