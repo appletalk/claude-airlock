@@ -1246,11 +1246,29 @@ fi
 # alike, is already start-time qualified against recycled pids, and prunes its own dead
 # entries. Our own pidfile is written well above this, hence the explicit self-exclusion.
 #
-# The lock is still WRITTEN below, unchanged in format, so an older launcher or wrapper
-# mid-upgrade keeps cross-detecting. Nothing here reads it any more.
+# The lock is still written below, unchanged in format, AND still read here as a fallback
+# - because the registry is only complete if every peer registers, and an older zsh
+# wrapper does not. That is not a transient upgrade state: every already-open terminal
+# keeps the old `claude` function until it is re-sourced, and a wrapper pasted into an rc
+# file never registers at all. Reading the registry alone made this launcher blind to
+# those sessions, which main detected. The fallback is strictly ADDITIVE - the lock can
+# only contribute a peer the registry missed, never suppress one - so it cannot bring back
+# the single-slot problems that motivated the move. It is skipped when the lock's pid is
+# already registered, so a modern peer is never counted twice.
 if [ "$AIRLOCK_SHELL" != 1 ]; then
   _airlock_peers_in "$SESS_DIR" "$$" || true      # prunes dead entries as a side effect
-  if _airlock_history_peers "$SESS_DIR" "$$"; then
+  _lockpeer=""
+  if [ -f "$LOCK" ]; then
+    _lp=""; _ls=""
+    read -r _lp _ _ _ls < "$LOCK" 2>/dev/null || true
+    case "${_lp:-}" in ''|*[!0-9]*) _lp="" ;; esac
+    if [ -n "$_lp" ] && [ "$_lp" != "$$" ] && [ ! -e "$SESS_DIR/$_lp" ] \
+       && [ -n "$(_airlock_proc_start "$_lp")" ] \
+       && { [ -z "${_ls:-}" ] || [ "$_ls" = "$(_airlock_proc_start "$_lp")" ]; }; then
+      _lockpeer="$_lp"
+    fi
+  fi
+  if _airlock_history_peers "$SESS_DIR" "$$" || [ -n "$_lockpeer" ]; then
     # Name only the peers that actually triggered this: a `shell` peer holds the mounts
     # but writes no history, so listing it here would be a lie about why we stopped.
     _peers=""
@@ -1263,6 +1281,7 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
       [ "${_pfk:-}" = shell ] && continue
       _peers="$_peers$_pfp "
     done
+    [ -n "$_lockpeer" ] && _peers="$_peers$_lockpeer "
     echo "claude-airlock: another session for this project is already open (pid(s): ${_peers% })." >&2
     echo "Two live sessions on one project can corrupt shared --resume history." >&2
     printf "Open another anyway? [y/N] " >&2
