@@ -97,11 +97,34 @@ sees EOF). Use a short command like `--version` for scripted launches.
 
 **Fix only what is critical or usage-impacting.** Everything else gets filed and left.
 
-Seven follow-ups are already filed as `appletalk/claude-airlock` issues #1-#7 (structural
--only deafness test, upgrade pidfile wart, unlocked read-modify-write, wrapper warning
-still lock-based, duplicated kind filter, missed temp sweep, a smoke test that is not a
-gate). **Do not fix these on this branch.** They are deliberate, batched input for a
-later ultra review pass.
+Seven follow-ups are listed below. **Do not fix these on this branch.** They are
+deliberate, batched input for a later ultra review pass, and Keith decides where they get
+tracked - do NOT file them on `appletalk/*`, which is his personal GitHub.
+
+1. **Cleanup's signal deafness has only a structural test.** The behavioural one needs a
+   second signal delivered while cleanup is provably mid-pass: a stub `rmdir` that touches
+   a marker, blocks on a FIFO, then execs the real one; launch, SIGTERM, wait for the
+   marker, SIGINT, release. Discriminate on exit 143 vs 130 and on the tail side effects.
+2. **An old single-field pidfile from `airlock shell` warns once during upgrade.** No kind
+   recorded parses as empty, which is not `shell`, so it reads as a history writer.
+   Fail-safe direction; self-clears when that shell exits.
+3. **`claude.json` and the box settings are read-modify-write without a lock.** The writes
+   are atomic; the read-modify-write is not mutually excluded. Content is deterministic
+   per launch, so benign except a fresh-project seed can transiently clobber a sibling's
+   `.projects[$ws]` trust flags.
+4. **The zsh wrapper's own warning still reads `session.lock`, not the registry.** It
+   inherits the single-slot limits (names one peer only). Not worse than main.
+   `airlock session peers` exists; a history-peers variant would share one source.
+5. **Duplicated kind-filter logic** in `_airlock_history_peers` and the peer-naming loop -
+   a pidfile format change must be made in both. This is the drift shape the branch was
+   repeatedly caught by.
+6. **Two per-process temps are missed by the cleanup sweep.** The sweep globs
+   `$STATE_DIR/*.tmp.$$` and `dot-claude/*.tmp.$$`; the artifact owner temp is
+   `$STATE_DIR/artifacts/.venv.owner.tmp.<pid>` - wrong directory and dot-prefixed.
+7. **"concurrent launches both get the settings baseline" is a smoke test, not a gate.**
+   Its setup `: > .../dot-claude/settings.json` is a silent no-op because that directory
+   does not exist before the first launch, so the reset branch is reached via absence
+   rather than emptiness.
 
 The failure mode to avoid is the one this branch already demonstrated: every individual
 fix is defensible on its own merits, so there is never an obviously-not-worth-it finding
