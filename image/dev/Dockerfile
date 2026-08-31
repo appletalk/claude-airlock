@@ -120,12 +120,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends unzip \
 
 # promtool from the Prometheus release tarball. Only the promtool binary is
 # extracted; the prometheus server itself is ~half the tarball and we never run it.
-ARG PROMETHEUS_VERSION=3.13.2
+ARG PROMETHEUS_VERSION=3.14.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=amd64; sha=0e8c4d46101bd025ea8265e377d2caabc57f488fc1be1c367f37db69ea41be6f ;; \
-      arm64) parch=arm64; sha=7cecb17a6f41d59814e1a0581a1f81f79051ad5973d1ecf39e23a9f747d6572a ;; \
+      amd64) parch=amd64; sha=f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d ;; \
+      arm64) parch=arm64; sha=077f3781ab7245dc04c9a3c9b78ba120fc8e41aa0dc97489b0af67247e50ba83 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     d="prometheus-${PROMETHEUS_VERSION}.linux-${parch}"; \
@@ -138,14 +138,14 @@ RUN set -eux; \
 
 # terraform: `fmt` only (see scope note above). tflint carries its terraform
 # ruleset inside the binary, so it lints with no plugin download.
-ARG TERRAFORM_VERSION=1.15.8
+ARG TERRAFORM_VERSION=1.16.0
 ARG TFLINT_VERSION=0.64.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) tfsha=d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d; \
+      amd64) tfsha=41d05b927aa174f15d1228c4eba832a323b716c68b415ef5a00179f46cc602d3; \
              tlsha=cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537 ;; \
-      arm64) tfsha=8891e9dcedc9e3b8950bc6af9d4d8af1f4cfade3062f53b9dc403a89f6ce8c9c; \
+      arm64) tfsha=60f86cea49a653e22a93c000f16cbfa391ce41c6f6a11d36557c35da411f684c; \
              tlsha=560da89aacf59389d4eb029730dd5b109b7288096c32f2726a0d9e783a5ea8eb ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
@@ -164,12 +164,12 @@ ENV CHECKPOINT_DISABLE=1
 
 # vector: the musl static build, so the binary carries its own libc and stays
 # decoupled from the Debian base.
-ARG VECTOR_VERSION=0.57.0
+ARG VECTOR_VERSION=0.58.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) varch=x86_64;  sha=b04fafcffcbeb3d43cbba587583dbe3338b24dd34256b3967fb15d137aff75f2 ;; \
-      arm64) varch=aarch64; sha=81cec5343e49985351e13f76ae3d550d7b0f0ac64fd4d88c07e3873bdfdf100a ;; \
+      amd64) varch=x86_64;  sha=ad013ddc164b80e425cc403d2174e26b811673846d1125c80bc7b5024826ce39 ;; \
+      arm64) varch=aarch64; sha=b21afc8ba23a6fca9aec049a313ba6da5e59b7fc2ed018839d83241de5ab95f7 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/vectordotdev/vector/releases/download/v${VECTOR_VERSION}/vector-${VECTOR_VERSION}-${varch}-unknown-linux-musl.tar.gz" -o /tmp/vector.tgz; \
@@ -189,12 +189,12 @@ RUN set -eux; \
 # Note the size: this is a ~450MB binary (every component plus the embedded UI are
 # linked in, and Go binaries don't strip usefully). It is the single largest tool
 # in the image -- roughly promtool + terraform + vector combined.
-ARG ALLOY_VERSION=1.18.1
+ARG ALLOY_VERSION=1.19.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) sha=fac853cbc3983a50a2368f9a685b31f74392ae86dd6155461b11a911c07b483c ;; \
-      arm64) sha=499446cfe22514d6c9f00af953d98162526ea818e84c4e452f8fddbbfa8676d6 ;; \
+      amd64) sha=3694ea4e1044b367e1c21ffe28117f209c5989fa5e604d000321809f871ab701 ;; \
+      arm64) sha=fbeaf099b7c90b8b83dfa4781601c1181d8d06e89af34b846680c86ce08f725c ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-${arch}.zip" -o /tmp/alloy.zip; \
@@ -210,13 +210,13 @@ RUN set -eux; \
 # AllUsers module path: the box's $HOME is a fresh mount every session, so a
 # CurrentUser install would vanish. Baking it here is also what makes the linter
 # work with zero egress.
-ARG POWERSHELL_VERSION=7.6.4
+ARG POWERSHELL_VERSION=7.6.5
 ARG PSSCRIPTANALYZER_VERSION=1.25.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=x64;   sha=4471b5a36bfe86ec7af8525d36bb1cacba0128e7aac22d05cc064bc00e604721 ;; \
-      arm64) parch=arm64; sha=d4ef2382fa452f2ccbdb48a01adbbce9ed64954872123970c16be6d086d1224b ;; \
+      amd64) parch=x64;   sha=b34ab3b19acac1d3d4d0d3cfdb02acf62f457b0b6a962ff008132033f7566844 ;; \
+      arm64) parch=arm64; sha=ed4084f215d8bce2edd23aa7cb1f1e7b0818e41363a635a22065d2701b6141df ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-${parch}.tar.gz" -o /tmp/pwsh.tgz; \
@@ -249,7 +249,7 @@ ENV POWERSHELL_TELEMETRY_OPTOUT=1 \
 # runtime; against a DROP rule those HANG rather than fail. The env var forces
 # offline mode (src/ansiblelint/config.py: nodeps -> offline -> no schema refresh),
 # which is the difference between a linter and a stall.
-ARG ANSIBLE_LINT_VERSION=26.6.0
+ARG ANSIBLE_LINT_VERSION=26.8.0
 RUN set -eux; \
     python3 -m venv /opt/ansible; \
     /opt/ansible/bin/pip install --no-cache-dir "ansible-lint==${ANSIBLE_LINT_VERSION}"; \
