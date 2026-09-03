@@ -188,6 +188,22 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
   [ "$output" = "1" ]
 }
 
+# The session-quality survey ("How is Claude doing this session?") prompts on a
+# probability, and a sandbox is not where anyone wants to answer it - the box is torn
+# down every session, so the prompt is pure interruption. `feedbackSurveyRate: 0` is the
+# documented off switch (Claude's own schema: "Probability (0-1) that the session quality
+# survey appears when eligible"), and it belongs in the BASELINE rather than a per-box
+# edit so a freshly provisioned project never sees it once.
+#
+# Asserted after a launch, not by reading config/box-settings.json: the value only matters
+# if the merge actually carries it into the box's settings.json, and a numeric 0 is exactly
+# the shape a sloppy merge drops as falsy.
+@test "the session-quality survey is disabled by default, in the box settings.json" {
+  p="$(mkproj)"; _launch "$p"
+  run jq -r '.feedbackSurveyRate' <<<"$(_box_settings "$p")"
+  [ "$output" = "0" ]
+}
+
 # The baseline must not hardcode these keys — a key here would be re-added by the merge on
 # every launch and no per-project `telemetry on` could keep it out.
 @test "box-settings.json does not hardcode the telemetry vars" {

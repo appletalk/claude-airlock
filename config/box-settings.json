@@ -14,6 +14,7 @@
     "deny": []
   },
   "tui": "fullscreen",
+  "feedbackSurveyRate": 0,
   "statusLine": {
     "type": "command",
     "command": "bash /home/dev/.claude/airlock-statusline.sh"
