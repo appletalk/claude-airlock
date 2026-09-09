@@ -138,14 +138,14 @@ RUN set -eux; \
 
 # terraform: `fmt` only (see scope note above). tflint carries its terraform
 # ruleset inside the binary, so it lints with no plugin download.
-ARG TERRAFORM_VERSION=1.16.0
+ARG TERRAFORM_VERSION=1.16.2
 ARG TFLINT_VERSION=0.64.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) tfsha=41d05b927aa174f15d1228c4eba832a323b716c68b415ef5a00179f46cc602d3; \
+      amd64) tfsha=0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a; \
              tlsha=cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537 ;; \
-      arm64) tfsha=60f86cea49a653e22a93c000f16cbfa391ce41c6f6a11d36557c35da411f684c; \
+      arm64) tfsha=c040bd1e3122b4290f70f74288d8c5a54ddd4254a3e52a29e7cc666653f50a0a; \
              tlsha=560da89aacf59389d4eb029730dd5b109b7288096c32f2726a0d9e783a5ea8eb ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
@@ -210,13 +210,13 @@ RUN set -eux; \
 # AllUsers module path: the box's $HOME is a fresh mount every session, so a
 # CurrentUser install would vanish. Baking it here is also what makes the linter
 # work with zero egress.
-ARG POWERSHELL_VERSION=7.6.5
+ARG POWERSHELL_VERSION=7.6.6
 ARG PSSCRIPTANALYZER_VERSION=1.25.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=x64;   sha=b34ab3b19acac1d3d4d0d3cfdb02acf62f457b0b6a962ff008132033f7566844 ;; \
-      arm64) parch=arm64; sha=ed4084f215d8bce2edd23aa7cb1f1e7b0818e41363a635a22065d2701b6141df ;; \
+      amd64) parch=x64;   sha=ddbc4a2d113bbd46d283cfedcbcd117a70caefd7673f41f2b4e0000badf103bc ;; \
+      arm64) parch=arm64; sha=924829e54c983648f6f1419a2dc7f9433c861b2fb5bd57736ff096c24f133729 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-${parch}.tar.gz" -o /tmp/pwsh.tgz; \
