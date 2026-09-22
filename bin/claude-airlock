@@ -271,6 +271,7 @@ _gate_shares() {
     return 0
   fi
   touch "$_store"
+  set -f                                                    # split, never glob (see the config parser)
   for _s in $_req; do
     _abs="$AIRLOCK_SHARE_BASE/$_s"
     if [ ! -d "$_abs" ]; then
@@ -306,6 +307,7 @@ _gate_shares() {
       _dst+=( "$_abs" )
     fi
   done
+  set +f
 }
 
 WORKSPACE="$PWD"
@@ -900,7 +902,16 @@ fi
 # Only known keys with validated values are honored; push tokens are NOT read
 # from here (a project must not reference your host secrets).
 PROJ_CFG="$WORKSPACE/.airlock/config"
+# Globbing is OFF while these values are split. The lists below are expanded unquoted
+# on purpose (space-separated entries), and an unquoted expansion also globs - against
+# the workspace, since that is the cwd. So `artifact_dirs = *` used to become one
+# shadow mount per top-level entry of the project, and `share = *` one approval prompt
+# per name that happened to exist under AIRLOCK_SHARE_BASE too: a box choosing, from a
+# file it can write, what the NEXT launch mounts and what the operator is asked. Entry
+# names are also restricted to portable path characters, so a literal `*` that survives
+# the split can never become a directory name either.
 if [ -f "$PROJ_CFG" ]; then
+  set -f
   while IFS= read -r _line || [ -n "$_line" ]; do
     _line="${_line%%#*}"
     case "$_line" in *=*) ;; *) continue ;; esac
@@ -909,7 +920,12 @@ if [ -f "$PROJ_CFG" ]; then
     case "$_key" in
       artifact_dirs)                                  # extra container-local dirs
         for _d in $_val; do
-          case "$_d" in /*|*..*) continue ;; esac     # relative paths only
+          case "$_d" in
+            ''|/*|*..*) continue ;;                   # relative paths only
+            *[!A-Za-z0-9._/-]*)                       # a glob or shell character is never a dir name here
+              echo "claude-airlock: .airlock/config: ignoring artifact_dirs entry '$_d' (letters, digits, . _ / - only)" >&2
+              continue ;;
+          esac
           case " $AIRLOCK_ARTIFACT_DIRS " in *" $_d "*) ;; *) AIRLOCK_ARTIFACT_DIRS="$AIRLOCK_ARTIFACT_DIRS $_d" ;; esac
         done ;;
       egress)                                         # requested; gated by host approval below
@@ -946,12 +962,22 @@ if [ -f "$PROJ_CFG" ]; then
         done ;;
       share)                                          # requested READ-ONLY folders (rel to base); gated below
         for _s in $_val; do
-          case "$_s" in ''|/*|*..*) continue ;; esac  # relative paths only, no escapes
+          case "$_s" in
+            ''|/*|*..*) continue ;;                   # relative paths only, no escapes
+            *[!A-Za-z0-9._/-]*)
+              echo "claude-airlock: .airlock/config: ignoring share entry '$_s' (letters, digits, . _ / - only)" >&2
+              continue ;;
+          esac
           _REQ_SHARE="${_REQ_SHARE:+$_REQ_SHARE }$_s"
         done ;;
       share_rw)                                       # requested READ-WRITE folders (rel to base); gated below
         for _s in $_val; do
-          case "$_s" in ''|/*|*..*) continue ;; esac  # relative paths only, no escapes
+          case "$_s" in
+            ''|/*|*..*) continue ;;                   # relative paths only, no escapes
+            *[!A-Za-z0-9._/-]*)
+              echo "claude-airlock: .airlock/config: ignoring share_rw entry '$_s' (letters, digits, . _ / - only)" >&2
+              continue ;;
+          esac
           _REQ_SHARE_RW="${_REQ_SHARE_RW:+$_REQ_SHARE_RW }$_s"
         done ;;
       image)                                          # must be a claude-airlock:* tag
@@ -961,6 +987,7 @@ if [ -f "$PROJ_CFG" ]; then
       *) : ;;                                         # ignore unknown keys
     esac
   done < "$PROJ_CFG"
+  set +f
 fi
 
 # --- Per-project state store (isolated: config, settings, other projects) ---
@@ -1228,6 +1255,7 @@ AIRLOCK_EGRESS_GROUPS="$(_resolve_egress_groups "$EGRESS_MODE")"
 if [ -n "${_REQ_EGRESS:-}" ]; then
   _APPROVED="$STATE_DIR/approved-egress"
   touch "$_APPROVED"
+  set -f                                                    # split, never glob (see the config parser)
   for _dom in $_REQ_EGRESS; do
     if grep -qxF "$_dom" "$_APPROVED"; then
       AIRLOCK_EXTRA_EGRESS="${AIRLOCK_EXTRA_EGRESS:+$AIRLOCK_EXTRA_EGRESS }$_dom"
@@ -1244,6 +1272,7 @@ if [ -n "${_REQ_EGRESS:-}" ]; then
       esac
     fi
   done
+  set +f
 fi
 
 # Gate folder shares requested by the (box-writable) .airlock/config, TOFU-style like
@@ -1534,6 +1563,7 @@ args+=( -v "$WORKSPACE:$WORKSPACE:rw" )
 # across the host↔container boundary (different interpreter/libc/arch), so the
 # box gets its OWN copy while the host's sits underneath, untouched — neither
 # side clobbers the other.
+set -f                                          # split, never glob (see the config parser)
 for d in $AIRLOCK_ARTIFACT_DIRS; do
   case "$d" in /*|*..*) continue ;; esac        # reject absolute paths / parent escapes
   host_path="$WORKSPACE/$d"
@@ -1589,6 +1619,7 @@ for d in $AIRLOCK_ARTIFACT_DIRS; do
     args+=( -v "$store:$host_path:rw" )
   fi
 done
+set +f
 
 # Host-approved per-project folder shares, mounted at their REAL host path so the box
 # sees the same absolute path you do (no /roots translation). `share_rw` mounts rw,

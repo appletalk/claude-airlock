@@ -198,3 +198,38 @@ EOF
   run _launch "$p"
   [[ "$output" == *"Allow the sandbox to reach 192.0.2.10:8428"* ]]
 }
+
+# --- no globbing of config values (review F11) ---------------------------------------
+# The lists are split unquoted, and an unquoted expansion also globs against the cwd,
+# which is the workspace. `artifact_dirs = *` used to shadow every top-level entry of the
+# project with an empty store, and `share = *` produced one approval prompt per name that
+# also existed under the share base - a box picking, from a file it can write, what the
+# next launch mounts and what the operator is asked.
+
+@test "artifact_dirs = * is not glob-expanded and never becomes a directory" {
+  p="$(mkproj glob)"; mkdir -p "$p/zzz-dir" "$p/aaa"
+  write_config "$p" "artifact_dirs = * ok-dir"
+  run _launch "$p"
+  [[ "$output" == *"ignoring artifact_dirs entry '*'"* ]]
+  ! engine_args | grep -q -- "zzz-dir:rw"
+  ! engine_args | grep -q -- "/aaa:rw"
+  [ ! -e "$p/*" ]                                        # no literal '*' directory either
+  engine_args | grep -q -- "/ok-dir:rw"                  # the sane entry still works
+}
+
+@test "share = * is not glob-expanded: no prompt per matching name" {
+  p="$(mkproj shglob)"; mkdir -p "$SHARE_BASE/repo-a" "$SHARE_BASE/repo-b" "$p/repo-a" "$p/repo-b"
+  write_config "$p" "share = *"
+  run _launch "$p"
+  [[ "$output" != *"Share "* ]]
+  [[ "$output" == *"ignoring share entry '*'"* ]]
+}
+
+@test "config entries with shell characters are ignored, plain nested paths still work" {
+  p="$(mkproj chars)"
+  write_config "$p" 'artifact_dirs = frontend/node_modules $(touch pwned) a;b'
+  run _launch "$p"
+  [ ! -e "$p/pwned" ]
+  engine_args | grep -q -- "/frontend/node_modules:rw"
+  ! engine_args | grep -q -- "a;b"
+}

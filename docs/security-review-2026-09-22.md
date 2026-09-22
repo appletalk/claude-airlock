@@ -360,6 +360,11 @@ stores (self-harm, but confusing), and spam share prompts with plausible sibling
 a directory outside it on the host (it is `rmdir`'d again by the last-one-out cleanup, so
 the lasting effect is nil). Fix: `set -f` around the parser or split with `read -ra`.
 
+**Fixed (2026-09-22).** Globbing is off while config-derived lists are split (parser,
+share gate, egress approval, artifact loop), and `artifact_dirs` / `share` / `share_rw`
+entries are limited to `A-Za-z0-9._/-`, so a surviving `*` can never become a directory
+name. Pinned in `test/config_parse.bats`.
+
 ### F12. Supply chain of the non-Debian layers — **Low**, effort **S**
 
 | Layer | Trust today | Note |
