@@ -61,6 +61,26 @@ claude() {
   # every box on the same project.
   slug="${PWD//[^a-zA-Z0-9]/-}"
   while [[ "$slug" == -* ]]; do slug="${slug#-}"; done
+  # Claude keys ~/.claude/projects by the same transform WITHOUT the leading dashes
+  # stripped - the launcher's HISTSLUG. That directory is shared read-write with every
+  # box on this project, and host Claude auto-loads memory/ from it, following symlinks
+  # (measured). A box that turned a memory file into a symlink to ~/.ssh/id_ed25519
+  # would have the key read into THIS session's context and written back into the shared
+  # transcript for the next box to collect. So refuse to start while any symlink exists
+  # there. Before the lock and the registration, so nothing is left behind on refusal.
+  # Refused rather than removed: it is either an attack you need to know about, or
+  # something you did on purpose and it is not ours to delete.
+  local histproj="$HOME/.claude/projects/${PWD//[^a-zA-Z0-9]/-}" links
+  if [[ -d "$histproj" ]]; then
+    links="$(find "$histproj" -type l 2>/dev/null)"
+    if [[ -n "$links" ]]; then
+      print -u2 "claude: refusing to start: symlink(s) in the shared session directory $histproj"
+      print -r -- "$links" | sed 's/^/    /' >&2
+      print -u2 "  Host Claude follows symlinks when it loads this project's memory, so a box that"
+      print -u2 "  planted one can make it read any file you can. Remove them, then retry."
+      return 1
+    fi
+  fi
   lock="$HOME/.config/claude-airlock/state/$slug/session.lock"
   if [[ -f "$lock" ]]; then
     read -r pid kind _ start < "$lock"
