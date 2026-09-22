@@ -19,7 +19,9 @@
 # on a non-standard port (e.g. VictoriaMetrics on 8428) -- that form opens exactly
 # that one host+port and nothing else. An entry that matches none of those shapes is
 # a typo and ABORTS the launch: a grant that can never apply would otherwise leave
-# the box looking configured while silently having no access.
+# the box looking configured while silently having no access. An entry that points
+# at the HOST (loopback, 169.254.x.x, 10.0.2.x, or an address on a host interface)
+# aborts too, unprompted: this file cannot grant the sandbox its own host.
 # egress = cdn.jsdelivr.net fonts.gstatic.com
 # egress = 10.1.15.115:8428, 10.1.15.116:8428
 

@@ -310,6 +310,36 @@ _gate_shares() {
 
 WORKSPACE="$PWD"
 
+# True when an egress entry (IPv4, IPv4:port or IPv6 literal) points at THIS host or at
+# the engine's stand-in for it: loopback, pasta's 169.254.0.0/16 (169.254.1.2 is the
+# host, 169.254.1.1 its resolver), slirp4netns' 10.0.2.0/24 (10.0.2.2 host, 10.0.2.3
+# resolver), or any address currently on a host interface (which under docker's bridge
+# includes docker0's 172.17.0.1, i.e. the host itself). The box-writable .airlock/config
+# can ask for these, and the approval prompt used to show them as a bare IP - a
+# prompt-injected `egress = 169.254.1.2:22` plus a reflexive "y" opened host sshd. Such a
+# grant is refused outright rather than prompted: there is no reading of "the sandbox
+# needs to reach the machine it is sandboxed from" that this file should be able to make.
+# An operator who really means it has AIRLOCK_EXTRA_EGRESS in the host config.
+_airlock_is_host_address() {
+  local ip="${1,,}" a b
+  case "$ip" in
+    *.*.*.*:*) ip="${ip%:*}" ;;              # IPv4:port
+  esac
+  if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    IFS=. read -r a b _ _ <<< "$ip"; a=$((10#$a)); b=$((10#$b))
+    [ "$a" -eq 127 ] && return 0
+    [ "$a" -eq 0 ] && return 0
+    [ "$a" -eq 169 ] && [ "$b" -eq 254 ] && return 0
+    [ "$a" -eq 10 ] && [ "$b" -eq 0 ] && [[ "$ip" == 10.0.2.* ]] && return 0
+  else
+    case "$ip" in ::1|::|0:0:0:0:0:0:0:1) return 0 ;; esac
+  fi
+  # Anything configured on a host interface right now, either family.
+  local have
+  have="$(ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr 'A-F' 'a-f')"
+  [ -n "$have" ] && grep -qxF -- "$ip" <<< "$have"
+}
+
 # `airlock shell` opens an interactive shell in the box instead of Claude — same
 # firewall, mounts, git identity, and Postgres, just bash. Doesn't take the
 # session lock (a shell can't corrupt --resume history).
@@ -901,6 +931,15 @@ if [ -f "$PROJ_CFG" ]; then
             echo "  hostname, IPv4, IPv4:port, or IPv6 literal. Fix the entry — it can never be" >&2
             echo "  granted, and starting without it would leave this box looking configured" >&2
             echo "  while silently having no access to it." >&2
+            exit 1
+          fi
+          # Refused before any approval lookup, so a grant approved before this check
+          # existed is caught too, and never prompted: see _airlock_is_host_address.
+          if _airlock_is_host_address "$_dom"; then
+            echo "claude-airlock: .airlock/config: 'egress = $_dom' points at THIS HOST (or the" >&2
+            echo "  engine's mapping of it). A project file cannot grant the sandbox its own host;" >&2
+            echo "  a compromised session would ask for exactly this. Remove the entry. If you" >&2
+            echo "  really mean it, AIRLOCK_EXTRA_EGRESS in $CONFIG_FILE is host-trusted." >&2
             exit 1
           fi
           _REQ_EGRESS="${_REQ_EGRESS:+$_REQ_EGRESS }$_dom"

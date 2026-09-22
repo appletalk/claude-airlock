@@ -37,6 +37,30 @@ DOMAIN_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]
 log() { echo "[airlock-fw] $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+# An address that IS this host, or the engine's stand-in for it, never goes into an
+# allow set: loopback (already open on lo, and a grant for it is meaningless), pasta's
+# 169.254.0.0/16 (169.254.1.2 was the host until the launcher removed the mapping;
+# 169.254.1.1 is the resolver, pinned on port 53 separately), slirp4netns' 10.0.2.0/24
+# (10.0.2.2 host, 10.0.2.3 resolver), and any address on the box's own interfaces (under
+# pasta those are the host's). The launcher refuses such literals from the box-writable
+# config; this is the layer under it, and it also catches a NAME that resolves there,
+# which only exists once dig has run. A literal here is an operator's own pin and dies
+# loudly; a resolved address is skipped with a warning, the name's other addresses stand.
+is_host_address() {
+  local ip="${1,,}" a b own
+  if [[ "$ip" =~ $IP_REGEX ]]; then
+    IFS=. read -r a b _ _ <<< "$ip"; a=$((10#$a)); b=$((10#$b))
+    [ "$a" -eq 127 ] && return 0
+    [ "$a" -eq 0 ] && return 0
+    [ "$a" -eq 169 ] && [ "$b" -eq 254 ] && return 0
+    [[ "$ip" == 10.0.2.* ]] && return 0
+  else
+    case "$ip" in ::1|::) return 0 ;; esac
+  fi
+  own="$(ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr 'A-F' 'a-f')"
+  [ -n "$own" ] && grep -qxF -- "$ip" <<< "$own"
+}
+
 # Classify an allowlist entry by shape: ipport | ipv4 | ipv6 | domain | invalid.
 # "invalid" is fatal at the call site. An entry we cannot classify can never be
 # granted, so continuing would hand back a box that looks configured and silently
@@ -271,6 +295,7 @@ for dom in "${DOMAINS[@]}"; do
       # (e.g. VictoriaLogs on 9428) would still be dropped. hash:ip,port + a dst,dst match
       # opens precisely that endpoint and nothing else — the tightest datasource grant.
       ip="${dom%:*}"; port="${dom##*:}"
+      is_host_address "$ip" && die "egress entry '$dom' is this host (or the engine's mapping of it); refusing to allow the box to reach its own host"
       ipset add -exist allowed-ipport "${ip},tcp:${port}" \
         || die "could not pin ${ip}:${port} — check the address and port are in range"
       log "pinned literal ${ip}:${port} (tcp)"
@@ -282,10 +307,12 @@ for dom in "${DOMAINS[@]}"; do
       # reached by IP), and a worker box must be able to egress to the datasource it is building
       # against to test its own work. Add the literal straight to the matching-family ipset. This
       # is the SAFEST egress case: no DNS indirection, no re-resolution drift — the pin is exact.
+      is_host_address "$dom" && die "egress entry '$dom' is this host (or the engine's mapping of it); refusing to allow the box to reach its own host"
       ipset add -exist allowed-domains "$dom" || die "could not pin IPv4 literal $dom"
       log "pinned literal IPv4 $dom (port 443 only — use IP:port for other ports)"
       continue ;;
     ipv6)
+      is_host_address "$dom" && die "egress entry '$dom' is this host (or the engine's mapping of it); refusing to allow the box to reach its own host"
       ipset add -exist allowed-domains-v6 "$dom" || die "could not pin IPv6 literal $dom"
       log "pinned literal IPv6 $dom"
       continue ;;
@@ -305,6 +332,10 @@ for dom in "${DOMAINS[@]}"; do
       # Not fatal, unlike an operator's literal pin: one A record among several can fail
       # while the domain stays reachable through the rest.
       if [ -n "$ip" ]; then
+        if is_host_address "$ip"; then
+          log "WARN: $dom resolves to $ip, which is this host — that address is NOT granted"
+          continue
+        fi
         ipset add -exist allowed-domains "$ip" \
           || log "WARN: could not add $ip (for $dom) — that address is NOT granted"
       fi
@@ -315,6 +346,10 @@ for dom in "${DOMAINS[@]}"; do
     resolved=1
     while read -r ip6addr; do
       if [ -n "$ip6addr" ]; then
+        if is_host_address "$ip6addr"; then
+          log "WARN: $dom resolves to $ip6addr, which is this host — that address is NOT granted"
+          continue
+        fi
         ipset add -exist allowed-domains-v6 "$ip6addr" \
           || log "WARN: could not add $ip6addr (for $dom) — that address is NOT granted"
       fi

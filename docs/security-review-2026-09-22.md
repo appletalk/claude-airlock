@@ -267,6 +267,13 @@ opens a host service to the box. Fix: refuse (or annotate in red) grants in
 `169.254.0.0/16`, `10.0.2.0/24`, loopback, and any address currently on a host interface.
 No functional cost; an operator who really wants it can use `AIRLOCK_EXTRA_EGRESS`.
 
+**Fixed (2026-09-22).** The launcher aborts on such an entry before the approval lookup
+(so an earlier approval does not survive) and never prompts; the firewall refuses the
+same addresses as literal pins and skips a resolved name's host addresses with a
+warning. Verified live in a box for `169.254.1.2`, `127.0.0.1:8080`, `10.0.2.2:80`,
+`::1` and the box's own LAN address; `192.0.2.10:8428` still pins. Launcher side pinned
+in `test/config_parse.bats`.
+
 ### F8. Second layer for the host mapping: `--map-guest-addr none` works — **Low**, effort **T**
 
 Podman already runs pasta as

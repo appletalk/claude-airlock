@@ -252,7 +252,12 @@ IPv4 (443 only), an IPv6 literal, or `IPv4:port` — the last opens exactly one 
 which is the tightest form and the right one for an internal datasource on a non-standard
 port. An entry matching none of those shapes **aborts the launch** rather than being
 skipped: a grant that can never apply would otherwise leave the box looking configured
-while silently having no access to the endpoint.
+while silently having no access to the endpoint. So does an entry that points at **this
+host** — loopback, pasta's `169.254.0.0/16`, slirp4netns' `10.0.2.0/24`, or any address
+on a host interface: a project file cannot grant the sandbox the machine it is sandboxed
+from, and it is never even prompted for. The firewall refuses the same addresses inside
+the box, including a hostname that resolves to one. An operator who really means it has
+`AIRLOCK_EXTRA_EGRESS` in the host config.
 
 Share paths are relative to `AIRLOCK_SHARE_BASE` (default `~/development`), so committed
 configs never contain absolute `/home` paths, and `..`/absolute are rejected.
