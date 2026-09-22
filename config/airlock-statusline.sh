@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 #
-# claude-airlock statusline. Mirrors the host statusline, but drops user@host
-# (inside the box it's just "dev@airlock") and leads with a bold (airlock) badge
-# so it's always obvious the session is sandboxed/firewalled. Shows the project
-# folder, git branch, model, context %, and subscription rate limits.
+# claude-airlock statusline. Shows the project folder, git branch, model,
+# context %, and subscription rate limits. In the box it leads with a bold
+# (airlock) badge so it's always obvious the session is sandboxed/firewalled.
+# The host points its own statusLine at this file with --host, which swaps in a
+# bold red (host) badge, so host and box lines are identical apart from it.
+badge="\033[1;38;5;28m(airlock)"
+[ "${1:-}" = "--host" ] && badge="\033[1;38;5;160m(host)"
 input=$(cat)
 
 cwd=$(echo "$input" | jq -r '.workspace.current_dir // .cwd')
@@ -19,14 +22,12 @@ if git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
              || git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
 fi
 
-# (airlock) badge — bold dark green, so "you're in the sandbox" is unmistakable
-printf "\033[1;38;5;28m(airlock)\033[0m"
+# (airlock) / (host) badge, so which side of the sandbox you're on is
+# unmistakable, plus a dim separator so it doesn't blur into the folder name
+printf "%b\033[0m \033[90m-\033[0m " "$badge"
 
-# dim separator so the badge doesn't blur into the folder name
-printf " \033[90m-\033[0m"
-
-# project folder — blue (matches the host statusline's cwd color)
-printf " \033[34m%s\033[0m" "$project"
+# project folder — blue
+printf "\033[34m%s\033[0m" "$project"
 
 # git branch — yellow
 [ -n "$branch" ] && printf " \033[33m(%s)\033[0m" "$branch"
