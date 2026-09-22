@@ -64,18 +64,21 @@ RUN chmod 0555 /usr/local/bin/airlock-pg-start
 
 # Node.js 24 from the official multi-distro binary tarball (nodejs.org), NOT apt
 # or NodeSource. This keeps the layer distro-agnostic: the exact same step ports
-# to Ubuntu / Arch base variants unchanged. Picks the newest v24.x at build time.
+# to Ubuntu / Arch base variants unchanged. Pinned by version + sha256 per arch like
+# every other upstream binary below (the checksums are nodejs.org's SHASUMS256.txt for
+# the release); it used to float to "newest v24.x at build time" on TLS alone, the one
+# download in the image a re-tag or a bad mirror could change silently. Bump with the
+# other pins.
+ARG NODE_VERSION=24.21.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) narch=x64 ;; \
-      arm64) narch=arm64 ;; \
+      amd64) narch=x64;   sha=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;; \
+      arm64) narch=arm64; sha=6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
-    ver="$(curl -fsSL https://nodejs.org/dist/index.json \
-             | jq -r '[.[] | select(.version | startswith("v24."))][0].version')"; \
-    test -n "$ver" && test "$ver" != null; \
-    curl -fsSL "https://nodejs.org/dist/${ver}/node-${ver}-linux-${narch}.tar.xz" -o /tmp/node.tar.xz; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${narch}.tar.xz" -o /tmp/node.tar.xz; \
+    echo "${sha}  /tmp/node.tar.xz" | sha256sum -c -; \
     tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
     rm /tmp/node.tar.xz; \
     node --version; npm --version
@@ -249,10 +252,18 @@ ENV POWERSHELL_TELEMETRY_OPTOUT=1 \
 # runtime; against a DROP rule those HANG rather than fail. The env var forces
 # offline mode (src/ansiblelint/config.py: nodeps -> offline -> no schema refresh),
 # which is the difference between a linter and a stall.
-ARG ANSIBLE_LINT_VERSION=26.8.0
+#
+# Every package in the venv is pinned by version AND sha256 in ansible-requirements.txt
+# (pip-compile --generate-hashes from `ansible-lint==<version>`), installed with
+# --require-hashes. Pinning only the top package left its ~30 dependencies to resolve
+# fresh at every build, so a rebuild could pull a different tree - or a poisoned one -
+# without anything in the repo changing. To bump: edit the version in the .in line at
+# the top of that file's header, regenerate with pip-compile in a box, review the diff.
+COPY ansible-requirements.txt /tmp/ansible-requirements.txt
 RUN set -eux; \
     python3 -m venv /opt/ansible; \
-    /opt/ansible/bin/pip install --no-cache-dir "ansible-lint==${ANSIBLE_LINT_VERSION}"; \
+    /opt/ansible/bin/pip install --no-cache-dir --require-hashes -r /tmp/ansible-requirements.txt; \
+    rm -f /tmp/ansible-requirements.txt; \
     for b in ansible ansible-playbook ansible-galaxy ansible-doc ansible-lint; do \
       ln -s "/opt/ansible/bin/$b" "/usr/local/bin/$b"; \
     done; \

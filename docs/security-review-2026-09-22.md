@@ -384,10 +384,10 @@ name. Pinned in `test/config_parse.bats`.
 | Layer | Trust today | Note |
 |---|---|---|
 | Debian packages | apt signatures | fine, but stale (F5) |
-| Claude Code | `curl https://claude.ai/install.sh \| bash`, version pinned by arg | the installer itself is unverified; upstream publishes no checksum for the script. Accept, or vendor the script and diff on change. |
-| Node 24 | TLS only, "newest v24.x" | `SHASUMS256.txt` (+ `.sig`) is published; verify it. S. |
+| Claude Code | `curl https://claude.ai/install.sh \| bash`, version pinned by arg | the installer itself is unverified; upstream publishes no checksum for the script. Accept, or vendor the script and diff on change. **Done:** vendored as `image/claude-install.sh` (it verifies the binary against the release manifest itself); `make claude-installer-diff` reviews upstream changes. |
+| Node 24 | TLS only, "newest v24.x" | `SHASUMS256.txt` (+ `.sig`) is published; verify it. S. **Done:** pinned to 24.21.0 by version + sha256 per arch. |
 | kubectl, helm, sops, tea, promtool, terraform, tflint, vector, alloy, pwsh, PSScriptAnalyzer | version + sha256 per arch | good; a re-tag fails the build. Bumps are manual (three bump commits since July). |
-| ansible-lint venv | `ansible-lint==26.8.0`, **transitive deps unpinned** | 30 packages resolved at build time; `pip list --outdated` shows only pip today, but a rebuild can pull a different tree. Use `pip install --require-hashes -r constraints.txt` (`pip-compile --generate-hashes`). S. |
+| ansible-lint venv | `ansible-lint==26.8.0`, **transitive deps unpinned** | 30 packages resolved at build time; `pip list --outdated` shows only pip today, but a rebuild can pull a different tree. Use `pip install --require-hashes -r constraints.txt` (`pip-compile --generate-hashes`). S. **Done:** `image/dev/ansible-requirements.txt`, every package hashed, installed with `--require-hashes`. |
 
 None of this is urgent; the firewall means a poisoned tool mostly hurts the box. It
 matters most for the tools that run **as root before the drop**: `dig`, `curl`, `jq`,

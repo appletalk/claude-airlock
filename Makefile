@@ -28,6 +28,10 @@ install: ## install the launcher + build base/dev images (packages refreshed wee
 refresh: ## rebuild the images with today's Debian security updates (forces the weekly refresh now)
 	@AIRLOCK_APT_REFRESH="$$(date +%G-W%V).$$(date +%F-%H%M)" bash bin/install.sh
 
+claude-installer-diff: ## show how upstream's Claude Code installer differs from the vendored copy
+	@curl -fsSL https://claude.ai/install.sh | diff -u image/claude-install.sh - \
+	  && echo "image/claude-install.sh matches upstream"
+
 lint: ## shellcheck the launcher + firewall + helper scripts (+ zsh -n on the integration)
 	@command -v "$(SHELLCHECK)" >/dev/null 2>&1 \
 	  || { echo "shellcheck not found — 'make bootstrap' or install it"; exit 1; }
@@ -66,4 +70,4 @@ hooks: ## install the git pre-commit hook (symlink)
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install refresh lint test doctor image-smoke check hooks bootstrap
+.PHONY: help install refresh claude-installer-diff lint test doctor image-smoke check hooks bootstrap

@@ -547,7 +547,12 @@ Layered, built by `make install`:
 
 Infrastructure-as-code tooling that runs to completion at **minimal egress** — no
 provider downloads, no collection resolution, no plugin fetches. All of it is pinned by
-version + sha256 in `image/dev/Dockerfile`.
+version + sha256 in `image/dev/Dockerfile`, and so is everything else the image
+downloads: Node by tarball checksum, the ansible-lint venv by a hash for every package
+(`image/dev/ansible-requirements.txt`), and Claude Code through a vendored copy of its
+installer (`image/claude-install.sh`, which itself checks the binary against the release
+manifest; `make claude-installer-diff` shows what upstream has changed). Only the Debian
+packages float, on the weekly refresh.
 
 | tool | what works offline |
 |---|---|
