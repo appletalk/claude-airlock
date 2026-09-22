@@ -341,6 +341,11 @@ under `/home/dev` outside `.claude` is persisted. Set an explicit root PATH in
 `entrypoint.sh`; no functional cost. Also noted: root can rewrite `/etc/resolv.conf`
 before the drop (harmless, the port-53 rules are already fixed) and `dev` cannot.
 
+**Fixed (2026-09-22).** `entrypoint.sh` sets the system PATH for the firewall phase and
+restores the image's PATH at the `gosu` exec. Verified live: the firewall phase sees
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, the agent still finds
+`claude` in `/home/dev/.local/bin`.
+
 ### F11. `.airlock/config` values are glob-expanded on the host — **Low**, effort **T**
 
 `for _d in $_val` and `for _s in $_val` are unquoted, so `artifact_dirs = *` expands
