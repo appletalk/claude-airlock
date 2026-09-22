@@ -191,6 +191,9 @@ airlock secret list | rm KEY             (pass:PATH resolves via `pass` at launc
 airlock share list              review approved folder shares (ro/rw)
 airlock share rm RELPATH        revoke a share approval
 
+airlock mount add DIR           mount a host dir READ-ONLY into this project's box
+airlock mount list | rm DIR     (host-only; e.g. a scoped credential dir, see below)
+
 airlock egress                  show this project's egress posture
 airlock egress minimal|dev      Anthropic-only  |  + npm/PyPI/GitHub
 airlock egress github pypi      an explicit subset (replaces)
@@ -241,6 +244,33 @@ while silently having no access to the endpoint.
 
 Share paths are relative to `AIRLOCK_SHARE_BASE` (default `~/development`), so committed
 configs never contain absolute `/home` paths, and `..`/absolute are rejected.
+
+## Read-only host mounts — `airlock mount`
+
+`share` only reaches folders under `AIRLOCK_SHARE_BASE`, and `.airlock/config` is writable
+from inside the box, so neither can hand a box a credential that lives elsewhere.
+`airlock mount add DIR` does: a host-only, per-project grant (stored in the host state
+dir, with no `.airlock/config` key), always **read-only**, mounted at its real path.
+
+The intended use is a scoped, short-lived credential you re-mint on the host, e.g. a
+read-only kubeconfig whose `tokenFile` sits in the same directory:
+
+```
+airlock mount add ~/.kube-claude
+airlock secret set KUBECONFIG /home/you/.kube-claude/config
+```
+
+Because the whole directory is mounted (not the file), a token replaced on the host with
+`mv` is visible to a running box on its next read — no relaunch when it expires.
+
+Refused, with **no override**, at `add` and again at every launch: anything that is not an
+existing directory under `$HOME` once symlinks are resolved; `$HOME` itself; anything
+inside a credential directory (`~/.ssh`, `~/.gnupg`, `~/.kube`, `~/.config/sops`,
+`~/.password-store`, `~/.claude`, `~/.config/claude-airlock`, keyrings, cloud CLIs, …) or
+an ancestor of one (so `~/.config` is refused); a directory not owned by you or writable
+by group/others; one holding a hard-linked file (a hard link to a key is the same inode, so
+a mount would expose it); and the workspace. At launch, an approved path that now resolves
+somewhere else is skipped too. Skipping only removes access, so it warns rather than aborts.
 
 ## Host config — `~/.config/claude-airlock/config`
 
