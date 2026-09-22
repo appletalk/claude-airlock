@@ -43,9 +43,14 @@ our risk assessment, is very welcome):
   not TLS SNI, so a site sharing an allowlisted IP (common behind shared CDNs when a
   registry group is enabled) is reachable. Closing this needs an L7 proxy.
 - **The shared workspace and `memory/` are influence channels.** Files a box writes into
-  your project (git hooks, `.envrc`, build scripts) or into shared memory can later be run
-  or read by the *unsandboxed* host. The firewall cannot see a file write. Review a
-  touched repo before building/committing; tighten memory with `AIRLOCK_SHARE_MEMORY=ro`.
+  your project can later be run or read by the *unsandboxed* host, and some run with no
+  build step and no prompt: `.git/config` keys such as `core.fsmonitor` on a plain host
+  `git status`, hooks in `.claude/settings.json` and servers in `.mcp.json` when you open
+  host `claude` there, plus git hooks, `.envrc` and build scripts. Shared memory is read
+  by the host agent every session. The firewall cannot see a file write, and there is no
+  wrapper policing host `git` by design. Review a touched repo, including `.git/config`
+  and `.claude/`, before host tooling runs in it; tighten memory with
+  `AIRLOCK_SHARE_MEMORY=ro`. Symlinks in the shared session directory are refused.
 - **Class B — destructive but *authorized* actions** (a bad `terraform destroy`, a
   force-push) are not solved by isolation. Keep write credentials out of the box.
 

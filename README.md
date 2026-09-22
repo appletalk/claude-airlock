@@ -428,18 +428,30 @@ never *here is an older image you are about to mistake for the new one*.
 The firewall contains the *network*. It does nothing about files. Your project is mounted
 **read-write at its real path** (that's the point — the box does real work), so the box can
 write any file the host will later execute **itself, unsandboxed, with your real
-credentials**:
+credentials**. Three of them run **without a build step and without asking** — verified
+on the host, not inferred:
 
-- `.git/hooks/*` — run on your next host `git commit` / `push` / `merge`
-- `.envrc` — run by direnv the next time you `cd` in
-- `Makefile`, `package.json` scripts, `pyproject.toml` / `setup.py`, `conftest.py`,
-  `.vscode/tasks.json`, pre-commit configs, `node_modules/.bin` shims …
+- **`.git/config`** — `core.fsmonitor` runs on every host `git status`; `core.pager` on
+  anything that pages; `core.hooksPath`, `core.sshCommand` (next fetch/push),
+  `diff.external`, `filter.*` and `alias.*` likewise. Git has no way to ignore a repo's
+  own config, and its ownership check does not fire because keep-id makes the files yours.
+  `.git/hooks/*` is the same channel, narrower: commit / push / merge only.
+- **`.claude/settings.json`** and **`.claude/settings.local.json`** — hooks in them run
+  when you next open host `claude` in the repo, with no approval dialog. **`.mcp.json`**
+  is the same: the host launches whatever server binary it names. **`CLAUDE.md`** is the
+  no-execution variant — instructions the host agent follows.
+- Everything that runs when you build or enter the tree: `Makefile`, `package.json`
+  scripts, `pyproject.toml` / `setup.py`, `conftest.py`, `.vscode/tasks.json`, pre-commit
+  configs, `node_modules/.bin` shims, and `.envrc` once you `direnv allow` it again
+  (direnv refuses a changed file until you do; the risk is the reflexive re-allow).
 
-None of these touch the network, so containment never sees them. This is the same class as
-the memory channel below, just broader: **treat a repo a box has worked in the way you'd
-treat a PR from a stranger** — review it before you build, commit, or `cd` into it on the
-host with direnv active. Running untrusted code? Do it in the box, and don't run host-side
-build/commit tooling in that tree until you've looked at the diff.
+None of these touch the network, so containment never sees them. There is no mechanism
+here for this, deliberately: a writable workspace is the product, and a wrapper around
+`git` to police it is more machinery than it is worth. So it is a rule, not a feature:
+**treat a repo a box has worked in the way you'd treat a PR from a stranger.** Before you
+run host `git`, host `claude`, or a build in that tree, look at the diff — and look at
+`.git/config` and `.claude/` too, since `git diff` does not show you those. Running
+untrusted code? Do it in the box, and keep host tooling out of that tree until you have.
 
 ### Known limitation: shared memory is an influence channel
 
