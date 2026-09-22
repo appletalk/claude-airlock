@@ -162,3 +162,39 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a valid"* ]]
 }
+
+# --- host-address grants (review F7) -------------------------------------------------
+# The box-writable config used to be able to ask for the HOST: `egress = 169.254.1.2:22`
+# reached the approval prompt as a bare IP, and a reflexive "y" opened host sshd to the
+# box. Loopback, pasta's 169.254.0.0/16, slirp4netns' 10.0.2.0/24 and any address on a
+# host interface are refused outright - before the approval lookup, so an earlier
+# approval does not survive either, and never prompted.
+
+@test "an egress entry for the host or the engine's host mapping aborts, unprompted" {
+  for e in 169.254.1.2:22 169.254.1.2 127.0.0.1:8080 10.0.2.2:80 ::1; do
+    p="$(mkproj "host-$RANDOM")"; write_config "$p" "egress = $e"
+    : > "$ENGINE_ARGS_FILE"
+    run _launch "$p"
+    [ "$status" -ne 0 ] || { echo "accepted $e"; false; }
+    [[ "$output" == *"THIS HOST"* ]] || { echo "no host message for $e: $output"; false; }
+    [[ "$output" != *"Allow the sandbox"* ]]            # never reaches the prompt
+    [ -z "$(invoked_engine)" ]
+  done
+}
+
+@test "an address on a host interface is refused even if it was approved earlier" {
+  own="$(ip -o -4 addr show 2>/dev/null | awk '!/ lo /{print $4}' | cut -d/ -f1 | head -1)"
+  [ -n "$own" ] || skip "no non-loopback IPv4 address on this host"
+  p="$(mkproj hostif)"; write_config "$p" "egress = $own:22"
+  sd="$(state_dir "$p")"; mkdir -p "$sd"; printf '%s:22\n' "$own" > "$sd/approved-egress"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"THIS HOST"* ]]
+  [ -z "$(invoked_engine)" ]
+}
+
+@test "a non-host IP:port grant still prompts as before" {
+  p="$(mkproj notost)"; write_config "$p" "egress = 192.0.2.10:8428"
+  run _launch "$p"
+  [[ "$output" == *"Allow the sandbox to reach 192.0.2.10:8428"* ]]
+}
