@@ -164,6 +164,12 @@ memory warning; have the host `claude` wrapper hash `.claude/settings*.json`, `.
 launch if they changed; consider the same for `.git/hooks`. S. No functional cost beyond a
 warning you can dismiss.
 
+**Decision (2026-09-22): documented, not mechanised.** The README's workspace limitation
+and SECURITY.md now name `.claude/settings*.json`, `.mcp.json`, `CLAUDE.md` and
+`.git/config` explicitly and state the rule (review those before host tooling runs). The
+change-detection warning was declined as more machinery than it is worth; it can be
+revisited if the rule proves hard to keep.
+
 ### F3. `.git/config` runs box-chosen commands on the host on `git status` — **Medium**, effort **T** (docs)
 
 **Evidence.**
@@ -178,7 +184,9 @@ Other keys with the same effect: `core.pager` (any output command), `core.hooksP
 `alias.*`. Git offers no way to ignore repo-local config; the ownership check
 (`safe.directory`) does not fire because keep-id makes the files yours.
 
-**Cost.** Documentation only, plus include `.git/config` in the F2 change-detection list.
+**Cost.** Documentation only. **Done (2026-09-22):** the README now lists the
+`.git/config` keys and says a plain `git status` is enough; a wrapper around host `git`
+was rejected as too much machinery.
 
 ### F4. Transcripts are a forgeable influence channel and the return path for F1 — **Medium**, effort **T** (docs)
 
