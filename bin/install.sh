@@ -143,6 +143,34 @@ if [ -z "$APT_REFRESH" ]; then
   esac
 fi
 
+# The Claude Code installer is VENDORED (image/claude-install.sh): the build runs the
+# copy in the repo, never a script piped from the network, so a build is deterministic
+# and an upstream change is something you read before you take it. The price is that
+# the copy goes stale, and stale means it may one day stop matching the release layout
+# it fetches. So every build compares it with upstream and says so, loudly, when they
+# differ. It does not fail the build: drift is a review item, not a broken image, and
+# an offline install must still work. Update with `make claude-installer-update` after
+# reading the diff (`make claude-installer-diff`).
+echo "==> Checking the vendored Claude Code installer against upstream"
+if upstream="$(curl -fsSL --max-time 20 https://claude.ai/install.sh 2>/dev/null)" && [ -n "$upstream" ]; then
+  if [ "$upstream" = "$(cat "$REPO_DIR/image/claude-install.sh")" ]; then
+    echo "    image/claude-install.sh matches upstream"
+  else
+    # `|| true` twice over: diff exits 1 when the files differ (always, here) and grep -c
+    # exits 1 on zero matches; under pipefail + errexit either would end the install
+    # silently at the very line that exists to make the drift loud.
+    drift="$(diff <(printf '%s\n' "$upstream") "$REPO_DIR/image/claude-install.sh" 2>/dev/null | grep -c '^[<>]' || true)"
+    echo >&2
+    echo "    !!! INSTALLER DRIFT: image/claude-install.sh no longer matches https://claude.ai/install.sh" >&2
+    echo "    !!! ($drift changed line(s)). This build still uses the vendored copy. Review and update:" >&2
+    echo "    !!!     make claude-installer-diff      # read what changed" >&2
+    echo "    !!!     make claude-installer-update    # take it, then commit image/claude-install.sh" >&2
+    echo >&2
+  fi
+else
+  echo "    WARNING: could not fetch https://claude.ai/install.sh to compare - drift unknown." >&2
+fi
+
 echo "==> Refreshing the base tag ($BASE_IMAGE)"
 if ! "$AIRLOCK_ENGINE" pull -q "$BASE_IMAGE" >/dev/null; then
   echo "    WARNING: could not pull $BASE_IMAGE - building from the cached copy." >&2

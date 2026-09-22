@@ -32,6 +32,12 @@ claude-installer-diff: ## show how upstream's Claude Code installer differs from
 	@curl -fsSL https://claude.ai/install.sh | diff -u image/claude-install.sh - \
 	  && echo "image/claude-install.sh matches upstream"
 
+claude-installer-update: ## replace the vendored Claude Code installer with upstream's (read the diff first)
+	@curl -fsSL https://claude.ai/install.sh -o image/claude-install.sh.new \
+	  && mv image/claude-install.sh.new image/claude-install.sh \
+	  && sha256sum image/claude-install.sh \
+	  && echo "updated image/claude-install.sh - review 'git diff', then commit and 'make install'"
+
 lint: ## shellcheck the launcher + firewall + helper scripts (+ zsh -n on the integration)
 	@command -v "$(SHELLCHECK)" >/dev/null 2>&1 \
 	  || { echo "shellcheck not found — 'make bootstrap' or install it"; exit 1; }
@@ -70,4 +76,4 @@ hooks: ## install the git pre-commit hook (symlink)
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install refresh claude-installer-diff lint test doctor image-smoke check hooks bootstrap
+.PHONY: help install refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap

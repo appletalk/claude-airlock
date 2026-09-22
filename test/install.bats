@@ -118,3 +118,37 @@ EOF
   [ "$(grep -cE '^[A-Za-z0-9_.-]+==' "$req")" -gt 20 ]
   [ "$(grep -c -- '--hash=sha256:' "$req")" -ge "$(grep -cE '^[A-Za-z0-9_.-]+==' "$req")" ]
 }
+
+# The vendored installer goes stale by design; every build must say so, loudly, without
+# failing, and stay quiet when it matches. curl is stubbed to play upstream.
+_stub_upstream_installer() {   # $1 = file to serve as https://claude.ai/install.sh
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in *claude.ai/install.sh) cat "%s"; exit 0 ;; esac; done\nexit 22\n' "$1" > "$STUBBIN/curl"
+  chmod +x "$STUBBIN/curl"
+}
+
+@test "install reports installer drift loudly and still builds" {
+  printf '#!/bin/sh\necho changed upstream\n' > "$BATS_TEST_TMPDIR/upstream.sh"
+  _stub_upstream_installer "$BATS_TEST_TMPDIR/upstream.sh"
+  _install
+  grep -q 'INSTALLER DRIFT' "$BATS_TEST_TMPDIR/install.err"
+  grep -q 'make claude-installer-update' "$BATS_TEST_TMPDIR/install.err"
+  engine_args | grep -qx -- "APT_REFRESH=$(week)"      # the build still ran
+}
+
+@test "install is quiet about the installer when the vendored copy matches upstream" {
+  _stub_upstream_installer "$BATS_TEST_DIRNAME/../image/claude-install.sh"
+  _install
+  ! grep -q 'INSTALLER DRIFT' "$BATS_TEST_TMPDIR/install.err"
+}
+
+@test "install warns, without failing, when upstream cannot be fetched to compare" {
+  printf '#!/bin/sh\nexit 22\n' > "$STUBBIN/curl"; chmod +x "$STUBBIN/curl"
+  _install
+  grep -q 'drift unknown' "$BATS_TEST_TMPDIR/install.err"
+  engine_args | grep -qx -- "APT_REFRESH=$(week)"
+}
+
+@test "make has diff and update targets for the vendored installer" {
+  grep -qE '^claude-installer-diff:' "$BATS_TEST_DIRNAME/../Makefile"
+  grep -qE '^claude-installer-update:' "$BATS_TEST_DIRNAME/../Makefile"
+}
