@@ -1348,11 +1348,15 @@ if command -v jq >/dev/null 2>&1; then
   [ "${HOST_THEME:-}" = "null" ] && HOST_THEME="dark"
   # Strip, every launch, what the old seed carried into projects provisioned before the
   # allowlist: githubRepoPaths unconditionally (the box re-adds its own repo if it wants
-  # to, which is harmless), and the host's userID / machineID / oauthAccount ONLY when
-  # they still equal the host's, i.e. they came from the seed. A box that generated its
-  # own identifiers, or logged itself in under `airlock login persist`, keeps them: those
-  # are the box's own state, and churning them every launch would be its own problem.
-  HOST_IDS="$(jq -c '{userID, machineID, oauthAccount}' "$HOME/.claude.json" 2>/dev/null)" || HOST_IDS='{}'
+  # to, which is harmless), and the host's userID / machineID ONLY while they still equal
+  # the host's, i.e. they came from the seed. A box that generated its own identifiers
+  # keeps them: churning them every launch would be its own problem.
+  # oauthAccount is deliberately NOT touched here. A login done inside the box - the
+  # persist mode, or a /login in any box - writes the box's own profile, and for the same
+  # account it can be identical to the host's, so equality cannot tell the two apart.
+  # The allowlist keeps it out of NEW seeds; in an old one it is email and org IDs the
+  # box can learn from its token anyway, which is not worth risking a box's login over.
+  HOST_IDS="$(jq -c '{userID, machineID}' "$HOME/.claude.json" 2>/dev/null)" || HOST_IDS='{}'
   [ -n "$HOST_IDS" ] || HOST_IDS='{}'
   if jq --arg theme "$HOST_THEME" --arg ws "$WORKSPACE" --argjson host "$HOST_IDS" '
       .hasCompletedOnboarding = true
@@ -1363,7 +1367,6 @@ if command -v jq >/dev/null 2>&1; then
     | del(.githubRepoPaths)
     | if (.userID != null and .userID == $host.userID) then del(.userID) else . end
     | if (.machineID != null and .machineID == $host.machineID) then del(.machineID) else . end
-    | if (.oauthAccount != null and .oauthAccount == $host.oauthAccount) then del(.oauthAccount) else . end
   ' "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
     mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json"
   else
