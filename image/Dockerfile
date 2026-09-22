@@ -92,9 +92,18 @@ RUN chmod 0444 /etc/airlock/firewall.conf \
 # The literal default ("latest", the channel the upstream installer picks when
 # given no target) is for a bare `docker build image/`: right version on a cold
 # build, but cacheable - go through bin/install.sh to guarantee freshness.
+#
+# The installer is VENDORED (image/claude-install.sh), not piped from claude.ai at build
+# time. It already verifies the binary it downloads against the sha256 in the release
+# manifest, so the binary was never the unverified part - the script was. Running the
+# copy in the repo makes the build deterministic and turns an upstream change into a diff
+# you review when you choose to take it: `make claude-installer-diff` shows it. Upstream
+# sha256 of the vendored copy: 3a68d3406cf674e17bed1733a4dcf37805e2e47d87417700007d7e1aa766a944
 ARG CLAUDE_CODE_VERSION=latest
+COPY --chown=${USERNAME}:${USERNAME} claude-install.sh /tmp/claude-install.sh
 USER ${USERNAME}
-RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}" \
+RUN bash /tmp/claude-install.sh "${CLAUDE_CODE_VERSION}" \
+    && rm -f /tmp/claude-install.sh \
     && /home/${USERNAME}/.local/bin/claude --version
 ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
 

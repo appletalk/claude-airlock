@@ -87,3 +87,34 @@ EOF
   grep -qE '^refresh:' "$BATS_TEST_DIRNAME/../Makefile"
   grep -A1 '^refresh:' "$BATS_TEST_DIRNAME/../Makefile" | grep -q 'AIRLOCK_APT_REFRESH="\$\$(date +%G-W%V)\.'
 }
+
+# --- supply chain of the non-Debian layers (review F12) ------------------------------
+# Everything the images download is pinned so a re-tag, a bad mirror or a changed
+# dependency tree fails the build instead of shipping. These pin the pins.
+
+@test "Claude Code is installed from the vendored installer, never piped from the network" {
+  df="$BATS_TEST_DIRNAME/../image/Dockerfile"
+  ! grep -qE 'curl[^|]*install\.sh[^|]*\|[[:space:]]*bash' "$df"
+  grep -q 'COPY .*claude-install.sh' "$df"
+  grep -q 'bash /tmp/claude-install.sh' "$df"
+  [ -s "$BATS_TEST_DIRNAME/../image/claude-install.sh" ]
+  # The vendored script verifies the binary it downloads against the release manifest.
+  grep -q 'checksum' "$BATS_TEST_DIRNAME/../image/claude-install.sh"
+}
+
+@test "Node is pinned by version and per-arch sha256, not resolved at build time" {
+  df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  grep -qE '^ARG NODE_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$df"
+  ! grep -q 'nodejs.org/dist/index.json' "$df"
+  awk '/ARG NODE_VERSION/{f=1} f&&/sha256sum -c/{ok=1} f&&/node --version/{exit} END{exit !ok}' "$df"
+}
+
+@test "the ansible venv installs only hash-pinned packages" {
+  df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  req="$BATS_TEST_DIRNAME/../image/dev/ansible-requirements.txt"
+  grep -q -- '--require-hashes -r /tmp/ansible-requirements.txt' "$df"
+  grep -qE '^ansible-lint==[0-9]+\.[0-9]+\.[0-9]+ ' "$req"
+  # every pinned package carries at least one hash
+  [ "$(grep -cE '^[A-Za-z0-9_.-]+==' "$req")" -gt 20 ]
+  [ "$(grep -c -- '--hash=sha256:' "$req")" -ge "$(grep -cE '^[A-Za-z0-9_.-]+==' "$req")" ]
+}
