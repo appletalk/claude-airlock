@@ -94,6 +94,19 @@ fi
 hdr "image"
 if "$ENGINE" image exists "$IMAGE" 2>/dev/null || "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1; then
   ok "$IMAGE present"
+  # When the base apt layer was last refreshed (bin/install.sh's APT_REFRESH key). The
+  # image's own Created time cannot tell you: a cache hit on the apt layer under a fresh
+  # Claude Code layer reports today's date for July's packages. Three shapes: a key from
+  # bin/install.sh (week, or week.timestamp after `make refresh`); "unkeyed", the
+  # Dockerfile default for a build that bypassed install.sh (CI, a bare `podman build`),
+  # whose packages are as of that build but on no schedule; and no label at all, an image
+  # from before the refresh existed, which may be months stale.
+  refresh="$("$ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.apt-refresh"}}' "$IMAGE" 2>/dev/null)"
+  case "$refresh" in
+    "")      warn "packages: no refresh record (image predates the weekly refresh) — run: make refresh" ;;
+    unkeyed) warn "packages: built directly, not via 'make install' — current as of that build, but not on the weekly refresh" ;;
+    *)       ok "packages refreshed: $refresh (weekly on 'make install'; 'make refresh' forces it)" ;;
+  esac
 else
   bad "$IMAGE not built — run: make install"
   echo; exit 1

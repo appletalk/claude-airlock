@@ -91,11 +91,23 @@ check fails, the install says so loudly rather than leaving you with a sandbox t
 isn't one. Re-run it any time with `make doctor` (or `airlock doctor`), especially after
 changing engines or upgrading the kernel.
 
-Re-running it is also how you **update Claude Code in the box**: the install resolves the
-current release and passes it as the base image's build arg, so a new release rebuilds
-that layer instead of silently reusing the cached one. Unchanged upstream is a cache hit
-and costs nothing. Pin or track a different channel with
-`CLAUDE_CODE_VERSION=stable make install` (or a specific `x.y.z`).
+Re-running it is also how you **update the box**. Two things move on their own and the
+install tracks both:
+
+- **Claude Code.** The install resolves the current release and passes it as the base
+  image's build arg, so a new release rebuilds that layer instead of silently reusing the
+  cached one. Pin or track a different channel with `CLAUDE_CODE_VERSION=stable make
+  install` (or a specific `x.y.z`).
+- **Debian packages.** The build pulls the current `debian:trixie-slim` and keys the apt
+  layer on the ISO week, so the first `make install` of a week refreshes every package
+  (including `stable-security` updates for what the base tag already carried) and the
+  rest of the week is a cache hit. `make refresh` forces it today. Without this a rebuild
+  reused the apt layer from the first build forever; `airlock doctor` now shows when the
+  packages were last refreshed.
+
+Unchanged upstream, same week: a cache hit that costs nothing. A refresh rebuilds
+everything above the apt layer (a few minutes and a few hundred MB), which is why it is
+weekly rather than daily.
 
 ### 3. Shell integration
 

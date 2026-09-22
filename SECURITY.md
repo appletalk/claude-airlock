@@ -59,5 +59,9 @@ it; review what the box wrote before the host acts on it.
 
 ## Supported versions
 
-This is a single-branch project; fixes land on `main`. Rebuild the images
-(`make install`) after pulling to pick up base-image and toolchain security updates.
+This is a single-branch project; fixes land on `main`. Rebuild the images after pulling:
+`make install` picks up a new Claude Code release immediately and refreshes the Debian
+packages (base tag and `stable-security`) once a week; `make refresh` does the package
+refresh today. `airlock doctor` reports when the packages were last refreshed. The pinned
+upstream tools (kubectl, terraform, and the rest in `image/dev/Dockerfile`) move only when
+their pins are bumped.

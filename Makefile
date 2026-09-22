@@ -22,8 +22,11 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n",$$1,$$2}'
 
-install: ## install the launcher + build base/dev images (see bin/install.sh)
+install: ## install the launcher + build base/dev images (packages refreshed weekly; see bin/install.sh)
 	@bash bin/install.sh
+
+refresh: ## rebuild the images with today's Debian security updates (forces the weekly refresh now)
+	@AIRLOCK_APT_REFRESH="$$(date +%G-W%V).$$(date +%F-%H%M)" bash bin/install.sh
 
 lint: ## shellcheck the launcher + firewall + helper scripts (+ zsh -n on the integration)
 	@command -v "$(SHELLCHECK)" >/dev/null 2>&1 \
@@ -63,4 +66,4 @@ hooks: ## install the git pre-commit hook (symlink)
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install lint test doctor image-smoke check hooks bootstrap
+.PHONY: help install refresh lint test doctor image-smoke check hooks bootstrap

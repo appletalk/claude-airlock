@@ -9,7 +9,23 @@ ARG TZ=UTC
 ENV TZ="$TZ"
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Package-refresh key. This layer has no other changing input, so without it a rebuild
+# reuses the cached apt layer forever: the Debian packages in the box stayed at whatever
+# stable-security shipped on the day of the FIRST build (measured: an apt layer from July
+# in an image "built" in September, 17 security updates behind). bin/install.sh passes
+# the current ISO week, so `make install` refreshes the base at most once a week and is a
+# cache hit otherwise; `make refresh` appends a timestamp to force it now. The
+# `apt-get upgrade` is what makes the refresh mean something: `update` alone only affects
+# the packages installed below, not the ones the debian:trixie-slim tag already carries.
+# Every layer above this one rebuilds when it changes (that is the point, and also why it
+# is weekly rather than daily). Recorded as a label so `airlock doctor` can show it. The
+# default marks a build that bypassed bin/install.sh (CI, a bare `podman build image/`):
+# its packages are current as of that build, it just has no refresh schedule.
+ARG APT_REFRESH=unkeyed
+LABEL org.claude-airlock.apt-refresh="$APT_REFRESH"
+RUN echo "apt refresh key: ${APT_REFRESH}" \
+    && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       git \
