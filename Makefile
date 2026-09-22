@@ -13,7 +13,7 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh \
                  image/init-firewall.sh image/entrypoint.sh \
                  config/airlock-statusline.sh \
                  hooks/pre-commit scripts/bootstrap-tools.sh \
-                 scripts/airlock-doctor.sh \
+                 scripts/airlock-doctor.sh lib/host-dns.sh \
                  scripts/image-smoke.sh scripts/validator-checks.sh
 
 .DEFAULT_GOAL := help

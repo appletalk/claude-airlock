@@ -60,6 +60,54 @@ setup() { setup_airlock_env; }
   [[ "$(engine_args)" != *"--network="* ]]
 }
 
+# DNS. With a loopback-only host resolver, both engines append Google Public DNS to the
+# box's resolv.conf; these pin the two layers that stop the box using it (lib/host-dns.sh).
+
+@test "podman+pasta points the box at pasta's forwarder to the host resolver" {
+  p="$(mkproj engdnspasta)"
+  AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  [ "$(engine_args | grep -c '^--dns=')" -eq 1 ]
+  engine_args | grep -qx -- '--dns=169.254.1.1'
+}
+
+@test "podman+slirp4netns points the box at slirp's forwarder" {
+  p="$(mkproj engdnsslirp)"
+  AIRLOCK_PODMAN_NETWORK=slirp4netns AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--dns=10.0.2.3'
+}
+
+@test "docker gets no --dns by default (keeps its own list; the firewall filters it)" {
+  p="$(mkproj engdnsdocker)"
+  AIRLOCK_ENGINE_OVERRIDE=docker _launch "$p" >/dev/null 2>&1 || true
+  ! engine_args | grep -q -- '^--dns='
+}
+
+@test "AIRLOCK_DNS overrides the resolver under BOTH engines" {
+  for e in podman docker; do
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engdnsov-$e")"
+    AIRLOCK_DNS="192.0.2.53 2001:db8::53" AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
+    engine_args | grep -qx -- '--dns=192.0.2.53'   || { echo "$e: v4 override missing"; false; }
+    engine_args | grep -qx -- '--dns=2001:db8::53' || { echo "$e: v6 override missing"; false; }
+    ! engine_args | grep -qx -- '--dns=169.254.1.1' || { echo "$e: forwarder not replaced"; false; }
+  done
+}
+
+@test "the host's own resolvers reach the firewall as AIRLOCK_HOST_DNS under BOTH engines" {
+  # Includes the systemd-resolved upstream file, which is what docker copies when
+  # /etc/resolv.conf is the 127.0.0.53 stub; a missing file must not break the launch.
+  printf 'nameserver 127.0.0.53\noptions edns0\n' > "$BATS_TEST_TMPDIR/resolv.stub"
+  printf 'nameserver 1.1.1.1\nnameserver 2606:4700:4700::1111\n' > "$BATS_TEST_TMPDIR/resolv.upstream"
+  for e in podman docker; do
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engdnshost-$e")"
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.stub $BATS_TEST_TMPDIR/resolv.upstream $BATS_TEST_TMPDIR/absent" \
+      AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
+    engine_args | grep -qx 'AIRLOCK_HOST_DNS=1.1.1.1 127.0.0.53 2606:4700:4700::1111' \
+      || { echo "$e: got: $(engine_args | grep AIRLOCK_HOST_DNS)"; false; }
+  done
+}
+
 @test "an unknown engine is rejected and nothing is launched" {
   p="$(mkproj engbad)"
   run env AIRLOCK_ENGINE_OVERRIDE=containerd bash -c '_launch() { :; }; true'

