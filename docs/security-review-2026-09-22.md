@@ -136,15 +136,13 @@ CANARY-MEMORY-7731: this line lives OUTSIDE the memory dir, at <scratch>/ev/cana
 afterwards.) Symlink creation from inside a box needs nothing special: the mount is rw
 and `ln -s` is a plain file operation; the launcher never inspects the directory.
 
-**Cost of fixing.**
-- `AIRLOCK_SHARE_MEMORY=ro` as the default: closes F1 and the memory influence channel;
-  cost is that box sessions cannot save memories (the trade-off already discussed in
-  the README). A read-only bind mount refuses symlink creation and cannot be replaced
-  from inside.
-- Keep `rw` but have the host `claude` wrapper (and the launcher, before mounting) run
-  `find ~/.claude/projects/<slug> -type l` and refuse to start, or unlink, if anything is
-  a symlink. T to implement, no functional cost, closes the read-back for memory *and*
-  any other file Claude Code may read from that directory. Recommended either way.
+**Fixed (2026-09-22).** Both the launcher (before mounting the project directory) and
+the host `claude` wrapper (before taking the lock) run `find ~/.claude/projects/<slug>
+-type l` and refuse to start while anything is a symlink, naming it. Nothing is deleted:
+a link there is either an attack or deliberate, and either way the operator decides.
+No functional cost. `AIRLOCK_SHARE_MEMORY=ro` remains the stronger setting for untrusted
+code, since it also closes memory *authoring*; a read-only bind mount refuses symlink
+creation and cannot be replaced from inside. Covered by `test/symlink-guard.bats`.
 
 ### F2. Host Claude Code executes project-settings hooks the box can write, with no prompt — **High**, effort **S** (docs T)
 

@@ -1614,6 +1614,25 @@ if [ "$AIRLOCK_SHARE_HISTORY" = "1" ]; then
   HOST_PROJ="$HOME/.claude/projects/$HISTSLUG"
   BOX_PROJ="/home/dev/.claude/projects/$HISTSLUG"
   mkdir -p "$HOST_PROJ"
+  # No symlinks in the shared directory, ever. Host Claude auto-loads memory/ and
+  # follows symlinks when it does (measured: a MEMORY.md pointing outside the directory
+  # was loaded verbatim), and the host writes its transcript back into this same
+  # directory. So a box that turns memory/MEMORY.md into a symlink to ~/.ssh/id_ed25519
+  # gets the key read into the host's context and handed back through the transcript -
+  # exfiltration with no network, which the egress firewall cannot see. The host `claude`
+  # wrapper runs the same check before every host session; this one catches a planted
+  # link before the NEXT box can build on it, and at the moment the operator is looking.
+  # Refused, not deleted: a link here is either an attack, in which case you want to know,
+  # or something you did on purpose, in which case it is not ours to remove.
+  _links="$(find "$HOST_PROJ" -type l 2>/dev/null)"
+  if [ -n "$_links" ]; then
+    echo "claude-airlock: refusing to start: symlink(s) in the shared session directory" >&2
+    echo "  $HOST_PROJ" >&2
+    printf '%s\n' "$_links" | sed 's/^/    /' >&2
+    echo "  Host Claude follows symlinks when it loads this project's memory, so a box that" >&2
+    echo "  planted one can make the host read any file you can. Remove them, then relaunch." >&2
+    exit 1
+  fi
   args+=( -v "$HOST_PROJ:$BOX_PROJ:rw" )
 
   # Layer memory/ on top of the rw project mount. A read-only child inside a read-write

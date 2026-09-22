@@ -463,11 +463,19 @@ name the exposure. Tighten it when the code is untrusted:
 | `AIRLOCK_SHARE_MEMORY` | Behaviour |
 | --- | --- |
 | `rw` *(default)* | Box reads **and writes** host memories. Convenient; channel open. |
-| `ro` | Box reads host memories, cannot author them. **Closes the channel.** |
+| `ro` | Box reads host memories, cannot author them. **Closes the memory channel.** |
 | `off` | Box neither reads nor writes them; it gets empty container-local storage. |
 
 Transcripts stay read-write in every mode — a box that cannot write its transcript cannot
 hold a session at all. Set `AIRLOCK_SHARE_HISTORY=0` to share nothing.
+
+**Symlinks are refused.** Host Claude follows symlinks when it loads this directory, so a
+box that turned `memory/MEMORY.md` into a link to `~/.ssh/id_ed25519` would have the key
+read into the host's context and written back into the shared transcript, where the next
+box reads it — exfiltration with no network involved. Both the launcher and the host
+`claude` wrapper therefore refuse to start while any symlink exists under
+`~/.claude/projects/<slug>/`, and name it. They never delete it: a link there is either an
+attack you need to know about or something you did on purpose.
 
 ## Corporate / internal CA certs (optional)
 
