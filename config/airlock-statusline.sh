@@ -6,7 +6,10 @@
 # The host points its own statusLine at this file with --host, which swaps in a
 # bold red (host) badge, so host and box lines are identical apart from it.
 badge="\033[1;38;5;28m(airlock)"
-[ "${1:-}" = "--host" ] && badge="\033[1;38;5;160m(host)"
+# Standard red (SGR 31), not a fixed 256-colour index: it follows the terminal theme, so
+# the badge matches the existing host statusline's red exactly instead of coming out a
+# harder shade next to it.
+[ "${1:-}" = "--host" ] && badge="\033[1;31m(host)"
 input=$(cat)
 
 cwd=$(echo "$input" | jq -r '.workspace.current_dir // .cwd')
