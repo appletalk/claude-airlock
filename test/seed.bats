@@ -42,12 +42,12 @@ box_json() { cat "$(state_dir "$1")/claude.json"; }
   [ "$(jq '.projects | length' <<<"$j")" = 1 ]
 }
 
-@test "a project provisioned by the old seed is stripped at launch: host identity and repo map go" {
+@test "a project provisioned by the old seed is stripped at launch: host install identity and repo map go" {
   p="$(mkproj old)"; sd="$(state_dir "$p")"; mkdir -p "$sd"
   jq 'del(.projects, .mcpServers)' "$AIRLOCK_HOME/.claude.json" > "$sd/claude.json"   # exactly the old seed
   _launch "$p"
   j="$(box_json "$p")"
-  for k in userID machineID oauthAccount githubRepoPaths; do
+  for k in userID machineID githubRepoPaths; do
     [ "$(jq --arg k "$k" 'has($k)' <<<"$j")" = false ] || { echo "$k survived the launch strip"; false; }
   done
   [ "$(jq -r .theme <<<"$j")" = light ]                    # everything else untouched
@@ -56,13 +56,27 @@ box_json() { cat "$(state_dir "$1")/claude.json"; }
 
 @test "identity a box generated for itself is kept: only the host's own values are stripped" {
   p="$(mkproj own)"; sd="$(state_dir "$p")"; mkdir -p "$sd"
-  printf '{"userID":"box-generated","machineID":"box-machine","oauthAccount":{"emailAddress":"box-login@example.com"},"githubRepoPaths":{"a":["/x"]}}\n' > "$sd/claude.json"
+  printf '{"userID":"box-generated","machineID":"box-machine","githubRepoPaths":{"a":["/x"]}}\n' > "$sd/claude.json"
   _launch "$p"
   j="$(box_json "$p")"
   [ "$(jq -r .userID <<<"$j")" = box-generated ]
   [ "$(jq -r .machineID <<<"$j")" = box-machine ]
-  [ "$(jq -r .oauthAccount.emailAddress <<<"$j")" = box-login@example.com ]
   [ "$(jq 'has("githubRepoPaths")' <<<"$j")" = false ]      # the repo map goes regardless
+}
+
+# A login done inside the box (persist mode, or /login in any box) writes the box's own
+# oauthAccount, and for the same account it can be identical to the host's. Equality
+# cannot tell them apart, so the launch strip never touches it - in either login mode.
+@test "oauthAccount is never stripped at launch, whether it matches the host's or not, in either login mode" {
+  for mode in token persist; do
+    p="$(mkproj "acct-$mode")"; sd="$(state_dir "$p")"; mkdir -p "$sd"
+    [ "$mode" = persist ] && _launch "$p" login persist >/dev/null
+    jq 'del(.projects, .mcpServers)' "$AIRLOCK_HOME/.claude.json" > "$sd/claude.json"   # host-identical profile
+    _launch "$p"
+    j="$(box_json "$p")"
+    [ "$(jq -r .oauthAccount.emailAddress <<<"$j")" = someone@example.com ] || { echo "$mode: profile stripped"; false; }
+    [ "$(jq 'has("userID")' <<<"$j")" = false ]            # install identifiers still go
+  done
 }
 
 @test "no host claude.json at all still yields a valid, minimal box config" {

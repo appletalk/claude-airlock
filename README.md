@@ -467,8 +467,11 @@ never *here is an older image you are about to mistake for the new one*.
   the host install's `userID` / `machineID` (Claude generates fresh ones per box), and
   not `githubRepoPaths`, the map of every other repo on the machine that the old
   "copy everything except `projects`" seed used to carry in. Projects provisioned before
-  this are cleaned at launch: the repo map always, the identity fields only while they
-  still equal the host's, so a box's own login or identifiers are never churned.
+  this are cleaned at launch: the repo map always, the install identifiers only while
+  they still equal the host's, so identifiers a box generated for itself are never
+  churned. The account profile is left alone in an existing file: a login done inside
+  the box writes one that can be identical to the host's, and it is not worth risking a
+  box's login to remove email and org IDs the box can learn from its token anyway.
 - **Optional private CA chain** (see below) is trusted by *external tooling*
   (curl/git/Python) only — never added to Node's trust, so Claude's own TLS to
   `api.anthropic.com` stays on its vetted built-in roots.
