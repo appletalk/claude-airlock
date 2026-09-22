@@ -259,5 +259,55 @@ RUN set -eux; \
     ansible-lint --version
 ENV ANSIBLE_LINT_NODEPS=1
 
+# ============================================================================
+# Infra clients - kubectl, helm, sops, tea, drill.
+# ============================================================================
+# Unlike the validators above these are clients: they are only useful against an
+# endpoint the project grants via `egress =` (an apiserver `IPv4:port`, a Forgejo
+# host), and they ship with NO credentials. A kubeconfig, token or age key is a
+# host-side grant, never baked in. The offline halves still work at minimal egress:
+# `helm lint|template` on a local chart, `kubectl kustomize`, `sops filestatus`.
+# Pinned by version + sha256 per arch, same as the validators.
+#
+# drill (ldnsutils) sits beside dnsutils' dig for hosts whose tooling standardizes
+# on ldns.
+RUN apt-get update && apt-get install -y --no-install-recommends ldnsutils \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ARG KUBECTL_VERSION=1.37.0
+ARG HELM_VERSION=4.3.0
+ARG SOPS_VERSION=3.13.3
+ARG TEA_VERSION=0.16.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) kcsha=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f; \
+             hmsha=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb; \
+             spsha=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b; \
+             tesha=9c142c8a0b31485eea2387031c1c404f12b7141075eb4ffbd7ced49441590636 ;; \
+      arm64) kcsha=922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3; \
+             hmsha=31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08; \
+             spsha=53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77; \
+             tesha=0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879 ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" -o /tmp/kubectl; \
+    echo "${kcsha}  /tmp/kubectl" | sha256sum -c -; \
+    install -m 0555 /tmp/kubectl /usr/local/bin/kubectl; \
+    curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${arch}.tar.gz" -o /tmp/helm.tgz; \
+    echo "${hmsha}  /tmp/helm.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/helm.tgz -C /usr/local/bin --strip-components=1 --no-same-owner "linux-${arch}/helm"; \
+    chmod 0555 /usr/local/bin/helm; \
+    curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${arch}" -o /tmp/sops; \
+    echo "${spsha}  /tmp/sops" | sha256sum -c -; \
+    install -m 0555 /tmp/sops /usr/local/bin/sops; \
+    curl -fsSL "https://dl.gitea.com/tea/${TEA_VERSION}/tea-${TEA_VERSION}-linux-${arch}" -o /tmp/tea; \
+    echo "${tesha}  /tmp/tea" | sha256sum -c -; \
+    install -m 0555 /tmp/tea /usr/local/bin/tea; \
+    rm -f /tmp/kubectl /tmp/helm.tgz /tmp/sops /tmp/tea; \
+    kubectl version --client; helm version --short; sops --version --disable-version-check; tea --version; drill -v
+# sops checks GitHub for a newer release; blocked in a box, that is a stall per call.
+ENV SOPS_DISABLE_VERSION_CHECK=1
+
 # ENTRYPOINT / CMD / USID(root) / WORKDIR are all inherited from the base image:
 # the entrypoint still raises the firewall as root, then drops to the dev user.
