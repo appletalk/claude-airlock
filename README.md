@@ -462,6 +462,13 @@ never *here is an older image you are about to mistake for the new one*.
   token and any injected secrets are handed to the engine via a mode-0600
   `--env-file` (removed on exit), **not** as `-e KEY=VALUE` — so they don't sit in the host
   process table (`ps auxe`, `/proc/<pid>/cmdline`) for the life of the container.
+- **The box's `~/.claude.json` is seeded by allowlist.** A new project gets the theme and
+  a few UI preferences from your host file, nothing else: not the account profile, not
+  the host install's `userID` / `machineID` (Claude generates fresh ones per box), and
+  not `githubRepoPaths`, the map of every other repo on the machine that the old
+  "copy everything except `projects`" seed used to carry in. Projects provisioned before
+  this are cleaned at launch: the repo map always, the identity fields only while they
+  still equal the host's, so a box's own login or identifiers are never churned.
 - **Optional private CA chain** (see below) is trusted by *external tooling*
   (curl/git/Python) only — never added to Node's trust, so Claude's own TLS to
   `api.anthropic.com` stays on its vetted built-in roots.

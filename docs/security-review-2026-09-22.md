@@ -11,7 +11,16 @@ not touched).*
 
 *Not done: I did not read `~/.claude.json` or `~/.kube-claude/config` (the read was
 declined), so "what the seeded claude.json leaks into the box" and "what the read-only
-kube token can actually do" are listed as checks for you rather than findings. One side
+kube token can actually do" were listed as checks for you rather than findings. Both
+were done from inside a box the same day. The kube role is `view` plus a read-only
+`viewer-extras` (`get, list, watch` on every rule; the `*` entries are resources, not
+verbs); no secrets, token minting, exec, port-forward, node proxy or writes. The seed
+did leak: the account profile, the host install's `userID` / `machineID`, and
+`githubRepoPaths`, a map of every other repo on the machine. **Fixed (2026-09-22):** the
+seed is now an allowlist of UI preferences and existing projects are cleaned at launch,
+covered by `test/seed.bats`. Not re-verified with a live Claude session; the next launch
+of any project is that check, and the launcher still sets the onboarding and trust flags
+it always did. One side
 effect to know about: the host-Claude test in F1/F2 ran `claude -p` once in a throwaway
 project under `/tmp`; its `~/.claude/projects/` entry was removed, but `~/.claude.json`
 may still carry a `projects` key for that path.*
