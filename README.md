@@ -286,8 +286,14 @@ inside a credential directory (`~/.ssh`, `~/.gnupg`, `~/.kube`, `~/.config/sops`
 `~/.password-store`, `~/.claude`, `~/.config/claude-airlock`, keyrings, cloud CLIs, …) or
 an ancestor of one (so `~/.config` is refused); a directory not owned by you or writable
 by group/others; one holding a hard-linked file (a hard link to a key is the same inode, so
-a mount would expose it); and the workspace. At launch, an approved path that now resolves
-somewhere else is skipped too. Skipping only removes access, so it warns rather than aborts.
+a mount would expose it); one with a mount point inside it (the bind is recursive, and the
+hard-link scan cannot see across a filesystem boundary); and the workspace. At launch, an
+approved path that now resolves somewhere else is skipped too. Skipping only removes
+access, so it warns rather than aborts.
+
+The deny list is a guard against habit, not an inventory of where credentials live, so
+`mount add` also prints every file the box will be able to read. Look at that list: it is
+the grant.
 
 ## Host config — `~/.config/claude-airlock/config`
 
@@ -424,9 +430,11 @@ never *here is an older image you are about to mistake for the new one*.
   podman already declines to map the gateway address and forwards no ports. Host
   loopback services were never reachable. That is a layer *under* the firewall: the box
   has no route to the host even if its own rules are wrong.
-- **No mounted credentials, and secrets stay off the process table.** Auth is an OAuth
-  token; the host `~/.claude` credentials, container socket, and other projects are never
-  exposed. The token and any injected secrets are handed to the engine via a mode-0600
+- **No host credentials in the box unless you mount them, and secrets stay off the
+  process table.** Auth is an OAuth token; the host `~/.claude` credentials, container
+  socket, and other projects are never exposed. The one way a host credential gets in is
+  `airlock mount add`, read-only, guarded, and listed at the moment you grant it. The
+  token and any injected secrets are handed to the engine via a mode-0600
   `--env-file` (removed on exit), **not** as `-e KEY=VALUE` — so they don't sit in the host
   process table (`ps auxe`, `/proc/<pid>/cmdline`) for the life of the container.
 - **Optional private CA chain** (see below) is trusted by *external tooling*
