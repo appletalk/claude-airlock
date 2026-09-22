@@ -244,7 +244,17 @@ kernel bugs of the last years needed exactly a user namespace with a full cap se
 `io_uring_setup` ENOSYS (seccomp), `bpf` EPERM (`unprivileged_bpf_disabled=1`),
 `ptrace` EPERM (`ptrace_scope=2`, and no `CAP_SYS_PTRACE`), `add_key` EINVAL-only.
 
-**Fix.** Ship `image/seccomp.json`: the podman default with `unshare`, `setns` removed
+**Fixed (2026-09-22).** `image/seccomp.json` ships: podman's default with `unshare` and
+`setns` refused, `clone` allowed only with every namespace flag clear (docker's mask),
+`clone3` answered ENOSYS so libc retries with the filtered `clone`. Passed by the
+launcher, the doctor and the image smoke test. The functional check came first: bubblewrap
+is not in the image, so Claude Code's sandbox was never active in a box, and its docs say
+it is opt-in and falls back to unsandboxed with a warning when unavailable. Verified live
+under the profile: `unshare -Ur` EPERM, raw `clone(CLONE_NEWUSER)` ENOSYS, and git, node
+workers, python threads, pwsh, kubectl, helm, terraform, every validator, Postgres and
+`claude` itself unchanged; the doctor and all 28 smoke checks pass.
+
+**Original fix note.** Ship `image/seccomp.json`: the podman default with `unshare`, `setns` removed
 and `clone`/`clone3` restricted (deny `CLONE_NEWUSER`), passed as
 `--security-opt seccomp=...`. **Functional cost to verify before adopting:** Claude Code's
 own Bash sandboxing (bubblewrap) needs userns and would fail inside a box; it is
@@ -497,7 +507,7 @@ Each row: what it adds on top of what you already have, what it breaks, verdict.
 
 | Option | Adds | Breaks | Verdict |
 |---|---|---|---|
-| Custom seccomp (deny userns) | removes the main kernel-exploit precondition (F6) | Claude Code's bwrap sandbox in-box (not needed); anything using `unshare` | **Do**, after a functional check |
+| Custom seccomp (deny userns) | removes the main kernel-exploit precondition (F6) | Claude Code's bwrap sandbox in-box (not installed, opt-in, falls back); anything using `unshare` | **Done** (2026-09-22) |
 | `--read-only` rootfs + tmpfs | prevents writes to the overlay | `apt`, `pip --user`, `npm -g`, Postgres under `$HOME`, Playwright caches; needs tmpfs for `/tmp`, `/home/dev`, `/run`, `/var/tmp` | Skip: `--rm` already discards the overlay; low gain, high friction |
 | mask/unmask | podman already masks `/proc/kcore`, `/proc/keys`, `/sys/firmware`, `/proc/sys` ro (verified) | nothing | Nothing to add |
 | userns size | keep-id maps 1000→1000 and the rest to 100000+; 65536 ids | a smaller range changes nothing security-wise | Leave |

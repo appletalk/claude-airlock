@@ -35,6 +35,7 @@ printf '\033[1mimage smoke: %s (engine %s, egress minimal)\033[0m\n' "$IMAGE" "$
   --cap-drop=ALL \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \
   --security-opt=no-new-privileges \
+  --security-opt "seccomp=$REPO_DIR/image/seccomp.json" \
   -e AIRLOCK_EGRESS_GROUPS="" \
   -v "$REPO_DIR/test/fixtures/validators:/fixtures:ro" \
   -v "$REPO_DIR/scripts/validator-checks.sh:/usr/local/bin/validator-checks:ro" \
