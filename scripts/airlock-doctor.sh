@@ -12,6 +12,8 @@ set -uo pipefail
 ENGINE="${AIRLOCK_ENGINE:-podman}"
 IMAGE="${AIRLOCK_IMAGE:-claude-airlock:base}"
 fail=0
+# shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/host-dns.sh"
 
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=1; }
@@ -115,6 +117,7 @@ if fw_out="$("$ENGINE" run --rm \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \
   --security-opt=no-new-privileges \
   -e AIRLOCK_EGRESS_GROUPS="" \
+  -e "AIRLOCK_HOST_DNS=$(airlock_host_nameservers)" \
   --entrypoint /bin/bash "$IMAGE" -c '/usr/local/bin/init-firewall.sh' 2>&1)"; then
   # Surface each thing the firewall proved, rather than a bare "passed".
   while IFS= read -r line; do

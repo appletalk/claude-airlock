@@ -46,6 +46,11 @@ AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
 # firewall inside the box is what actually enforces containment — see the note in the
 # engine-args section below about why we must NOT trust the container's default route.
 AIRLOCK_PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
+# Resolver(s) for the box, space-separated, passed as --dns on either engine. Empty = the
+# network stack's forwarder to the host resolver (pasta 169.254.1.1, slirp4netns
+# 10.0.2.3) under podman, the engine's own list under docker. Set it when neither works,
+# e.g. docker on a host whose only resolver is loopback (see lib/host-dns.sh).
+AIRLOCK_DNS="${AIRLOCK_DNS:-}"
 
 # Snapshot before sourcing the config: `${VAR:-default}` afterwards cannot tell an
 # environment value from one the config just set, which is how "env-only" silently
@@ -766,7 +771,7 @@ if [ "${1:-}" = "doctor" ]; then
   if [ ! -x "$_ddoctor" ]; then
     echo "claude-airlock: doctor script not found at $_ddoctor" >&2; exit 1
   fi
-  AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE="$AIRLOCK_IMAGE" exec "$_ddoctor"
+  AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE="$AIRLOCK_IMAGE" AIRLOCK_DNS="$AIRLOCK_DNS" exec "$_ddoctor"
 fi
 
 # --- Per-project config: <project>/.airlock/config -------------------------
@@ -1363,6 +1368,16 @@ if [ "$AIRLOCK_ENGINE" = podman ]; then
   args+=( "--userns=keep-id:uid=1000,gid=1000" )
   args+=( "--network=$AIRLOCK_PODMAN_NETWORK" )
 fi
+
+# DNS: point the box at the network stack's forwarder to the host resolver, and tell the
+# firewall which public resolvers the host actually chose. Without both, a loopback-only
+# host resolver makes the engine fall back to Google Public DNS (see lib/host-dns.sh).
+# shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
+source "$_repo/lib/host-dns.sh"
+while IFS= read -r _ns; do
+  if [ -n "$_ns" ]; then args+=( "--dns=$_ns" ); fi
+done < <(airlock_dns_forwarders "$AIRLOCK_ENGINE" "$AIRLOCK_PODMAN_NETWORK")
+args+=( -e "AIRLOCK_HOST_DNS=$(airlock_host_nameservers)" )
 
 # The current project: read-write, at its REAL host path, so the session
 # transcripts (which embed absolute paths) resolve and `--resume` is seamless

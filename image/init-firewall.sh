@@ -187,11 +187,56 @@ done
 # does remove is the trivial channel: the agent no longer picks the destination, so the
 # data must pass through the resolver you already trust (which logs, caches, and is very
 # often not the attacker's). Narrowing, not closing. Named so nobody mistakes it.
+#
+# "The resolver you already trust" is only true if the HOST chose it. When the host's
+# only resolver is loopback, podman and docker both append Google Public DNS to the
+# box's resolv.conf as a fallback, and pinning that would let the box send plaintext
+# queries to a third party around the host resolver. So a public nameserver is pinned
+# only if the launcher lists it in AIRLOCK_HOST_DNS (the host's own resolvers); local
+# ones - loopback (docker's 127.0.0.11), link-local (pasta's 169.254.1.1), RFC1918
+# (slirp4netns' 10.0.2.3, the LAN), CGNAT (tailscale), ULA - are always pinned.
+# AIRLOCK_HOST_DNS unset (not merely empty) means an older launcher or a direct
+# firewall run: keep the old pin-everything behaviour rather than break DNS.
+is_local_resolver() {
+  local ip="$1" a b
+  if [[ "$ip" =~ $IP_REGEX ]]; then
+    IFS=. read -r a b _ _ <<< "$ip"
+    a=$((10#$a)); b=$((10#$b))
+    if [ "$a" -eq 10 ] || [ "$a" -eq 127 ]; then return 0; fi
+    if [ "$a" -eq 169 ] && [ "$b" -eq 254 ]; then return 0; fi
+    if [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ]; then return 0; fi
+    if [ "$a" -eq 192 ] && [ "$b" -eq 168 ]; then return 0; fi
+    if [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ]; then return 0; fi
+    return 1
+  fi
+  local l="${ip,,}"
+  [[ "$l" == ::1 || "$l" =~ ^fe[89ab][0-9a-f]: || "$l" =~ ^f[cd][0-9a-f]{0,2}: ]]
+}
 NAMESERVERS=()
-while read -r ns; do [ -n "$ns" ] && NAMESERVERS+=("$ns"); done < <(
+SKIPPED_NS=()
+while read -r ns; do
+  [ -n "$ns" ] || continue
+  if [ -n "${AIRLOCK_HOST_DNS+set}" ] && ! is_local_resolver "$ns" \
+     && [[ " $AIRLOCK_HOST_DNS " != *" $ns "* ]]; then
+    SKIPPED_NS+=("$ns")
+  else
+    NAMESERVERS+=("$ns")
+  fi
+done < <(
   awk '/^[[:space:]]*nameserver[[:space:]]/ {print $2}' /etc/resolv.conf 2>/dev/null || true
 )
-[ ${#NAMESERVERS[@]} -eq 0 ] && die "no nameserver in /etc/resolv.conf — cannot resolve the allowlist"
+# Joined by hand: IFS is newline/tab here, so "${SKIPPED_NS[*]}" would join with newlines.
+_skipped="$(printf '%s ' "${SKIPPED_NS[@]}")"; _skipped="${_skipped% }"
+if [ ${#SKIPPED_NS[@]} -gt 0 ]; then
+  log "WARN: dns: not pinning public resolver(s) the host is not configured with: $_skipped"
+  # Drop them from resolv.conf as well, so a slow primary is not followed by lookups to a
+  # blocked fallback. Written in place: the engine bind-mounts this file.
+  _drop=" $_skipped "
+  if _rc="$(awk -v drop="$_drop" '!($1 == "nameserver" && index(drop, " " $2 " "))' /etc/resolv.conf)"; then
+    printf '%s\n' "$_rc" > /etc/resolv.conf || log "WARN: could not rewrite /etc/resolv.conf"
+  fi
+fi
+[ ${#NAMESERVERS[@]} -eq 0 ] && die "no usable nameserver in /etc/resolv.conf — cannot resolve the allowlist. The engine offered only resolvers the host is not configured with (${_skipped:-none}); set AIRLOCK_DNS in the host config to a resolver the box can reach."
 for ns in "${NAMESERVERS[@]}"; do
   if [[ "$ns" =~ $IP_REGEX ]]; then
     iptables -A OUTPUT -p udp -d "$ns" --dport 53 -j ACCEPT
