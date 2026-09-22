@@ -433,12 +433,19 @@ fi
 # directory under $HOME (symlinks resolved), and must not be $HOME, inside a credential
 # directory, or an ancestor of one (so ~/.config is refused because it holds sops keys).
 # A directory holding a hard-linked file is refused too: a hard link to ~/.ssh/id_ed25519
-# is the same inode, and a bind mount would expose it with no symlink to resolve. The same
-# check re-runs at every launch, so swapping an approved directory for a symlink later
-# gets it skipped, not mounted.
+# is the same inode, and a bind mount would expose it with no symlink to resolve. So is a
+# directory with a mount point inside it: the hard-link scan stops at filesystem
+# boundaries (-xdev) while the engine's bind is recursive, so a FUSE or bind mount nested
+# in there would be handed to the box unscanned. The same check re-runs at every launch,
+# so swapping an approved directory for a symlink later gets it skipped, not mounted.
+#
+# The deny list is a guard against habit, not an inventory of where credentials live -
+# it cannot be complete. `mount add` therefore also prints what the box will get.
 AIRLOCK_MOUNT_DENY=".ssh .gnupg .kube .password-store .claude .aws .azure .docker .pki
   .mozilla .config/sops .config/age .config/claude-airlock .config/gcloud .config/gh
   .config/tea .config/containers .config/chromium .config/google-chrome
+  .config/rclone .config/helm .config/hcloud .config/op .config/git .config/argocd
+  .config/pip .config/Code .terraform.d .m2 .gradle
   .local/share/keyrings .local/share/containers"
 
 # Canonical path on stdout if DIR may be mounted; otherwise the reason on stderr and 1.
@@ -477,6 +484,12 @@ _airlock_mount_check() {
     echo "'$c' holds a hard-linked file, which could expose a file from anywhere (no override)" >&2
     return 1
   fi
+  # Every mount point strictly below the directory. findmnt lists the whole namespace;
+  # the prefix match is on the target column alone.
+  if findmnt -rn -o TARGET 2>/dev/null | awk -v p="$c/" 'index($0, p) == 1 { f = 1 } END { exit !f }'; then
+    echo "'$c' contains a mount point, which the engine would bind recursively and the hard-link check cannot see into (no override)" >&2
+    return 1
+  fi
   printf '%s\n' "$c"
 }
 
@@ -490,7 +503,13 @@ if [ "${1:-}" = "mount" ]; then
       _mc="$(_airlock_mount_check "$_mp" 2>&1)" || { echo "airlock: $_mc" >&2; exit 1; }
       touch "$_mstore"
       grep -qxF "$_mc" "$_mstore" || printf '%s\n' "$_mc" >> "$_mstore"
-      echo "airlock: $_mc will be mounted READ-ONLY into $(basename "$WORKSPACE")'s box (next launch)" ;;
+      echo "airlock: $_mc will be mounted READ-ONLY into $(basename "$WORKSPACE")'s box (next launch)"
+      # Show what that grants. The deny list catches the usual places; it cannot know
+      # every file that is a credential, and the operator can, if they see the names.
+      _mn="$(find "$_mc" -type f 2>/dev/null | wc -l)"
+      echo "  every box on this project will be able to read its $_mn file(s), and whatever lands here later:"
+      find "$_mc" -type f 2>/dev/null | sed "s#^$_mc/#    #" | head -20
+      [ "$_mn" -gt 20 ] && echo "    ... and $((_mn - 20)) more" ;;
     list)
       echo "read-only mounts for $(basename "$WORKSPACE")  ($_mstore):"
       if [ -s "$_mstore" ]; then

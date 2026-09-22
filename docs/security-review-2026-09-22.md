@@ -310,11 +310,15 @@ hard-link scan). What I could and could not get past:
 | Ancestor check | Holds | `~/.config` refused ("contains protected"). |
 | Symlink resolution | Holds at check time | `readlink -e`; swapped-for-symlink dirs are skipped at launch (existing tests). |
 | TOCTOU check→mount | **Window exists, narrow** | Stub engine swapped the dir for a symlink to `~/.ssh` *after* the check; the launcher still passed `-v ~/.kube-claude:~/.kube-claude:ro` and the runtime would resolve the symlink. Exploiting it needs a writer on an ancestor of the mount path during the launch window; no ancestor of `~/.kube-claude` is ever mounted rw, so a *box* cannot do it. Only relevant if someone runs airlock with `$HOME` or a parent as the workspace/`share_rw`. |
-| Hard-link scan | **Blind to nested mounts** | `find -xdev` stops at filesystem boundaries; podman's `-v` is `rbind`, so a FUSE/bind mount inside the dir *is* exposed but *not* scanned. Add `findmnt -R "$c"` and refuse if anything but the top is a mountpoint. T. |
+| Hard-link scan | **Blind to nested mounts** | `find -xdev` stops at filesystem boundaries; podman's `-v` is `rbind`, so a FUSE/bind mount inside the dir *is* exposed but *not* scanned. Add `findmnt -R "$c"` and refuse if anything but the top is a mountpoint. T. **Fixed (2026-09-22):** any mount point below the directory is refused, at `add` and at launch. |
 | Owner / mode | Holds | `-perm /022`; an ACL-granted group write is caught because setfacl raises the mask bits (tested, refused). |
 | `mount rm` | Fine | Non-canonical spellings normalise via `readlink -f`; nothing else matches. |
 | Box influence over its mounts | None found | No config key; store is host-only; the check reads only host paths. |
 | Propagation | Fine | rprivate; a mount made on the host after launch does not appear in the box, and `mv`-replaced tokens do (same inode namespace). |
+
+**Done (2026-09-22):** the deny list gained `.config/rclone .config/helm .config/hcloud
+.config/op .config/git .config/argocd .config/pip .config/Code .terraform.d .m2 .gradle`,
+and `mount add` now prints every file the box will be able to read.
 
 The deeper point: a deny list protects against *you* mounting the wrong thing by habit,
 not against a complete inventory of where credentials live. A cheap improvement is to make
@@ -395,6 +399,11 @@ Documented honestly. Two options beyond rotation:
 
 Listed in §1.1. Also: the box's `CLAUDE.md` tells the agent "This is a Docker sandbox";
 it is podman by default, and the agent will reason about its environment from that line.
+
+**Done (2026-09-22):** the box `CLAUDE.md` says container sandbox, the README's "no
+mounted credentials" bullet now accounts for `airlock mount`, the `ro` row says it
+closes the *memory* channel, and the workspace and egress wording were corrected in the
+F2/F3 and F7 commits.
 
 ## 3. New code since the last review
 

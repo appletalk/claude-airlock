@@ -38,7 +38,9 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
 
 @test "refuses protected directories and anything inside them (no override)" {
   p="$(mkproj mntdeny)"
-  for d in "$H/.ssh" "$H/.kube" "$H/.config/sops" "$H/.config/sops/age"; do
+  mkdir -p "$H/.config/rclone" "$H/.config/helm" "$H/.terraform.d" "$H/.config/git" "$H/.m2"
+  for d in "$H/.ssh" "$H/.kube" "$H/.config/sops" "$H/.config/sops/age" \
+           "$H/.config/rclone" "$H/.config/helm" "$H/.terraform.d" "$H/.config/git" "$H/.m2"; do
     run _launch "$p" mount add "$d"
     [ "$status" -ne 0 ] || { echo "accepted $d"; false; }
     [[ "$output" == *"protected"* ]]
@@ -138,4 +140,38 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
   write_config "$p" "mount = $H/.kube-claude"
   _launch "$p" >/dev/null 2>&1 || true
   ! mounted "$H/.kube-claude"
+}
+
+# The hard-link scan is -xdev and the engine's bind is recursive, so a mount point nested
+# inside the directory (a FUSE mount, a bind) would be handed to the box unscanned. No
+# root in the suite to mount with, so findmnt is stubbed to report one.
+@test "refuses a directory with a mount point inside it, at add and again at launch" {
+  p="$(mkproj mntnested)"
+  _launch "$p" mount add "$H/.kube-claude" >/dev/null           # approved while clean
+  printf '#!/bin/sh\nprintf "%%s\\n" / /proc "%s/nested"\n' "$H/.kube-claude" > "$STUBBIN/findmnt"
+  chmod +x "$STUBBIN/findmnt"
+  run _launch "$p" mount add "$H/.kube-claude"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"contains a mount point"* ]]
+  run _launch "$p"
+  [[ "$output" == *"NOT mounting"* ]]
+  ! mounted "$H/.kube-claude"
+}
+
+@test "a mount point elsewhere does not trip the check (prefix match on the target only)" {
+  p="$(mkproj mntother)"
+  printf '#!/bin/sh\nprintf "%%s\\n" / /proc "%s/.kube-claude-other"\n' "$H" > "$STUBBIN/findmnt"
+  chmod +x "$STUBBIN/findmnt"
+  run _launch "$p" mount add "$H/.kube-claude"
+  [ "$status" -eq 0 ]
+}
+
+@test "mount add shows what the box will be able to read" {
+  p="$(mkproj mntlist)"
+  printf 't\n' > "$H/.kube-claude/token"
+  run _launch "$p" mount add "$H/.kube-claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"2 file(s)"* ]]
+  [[ "$output" == *"    config"* ]]
+  [[ "$output" == *"    token"* ]]
 }
