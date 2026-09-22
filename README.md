@@ -278,6 +278,19 @@ Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
 `AIRLOCK_SHARE_BASE`, `AIRLOCK_EGRESS_MODE` (default posture for new projects),
 `AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`.
 
+## Statusline — `config/airlock-statusline.sh`
+
+Boxes get it automatically, with a green `(airlock)` badge. To use the same line for
+**host** Claude, so both sides look identical apart from a red `(host)` badge, point your
+host `~/.claude/settings.json` at the repo copy with `--host`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "bash /path/to/claude-airlock/config/airlock-statusline.sh --host"
+}
+```
+
 ## Scratch files — `$AIRLOCK_TMP`
 
 The box's `/tmp` is destroyed with the container (`--rm`, including on Ctrl+C) and is
