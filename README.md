@@ -109,6 +109,22 @@ Unchanged upstream, same week: a cache hit that costs nothing. A refresh rebuild
 everything above the apt layer (a few minutes and a few hundred MB), which is why it is
 weekly rather than daily.
 
+**The Claude Code installer is vendored, and needs updating by hand.** The build runs
+`image/claude-install.sh`, a copy of `https://claude.ai/install.sh`, never a script
+piped from the network: that script is the one download in the image nothing else
+verifies (it verifies the Claude Code binary itself, against the release manifest). The
+copy goes stale, so every `make install` compares it with upstream and reports drift
+loudly, with `!!! INSTALLER DRIFT` lines, without failing the build. When you see that:
+
+```sh
+make claude-installer-diff      # read what changed
+make claude-installer-update    # take it; then review `git diff`, commit, make install
+```
+
+Expect this every few weeks. A stale copy keeps working until upstream changes the
+release layout it fetches, at which point the Claude Code layer fails to build and the
+fix is the same two commands.
+
 ### 3. Shell integration
 
 Add to `~/.zshrc` (or `~/.zshrc.local`) and reload:
