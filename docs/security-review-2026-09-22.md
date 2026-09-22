@@ -2,12 +2,12 @@
 
 *Scope: everything in the repo at `6430250`, with the closest look at `ce7e94f` (airlock
 mount), `9853d3b` (DNS pinning) and `4afb4c8` (infra clients). Method: code reading, plus
-live tests against the real `claude-airlock:base` / `:dev` images on titan (podman 6.1.2,
+live tests against the real `claude-airlock:base` / `:dev` images on the review host (Arch, podman 6.1.2,
 pasta 2026_07_28, runc 1.5.1, kernel 7.2.6-arch2-1, rootless, cgroup v2), and the launcher
 driven through its bats stubs. Report only; nothing was fixed. No host config was changed,
 `~/.config/claude-airlock` was not written, and no containers were left running (the one
-box that was up throughout, `vigorous_ganguly`, is your own `claude --resume` session on
-`kubernetes-glz-migration` and was not touched).*
+box that was up throughout is your own live airlock session on another project and was
+not touched).*
 
 *Not done: I did not read `~/.claude.json` or `~/.kube-claude/config` (the read was
 declined), so "what the seeded claude.json leaks into the box" and "what the read-only
@@ -55,7 +55,7 @@ box built an hour ago has 37 upgradable packages, 17 of them from `stable-securi
 (openssl, bind9, util-linux, jq). SECURITY.md's "rebuild to pick up security updates" is
 not true as written (F5).
 
-The design question you flagged (IP-based egress, shared Traefik VIP) is real and the
+The design question you flagged (IP-based egress, a shared ingress VIP) is real and the
 only complete answer is a name-aware egress point. A CONNECT proxy inside the box, with
 an `-m owner` rule so only the proxy's uid may open port 443, closes the VIP problem, the
 CDN co-tenancy problem **and** the DNS exfiltration channel at once, because the box then
@@ -68,7 +68,7 @@ needs no DNS at all. It is the largest item here (L) and the one with the most v
 | Claim (README / SECURITY.md) | Verdict | Evidence / note |
 |---|---|---|
 | Default-DROP egress on both families; refuses to start with unfilterable v6 | **Holds** | Live box on a host with global v6: `example.com blocked (IPv4)`, `(IPv6)`, `api.anthropic.com` reachable over v6. `curl -6 https://example.com` fails, `curl -6 https://api.anthropic.com` 404. |
-| Allowlist matches IPs, inherits CDN co-tenancy | **Holds, understated** | The text says "CDN". Your live case is an internal shared ingress VIP (10.44.0.10), which is the same problem with a worse blast radius: every internal service behind that VIP, not just co-tenants on an edge. Say "any shared IP: CDN edge, reverse proxy, ingress VIP, load balancer". |
+| Allowlist matches IPs, inherits CDN co-tenancy | **Holds, understated** | The text says "CDN". Your live case is an internal shared ingress VIP (two granted names resolving to the ingress address that fronts every internal service), which is the same problem with a worse blast radius: every internal service behind that VIP, not just co-tenants on an edge. Say "any shared IP: CDN edge, reverse proxy, ingress VIP, load balancer". |
 | DNS pinned to configured resolvers; names still tunnel data | **Holds** | `dig @8.8.8.8` → `host unreachable`; UDP and TCP to `169.254.1.1` answer. Honest wording. |
 | The OAuth token is in scope for DNS exfil; rotate if compromised | **Holds** | `env` in the box shows `CLAUDE_CODE_OAUTH_TOKEN`. Any allowed 443 destination that shares an IP is a far faster channel than DNS; say so. |
 | Grants live host-side, box cannot approve | **Holds** | `.airlock/config` has no mount key (bats: `a project .airlock/config cannot request a mount` passes); state dir never mounted (checked the real `podman run` argv of your live box). |
@@ -76,7 +76,7 @@ needs no DNS at all. It is the largest item here (L) and the one with the most v
 | No mounted credentials | **Stale** | True until `ce7e94f`. `airlock mount` is documented, but this bullet should now read "no *host* credentials except what `airlock mount` grants". |
 | Secrets stay off the process table | **Holds** | `--env-file` at mode 0600 (bats hardening tests). |
 | "Files the box writes … git hooks, `.envrc`, Makefile …" | **Incomplete** | Missing the three that run *automatically* with no build step: `.claude/settings.json` hooks, `.mcp.json`, `.git/config` (`core.fsmonitor`, `core.pager`, `core.hooksPath`, `core.sshCommand`, `diff.external`, filters). See F2, F3. |
-| `.envrc` runs "the next time you cd in" | **Overstated** | direnv refuses a changed `.envrc` until `direnv allow`; the risk is the reflexive re-allow. direnv is not installed on titan. |
+| `.envrc` runs "the next time you cd in" | **Overstated** | direnv refuses a changed `.envrc` until `direnv allow`; the risk is the reflexive re-allow. direnv is not installed on the review host. |
 | `AIRLOCK_SHARE_MEMORY=ro` "closes the channel" | **Overstated** | It closes memory *authoring*. Transcripts remain rw (a box can forge prior turns a host `--resume` will trust), the workspace channels above remain, and in `rw` mode the symlink read-back (F1) is open. |
 | Transcripts read-write "in every mode" | **Holds, under-explained** | Say what that means: a box can rewrite the conversation the host resumes. |
 | "The box cannot exceed your unprivileged user's authority" | **Holds** | Correct, and worth keeping. Add that this authority includes `~/.ssh`, `~/.gnupg`, the docker socket if you are in `docker` (you are not), etc. so an escape is still total for you. |
@@ -105,13 +105,13 @@ the docs say so. What is missing: the token is a one-year credential and there i
 rotation cadence; and a root-held credential proxy (F13) would keep it out of `dev`'s
 reach entirely.
 
-**Egress by IP.** Documented for CDNs, not for internal shared VIPs. Your titan case is
+**Egress by IP.** Documented for CDNs, not for internal shared VIPs. Your live case is
 the cleaner example and should be the one in the README. Design answer in §9.
 
 **Writable shared repos.** Documented for hooks/envrc/build files. Missing `.git/config`,
 `.claude/settings.json`, `.mcp.json`, `CLAUDE.md` (prompt injection into the host session
 with no execution needed). Your live box has `share_rw` on five infrastructure repos
-(`glz.ca/k8s`, `infrastructure`, `dns-zones`, `opnsense`, `titan`), which is the largest
+(cluster manifests, infrastructure, DNS zones, firewall config, host config), the largest
 Class-B surface on this host; nothing in airlock can bound it, only credential scoping
 and review.
 
@@ -130,7 +130,7 @@ project directory, which the next box reads.
 ```
 $ ln -sfn "$W/ev/canary.md" ~/.claude/projects/<throwaway-slug>/memory/MEMORY.md
 $ claude -p --model haiku --max-turns 1 'Quote verbatim the first line of the memory index ...'
-CANARY-MEMORY-7731: this line lives OUTSIDE the memory dir, at /tmp/claude-1000/airlock-review.Muwr/ev/canary.md
+CANARY-MEMORY-7731: this line lives OUTSIDE the memory dir, at <scratch>/ev/canary.md
 ```
 (Run on the host, Claude Code 2.1.278, throwaway project under `/tmp`, cleaned up
 afterwards.) Symlink creation from inside a box needs nothing special: the mount is rw
@@ -154,7 +154,7 @@ $ cat .claude/settings.json
 {"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch $W/ev/hook-canary"}]}]}}
 $ claude -p --model haiku ...       # on the host
 $ ls -la ev/hook-canary
--rw-r--r-- 1 keith keith 0 Sep 22 06:53 ev/hook-canary
+-rw-r--r-- 1 user user 0 Sep 22 06:53 ev/hook-canary
 ```
 No approval dialog; `-p` mode. `.mcp.json` is the same class (host launches the server
 binary), and `CLAUDE.md` is the no-execution variant (instructions the host follows).
@@ -250,12 +250,12 @@ unaffected. `podman`/`docker`-in-box was never supported.
 
 **Evidence** (bats, stubbed engine, box-writable config):
 ```
-egress = 169.254.1.2:22, 172.16.50.51:22
+egress = 169.254.1.2:22, <host-lan-ip>:22
 Allow the sandbox to reach 169.254.1.2:22? [y/N]
-Allow the sandbox to reach 172.16.50.51:22? [y/N]
+Allow the sandbox to reach <host-lan-ip>:22? [y/N]
 ```
 A bare IP is all the operator sees. `169.254.1.2` is pasta's mapping of the host,
-`172.16.50.51` is the host's LAN address, `10.0.2.2` is slirp's host, `127.0.0.1` is
+`<host-lan-ip>` is the host's LAN address, `10.0.2.2` is slirp's host, `127.0.0.1` is
 already allowed by the loopback rule. A prompt-injected config line plus a reflexive "y"
 opens a host service to the box. Fix: refuse (or annotate in red) grants in
 `169.254.0.0/16`, `10.0.2.0/24`, loopback, and any address currently on a host interface.
@@ -468,7 +468,7 @@ Each row: what it adds on top of what you already have, what it breaks, verdict.
 | `--read-only` rootfs + tmpfs | prevents writes to the overlay | `apt`, `pip --user`, `npm -g`, Postgres under `$HOME`, Playwright caches; needs tmpfs for `/tmp`, `/home/dev`, `/run`, `/var/tmp` | Skip: `--rm` already discards the overlay; low gain, high friction |
 | mask/unmask | podman already masks `/proc/kcore`, `/proc/keys`, `/sys/firmware`, `/proc/sys` ro (verified) | nothing | Nothing to add |
 | userns size | keep-id maps 1000→1000 and the rest to 100000+; 65536 ids | a smaller range changes nothing security-wise | Leave |
-| AppArmor | a modest profile (mount, ptrace, `/proc/sys` writes), all already blocked by caps/seccomp/userns | needs kernel `lsm=` change and reboot on titan | Skip |
+| AppArmor | a modest profile (mount, ptrace, `/proc/sys` writes), all already blocked by caps/seccomp/userns | needs a kernel `lsm=` change and a reboot on the host | Skip |
 | Landlock | in-box, from the entrypoint: fs scoping (little gain: the container already scopes) and, on ABI v4+, per-process TCP connect port rules as a second egress layer independent of iptables | needs a Landlock wrapper binary; Debian has none packaged; would need to allow 443/53/22 | Maybe later; the CONNECT proxy is the better second layer |
 | cgroup limits | `pids` 4096 set; `memory`/`cpu` controllers are delegated (`cgroup.controllers: cpu memory pids`), so `--memory`/`--cpus` work rootless | too-low memory breaks builds (documented) | Set `AIRLOCK_MEMORY` to something generous on titan; add `--cpus` opt-in |
 | Host sysctls | `unprivileged_bpf_disabled=1`, `ptrace_scope=2`, `dmesg_restrict=1`, `kptr_restrict=2` already; `io_uring_disabled=0` but seccomp blocks it in the box | `ptrace_scope=2` means no `strace`/`gdb` in a box (host choice) | Already good; `io_uring_disabled=2` is optional belt-and-braces |
@@ -512,12 +512,12 @@ ignores `HTTPS_PROXY`). `--map-guest-addr none` only removes `host.containers.in
 
 ## 9. The design answer for IP-based egress
 
-Today the allowlist says "these IPs on 443". The Traefik VIP shows why that is the wrong
+Today the allowlist says "these IPs on 443". The shared ingress VIP shows why that is the wrong
 unit: names are what you approve, IPs are what you enforce, and the two only coincide for
 single-tenant hosts. Options:
 
 1. **Infra-side, no airlock change (S).** Give agent-reachable services their own ingress
-   IP (a second Traefik entrypoint or MetalLB address for `metrics`/`logs`). The grant then
+   IP (a second ingress entrypoint or load-balancer address for the granted names). The grant then
    really is one service. Fragile: the next shared VIP reintroduces the problem.
 2. **CONNECT proxy in the box (L, recommended).** As root, before the drop, start an HTTP
    CONNECT proxy (tinyproxy, or a 100-line Go/Python one) on `127.0.0.1` with the
@@ -580,7 +580,7 @@ ingress grants every service behind it."
    box still runs tools normally.
 10. **Verify the kube ClusterRole** cannot read secrets or exec (T, F9 note).
 11. **Node SHASUMS and hashed pip constraints** (S, F12).
-12. **Dedicated ingress IP for agent-facing services on titan** (S, infra, §9.1) as the
+12. **Dedicated ingress IP for agent-facing services** (S, infra, §9.1) as the
     stopgap for the VIP problem.
 13. **CONNECT-proxy egress** (L, §9.2): the one change that turns "we allow IPs" into
     "we allow names" and removes DNS from the box. Highest total value; do it after the
