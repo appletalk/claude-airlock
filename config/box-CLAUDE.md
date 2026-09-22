@@ -1,6 +1,7 @@
 # claude-airlock sandbox
 
-You are running inside **claude-airlock**, a Docker sandbox. Work normally, but
+You are running inside **claude-airlock**, a container sandbox (rootless podman by
+default; Docker on some hosts). Work normally, but
 know these environment conventions so you don't misread them (the standing rules at
 the bottom of this file apply too):
 
