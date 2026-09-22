@@ -425,6 +425,15 @@ never *here is an older image you are about to mistake for the new one*.
   and privilege-drop need; runs as non-root `dev`; `--security-opt=no-new-privileges`. A
   process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork-bomb, and an
   optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
+- **No new namespaces.** The box runs under `image/seccomp.json`: the engine's default
+  profile with `unshare`, `setns` and any `clone` carrying a namespace flag refused
+  (`clone3` answers ENOSYS so libc falls back to the filtered `clone`). With the default
+  profile the agent could `unshare -Ur` and hold a full capability set as root inside a
+  nested user namespace, which is the precondition for most container-to-host kernel
+  exploits. Nothing the box runs needs one: Claude Code's own Bash sandbox (bubblewrap)
+  is opt-in, not in the image, and falls back to unsandboxed with a warning; Chromium
+  runs `--no-sandbox`; git, node, python, pwsh, kubectl, the validators and Postgres are
+  unaffected (checked). The doctor and the image smoke test run under the same profile.
 - **The host is not on the box's network.** Under pasta the launcher passes
   `--map-guest-addr none`, so `169.254.1.2` (`host.containers.internal`) reaches nothing;
   podman already declines to map the gateway address and forwards no ports. Host

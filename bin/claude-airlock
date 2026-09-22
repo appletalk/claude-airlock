@@ -1512,6 +1512,19 @@ args=(
   --cap-add=NET_ADMIN --cap-add=NET_RAW
   --cap-add=SETUID --cap-add=SETGID
   --security-opt=no-new-privileges
+  # The engine's default seccomp profile minus new namespaces. With the default, `dev`
+  # could `unshare -Ur` and become root with a full capability set inside a nested user
+  # namespace (measured) - not an escape, the nested netns is empty and the firewall lives
+  # in the outer one, but it is the precondition for most container-to-host kernel
+  # exploits (netfilter, overlayfs, keyrings). image/seccomp.json is podman's default
+  # with unshare/setns refused, clone allowed only without namespace flags, and clone3
+  # answered ENOSYS so libc falls back to the filtered clone (the clone3 argument block
+  # cannot be inspected). Nothing the box runs needs a namespace: Claude Code's own Bash
+  # sandbox (bubblewrap) is opt-in, not installed in the image, and documented to fall
+  # back to unsandboxed with a warning when unavailable; Chromium runs --no-sandbox.
+  # Verified live: git, node workers, python threads, pwsh, kubectl, helm, every
+  # validator, Postgres and claude itself run unchanged.
+  --security-opt "seccomp=$_repo/image/seccomp.json"
   -e TERM -e "TZ=${TZ:-UTC}"
   -e DISABLE_AUTOUPDATER=1
   --env-file "$ENV_FILE"                         # OAuth token + secrets (0600, off the process table)

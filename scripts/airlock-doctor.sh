@@ -129,6 +129,7 @@ if fw_out="$("$ENGINE" run --rm \
   --cap-drop=ALL \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \
   --security-opt=no-new-privileges \
+  --security-opt "seccomp=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../image/seccomp.json" \
   -e AIRLOCK_EGRESS_GROUPS="" \
   -e "AIRLOCK_HOST_DNS=$(airlock_host_nameservers)" \
   --entrypoint /bin/bash "$IMAGE" -c '/usr/local/bin/init-firewall.sh' 2>&1)"; then

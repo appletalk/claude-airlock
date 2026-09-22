@@ -18,6 +18,42 @@ setup() { setup_airlock_env; }
   [[ "$args" == *"--cap-add=SETGID"* ]]
 }
 
+# The engine's default seccomp profile lets the agent create user namespaces and become
+# root with a full cap set inside one (measured) - the precondition for most
+# container-to-host kernel exploits. The box runs with the repo's own profile instead:
+# podman's default with new namespaces refused. Both engines take the same flag.
+@test "passes the repo's seccomp profile, under BOTH engines" {
+  for e in podman docker; do
+    : > "$ENGINE_ARGS_FILE"
+    AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$(mkproj "sc-$e")" >/dev/null 2>&1 || true
+    engine_args | grep -qx -- "seccomp=$(readlink -f "$BATS_TEST_DIRNAME/../image/seccomp.json")" \
+      || { echo "$e: no seccomp profile: $(engine_args | grep -c seccomp)"; false; }
+  done
+}
+
+@test "the seccomp profile refuses new namespaces and nothing else the default allows" {
+  prof="$BATS_TEST_DIRNAME/../image/seccomp.json"
+  jq -e . "$prof" >/dev/null                                             # valid JSON
+  # unshare and setns: refused outright.
+  [ "$(jq -r '.syscalls[] | select(.names == ["unshare","setns"]) | .action' "$prof")" = SCMP_ACT_ERRNO ]
+  # clone3 cannot be argument-filtered, so it is ENOSYS and libc falls back to clone.
+  [ "$(jq -r '.syscalls[] | select(.names == ["clone3"]) | .errnoRet' "$prof")" = 38 ]
+  # clone: allowed only with every namespace flag clear (docker's mask), so fork and
+  # threads work and CLONE_NEWUSER does not.
+  [ "$(jq -r '.syscalls[] | select(.names == ["clone"]) | .args[0] | "\(.op) \(.value) \(.valueTwo)"' "$prof")" = "SCMP_CMP_MASKED_EQ 2114060288 0" ]
+  # None of the four appears in an unconditional allow rule any more.
+  [ "$(jq '[.syscalls[] | select(.action == "SCMP_ACT_ALLOW" and (.args | length) == 0 and (.includes // {} | length) == 0) | .names[] | select(. == "unshare" or . == "setns" or . == "clone" or . == "clone3")] | length' "$prof")" = 0 ]
+  # The rest of the default is intact: fork's siblings and the everyday syscalls stay allowed.
+  for s in fork vfork execve openat read write mmap futex epoll_wait; do
+    jq -e --arg s "$s" '.syscalls[] | select(.action == "SCMP_ACT_ALLOW") | .names[] | select(. == $s)' "$prof" >/dev/null || { echo "$s missing"; false; }
+  done
+}
+
+@test "the doctor and the image smoke test run their boxes under the same profile" {
+  grep -q 'seccomp=.*image/seccomp.json' "$BATS_TEST_DIRNAME/../scripts/airlock-doctor.sh"
+  grep -q 'seccomp=.*image/seccomp.json' "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh"
+}
+
 @test "sets no-new-privileges" {
   _launch "$(mkproj)"
   [[ "$(engine_args)" == *"--security-opt=no-new-privileges"* ]]
