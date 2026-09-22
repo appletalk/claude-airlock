@@ -391,6 +391,96 @@ if [ "${1:-}" = "share" ]; then
   exit 0
 fi
 
+# `airlock mount add|list|rm` manages extra READ-ONLY host directories for this project's
+# box - the way to hand a box a scoped credential that lives outside AIRLOCK_SHARE_BASE
+# (e.g. a read-only kubeconfig + short-lived token dir, re-minted on the host and picked up
+# live). Like secrets it is host-only: the store lives in STATE_DIR, and there is no
+# .airlock/config key for it, so a box cannot request its own mounts.
+#
+# Foot-gun protection, with deliberately NO override: the path must be an existing
+# directory under $HOME (symlinks resolved), and must not be $HOME, inside a credential
+# directory, or an ancestor of one (so ~/.config is refused because it holds sops keys).
+# A directory holding a hard-linked file is refused too: a hard link to ~/.ssh/id_ed25519
+# is the same inode, and a bind mount would expose it with no symlink to resolve. The same
+# check re-runs at every launch, so swapping an approved directory for a symlink later
+# gets it skipped, not mounted.
+AIRLOCK_MOUNT_DENY=".ssh .gnupg .kube .password-store .claude .aws .azure .docker .pki
+  .mozilla .config/sops .config/age .config/claude-airlock .config/gcloud .config/gh
+  .config/tea .config/containers .config/chromium .config/google-chrome
+  .local/share/keyrings .local/share/containers"
+
+# Canonical path on stdout if DIR may be mounted; otherwise the reason on stderr and 1.
+_airlock_mount_check() {
+  local want="$1" c home d
+  home="$(readlink -f "$HOME" 2>/dev/null)" || { echo "cannot resolve \$HOME" >&2; return 1; }
+  c="$(readlink -e "$want" 2>/dev/null)" || { echo "'$want' does not exist" >&2; return 1; }
+  [ -d "$c" ] || { echo "'$c' is not a directory" >&2; return 1; }
+  case "$c" in
+    "$home") echo "refusing \$HOME itself" >&2; return 1 ;;
+    "$home"/*) ;;
+    *) echo "'$c' is outside \$HOME ($home)" >&2; return 1 ;;
+  esac
+  for d in $AIRLOCK_MOUNT_DENY; do
+    d="$home/$d"
+    case "$c" in
+      "$d"|"$d"/*) echo "'$c' is inside protected ${d/#$home/\~} (no override)" >&2; return 1 ;;
+    esac
+    case "$d" in
+      "$c"/*) echo "'$c' contains protected ${d/#$home/\~} (no override)" >&2; return 1 ;;
+    esac
+  done
+  case "$c" in
+    "$WORKSPACE"|"$WORKSPACE"/*) echo "'$c' is inside the workspace, which is already mounted" >&2; return 1 ;;
+  esac
+  case "$WORKSPACE" in
+    "$c"/*) echo "'$c' contains the workspace" >&2; return 1 ;;
+  esac
+  # Owned by you and writable only by you: anyone else who can write here can plant what
+  # the box then trusts (a kubeconfig pointing at their server, say).
+  if [ "$(stat -c %u "$c")" != "$(id -u)" ] || [ -n "$(find "$c" -maxdepth 0 -perm /022 -print)" ]; then
+    echo "'$c' must be owned by you and not group/world-writable (chmod 700 it)" >&2
+    return 1
+  fi
+  if [ -n "$(find "$c" -xdev -type f -links +1 -print -quit 2>/dev/null)" ]; then
+    echo "'$c' holds a hard-linked file, which could expose a file from anywhere (no override)" >&2
+    return 1
+  fi
+  printf '%s\n' "$c"
+}
+
+if [ "${1:-}" = "mount" ]; then
+  _mslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _mstore="$HOME/.config/claude-airlock/state/$_mslug/mounts"
+  mkdir -p "$(dirname "$_mstore")"
+  case "${2:-list}" in
+    add)
+      _mp="${3:?usage: airlock mount add DIR}"
+      _mc="$(_airlock_mount_check "$_mp" 2>&1)" || { echo "airlock: $_mc" >&2; exit 1; }
+      touch "$_mstore"
+      grep -qxF "$_mc" "$_mstore" || printf '%s\n' "$_mc" >> "$_mstore"
+      echo "airlock: $_mc will be mounted READ-ONLY into $(basename "$WORKSPACE")'s box (next launch)" ;;
+    list)
+      echo "read-only mounts for $(basename "$WORKSPACE")  ($_mstore):"
+      if [ -s "$_mstore" ]; then
+        while IFS= read -r _l || [ -n "$_l" ]; do
+          [ -n "$_l" ] || continue
+          if ! _mwhy="$(_airlock_mount_check "$_l" 2>&1)"; then echo "  $_l  (SKIPPED at launch: $_mwhy)"
+          elif [ "$_mwhy" != "$_l" ]; then echo "  $_l  (SKIPPED at launch: now resolves to $_mwhy)"
+          else echo "  $_l  (ro)"; fi
+        done < "$_mstore"
+      else echo "  (none)"; fi ;;
+    rm)
+      _mp="${3:?usage: airlock mount rm DIR}"
+      _mc="$(readlink -f "$_mp" 2>/dev/null || printf '%s' "$_mp")"
+      if [ -f "$_mstore" ] && { grep -qxF "$_mp" "$_mstore" || grep -qxF "$_mc" "$_mstore"; }; then
+        grep -vxF -e "$_mp" -e "$_mc" "$_mstore" > "$_mstore.tmp.$$" || true; mv "$_mstore.tmp.$$" "$_mstore"
+        echo "airlock: removed mount $_mp"
+      else echo "airlock: no such mount '$_mp' (see 'airlock mount list')"; fi ;;
+    *) echo "usage: airlock mount add DIR  |  airlock mount list  |  airlock mount rm DIR" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
 # `airlock egress [show|list|minimal|dev|<groups>|add <groups>|rm <groups>]` reviews or
 # sets this project's egress POSTURE. Default 'minimal' = Anthropic core only (Claude
 # can't run without it) plus any host-approved `egress =` domains. 'dev' opens all
@@ -1462,6 +1552,21 @@ for _m in "${SHARE_RO[@]:-}"; do
   case " ${SHARE_RW[*]:-} " in *" $_m "*) continue ;; esac      # already mounted rw
   args+=( -v "$_m:$_m:ro" )
 done
+
+# Host-added read-only mounts (`airlock mount add`). Re-checked here, not trusted from the
+# store: a directory that has since become a symlink into ~/.ssh, or gained a hard link,
+# is skipped. Skipping only ever removes access, so it warns rather than aborting.
+if [ -s "$STATE_DIR/mounts" ]; then
+  while IFS= read -r _m || [ -n "$_m" ]; do
+    [ -n "$_m" ] || continue
+    if _mc="$(_airlock_mount_check "$_m" 2>&1)"; then
+      if [ "$_mc" = "$_m" ]; then args+=( -v "$_mc:$_mc:ro" )
+      else echo "claude-airlock: NOT mounting $_m: it now resolves to $_mc (re-add it if intended)" >&2; fi
+    else
+      echo "claude-airlock: NOT mounting $_m: $_mc" >&2
+    fi
+  done < "$STATE_DIR/mounts"
+fi
 
 # Broad read-only roots (host-set AIRLOCK_ROOTS) for cross-project inspection, under
 # /roots/<name>. Kept off the real-path tree on purpose: nesting a read-write child
