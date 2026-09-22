@@ -430,7 +430,8 @@ Layered, built by `make install`:
 
 - `claude-airlock:base` — Debian + Claude Code + git/gh + the egress firewall + core CLIs.
 - `claude-airlock:dev` *(default)* — base + Python, Node, PowerShell, build tools,
-  PostgreSQL, yaml tooling, and the offline config validators below. Start Postgres
+  PostgreSQL, yaml tooling, infra clients (kubectl, helm, sops, tea, drill; no
+  credentials baked in), and the offline config validators below. Start Postgres
   in-box with `airlock-pg-start` (localhost:5432, ephemeral).
 - `claude-airlock:playwright` — dev + headless Chromium + the Playwright MCP. Opt in via
   `image = claude-airlock:playwright`. Build on demand:
