@@ -414,6 +414,11 @@ never *here is an older image you are about to mistake for the new one*.
   and privilege-drop need; runs as non-root `dev`; `--security-opt=no-new-privileges`. A
   process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork-bomb, and an
   optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
+- **The host is not on the box's network.** Under pasta the launcher passes
+  `--map-guest-addr none`, so `169.254.1.2` (`host.containers.internal`) reaches nothing;
+  podman already declines to map the gateway address and forwards no ports. Host
+  loopback services were never reachable. That is a layer *under* the firewall: the box
+  has no route to the host even if its own rules are wrong.
 - **No mounted credentials, and secrets stay off the process table.** Auth is an OAuth
   token; the host `~/.claude` credentials, container socket, and other projects are never
   exposed. The token and any injected secrets are handed to the engine via a mode-0600

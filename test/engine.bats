@@ -42,10 +42,21 @@ setup() { setup_airlock_env; }
   [[ "$(engine_args)" != *"keep-id"* ]]
 }
 
-@test "podman gets an explicit --network (default pasta)" {
+# pasta's host mapping (169.254.1.2 -> any host service on 0.0.0.0) is switched off in
+# pasta itself, so the in-box firewall is not the only thing standing between the box and
+# the host. The DNS forwarder must survive that: it is a separate pasta option.
+@test "podman gets an explicit --network (default pasta) with the host mapping removed" {
   p="$(mkproj engnet)"
   AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
-  [[ "$(engine_args)" == *"--network=pasta"* ]]
+  engine_args | grep -qx -- '--network=pasta:--map-guest-addr,none'
+  engine_args | grep -qx -- '--dns=169.254.1.1'
+}
+
+@test "pasta with operator options keeps them and still removes the host mapping" {
+  p="$(mkproj engnetopt)"
+  AIRLOCK_PODMAN_NETWORK='pasta:--mtu,1400' AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--network=pasta:--mtu,1400,--map-guest-addr,none'
+  engine_args | grep -qx -- '--dns=169.254.1.1'
 }
 
 @test "AIRLOCK_PODMAN_NETWORK overrides the podman network stack" {

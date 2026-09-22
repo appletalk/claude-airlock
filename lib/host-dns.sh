@@ -30,7 +30,7 @@ airlock_dns_forwarders() {  # ENGINE PODMAN_NETWORK
   fi
   [ "$1" = podman ] || return 0
   case "${2:-}" in
-    pasta)       echo 169.254.1.1 ;;   # podman's default pasta --dns-forward address
+    pasta|pasta:*) echo 169.254.1.1 ;; # podman's default pasta --dns-forward address (options or not)
     slirp4netns) echo 10.0.2.3 ;;      # slirp4netns' built-in DNS forwarder
   esac
 }

@@ -282,10 +282,11 @@ firewall OFF, pasta:--map-guest-addr,none:  both TIMEOUT
 firewall ON,  default pasta:  both "No route to host" (REJECT)
 firewall ON,  pasta:--map-guest-addr,none:  firewall inits, DNS resolves, api.anthropic.com 404
 ```
-So today only the in-box firewall stands between the box and any host service bound to
-`0.0.0.0` (a dev server, Postgres, an MCP server, `podman system service`). Adding
-`--network=pasta:--map-guest-addr,none` in the launcher removes that address entirely
-and costs only `host.containers.internal`, which nothing in airlock uses. The host's
+Until this review only the in-box firewall stood between the box and any host service
+bound to `0.0.0.0` (a dev server, Postgres, an MCP server, `podman system service`).
+**Fixed (2026-09-22):** the launcher now passes `--network=pasta:--map-guest-addr,none`
+(operator pasta options are kept), which removes that address entirely and costs only
+`host.containers.internal`, which nothing in airlock uses. Pinned in `test/engine.bats`. The host's
 loopback-only services were never reachable (pasta does not map loopback). ICMP needs no
 second layer: `dev` cannot create ICMP sockets. IPv6: pasta copies the host's global
 addresses into the box, and the in-box `ip6tables` handles them; no v6 equivalent of the

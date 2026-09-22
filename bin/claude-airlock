@@ -1456,7 +1456,23 @@ if [ "$AIRLOCK_ENGINE" = podman ]; then
   # Container root still maps into the subuid range, so the entrypoint can still raise
   # the firewall before dropping to `dev`.
   args+=( "--userns=keep-id:uid=1000,gid=1000" )
-  args+=( "--network=$AIRLOCK_PODMAN_NETWORK" )
+  # pasta maps 169.254.1.2 (host.containers.internal) to the host: from the box it
+  # reaches any host service bound to 0.0.0.0 - a dev server, Postgres, an MCP server,
+  # `podman system service` (measured: a listener on 0.0.0.0 answered, one on 127.0.0.1
+  # did not). Until now the in-box firewall was the ONLY thing between the box and that
+  # address. `--map-guest-addr none` removes the mapping in pasta itself, so a firewall
+  # that failed to come up, or a rule that was talked into allowing it (`egress =
+  # 169.254.1.2:22` is a bare IP in the approval prompt), has nothing to reach. Verified:
+  # with it, the address times out with the firewall down, and DNS, the firewall's
+  # self-test and api.anthropic.com still work with it up. The cost is
+  # host.containers.internal, which nothing in airlock uses. podman already passes
+  # --no-map-gw (the gateway address never reached the host) and forwards no ports.
+  # slirp4netns needs nothing here: podman's allow_host_loopback defaults to false.
+  case "$AIRLOCK_PODMAN_NETWORK" in
+    pasta)   args+=( "--network=pasta:--map-guest-addr,none" ) ;;
+    pasta:*) args+=( "--network=$AIRLOCK_PODMAN_NETWORK,--map-guest-addr,none" ) ;;
+    *)       args+=( "--network=$AIRLOCK_PODMAN_NETWORK" ) ;;
+  esac
 fi
 
 # DNS: point the box at the network stack's forwarder to the host resolver, and tell the

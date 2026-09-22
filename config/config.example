@@ -14,9 +14,13 @@
 # contain a box. Set this to docker only if podman is unavailable.
 # AIRLOCK_ENGINE=podman
 
-# Rootless podman's network stack: pasta (podman's default) | slirp4netns.
+# Rootless podman's network stack: pasta (podman's default) | slirp4netns. Extra pasta
+# options may follow a colon (pasta:--mtu,1400).
 # Containment is enforced by the in-box egress firewall either way; this only changes how
-# packets leave the network namespace. Leave it alone unless pasta misbehaves.
+# packets leave the network namespace. Under pasta the launcher also adds
+# --map-guest-addr none, so 169.254.1.2 (host.containers.internal) no longer reaches host
+# services at all - a second layer under the firewall. Leave it alone unless pasta
+# misbehaves.
 # AIRLOCK_PODMAN_NETWORK=pasta
 
 # Resolver(s) for the box, space-separated. Empty = automatic: under podman the box uses
