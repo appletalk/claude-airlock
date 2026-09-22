@@ -206,14 +206,19 @@ $ (inside a throwaway box) apt-get update && apt list --upgradable | wc -l
 binaries*, which is the one layer that already floats correctly; the Debian layer is the
 one nobody bumps.
 
-**Fix.** In `bin/install.sh`: `build --pull` and a `--build-arg APT_DATE=$(date +%F)`
-consumed before the apt `RUN` (or `apt-get upgrade -y` in a final layer, which makes
-"rebuild = patched" true regardless of cache). Add `make refresh` and a note in SECURITY.md
-with a cadence (weekly is fine for a stable base; trixie security uploads are frequent but
-small). Functional cost: a full rebuild takes minutes and a larger download; validators are
-pinned so nothing else moves. Recommend against digest-pinning `FROM`: it gives
-reproducibility but freezes CVEs, and you would then need Renovate to bump it. A moving
-tag plus `--pull` plus a cadence is the right shape for "stay on stable".
+**Fixed (2026-09-22, the commit after this document).** `bin/install.sh` now pulls the
+base tag as its own step (a warning, not a failure, when offline) and keys the base apt
+layer on the ISO week via an `APT_REFRESH` build arg; that layer runs `apt-get upgrade`
+so the packages the base tag already carries are updated too. `make refresh` forces a
+rebuild now with a `<week>.<timestamp>` key, which install remembers in
+`~/.config/claude-airlock/apt-refresh` so a later install in the same week does not
+re-tag onto the older week layer. The key is recorded as an image label and
+`airlock doctor` prints it. Measured after the first rebuild: 0 upgradable packages,
+and the images shrank (base 781 MB → 547 MB, dev 3.49 GB → 3.26 GB) because the fresh
+`trixie-slim` replaced the June one. Functional cost: one full rebuild per week (a few
+minutes, a few hundred MB). Digest-pinning `FROM` was rejected: reproducible, but it
+freezes CVEs and needs a bump bot. A moving tag plus pull plus cadence is the right shape
+for "stay on stable".
 
 ### F6. Nested user namespaces are available to the agent — **Medium**, effort **S**
 

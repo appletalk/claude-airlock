@@ -112,11 +112,52 @@ if [ -z "$CLAUDE_CODE_VERSION" ]; then
   fi
 fi
 
-echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_VERSION"
-"$AIRLOCK_ENGINE" build --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
+# The Claude Code arg keeps that ONE layer current. Nothing kept the layers below it
+# current: `build` never re-pulls a base tag it already has, and never re-runs an
+# unchanged apt RUN, so the Debian packages in the box were frozen at the first build
+# (measured: an apt layer from July inside an image built in September, 17 security
+# updates behind, while SECURITY.md promised a rebuild would pick them up).
+#
+# Two things fix that. The base tag is re-pulled so an upstream rebuild is picked up -
+# as its own step, not `build --pull`, because a bare `--pull` is "always" on both
+# engines and turns an offline `make install` (a launcher update, every layer cached)
+# into a hard failure; here it degrades to a warning, like the version lookup above.
+# APT_REFRESH is the cache key of the base apt layer (see image/Dockerfile): the current
+# ISO week, so the base is rebuilt at most weekly and `make install` is a cache hit the
+# rest of the week. Everything above the apt layer rebuilds with it, which is why the
+# default is a week and not a day.
+#
+# `make refresh` forces a rebuild now by passing "<week>.<timestamp>". The key that was
+# used is remembered in the config dir, and a later `make install` in the SAME week reuses
+# it: with the bare week key it would re-tag :base onto the cached, older week layer and
+# silently undo the refresh, with doctor reporting the week as if nothing had happened.
+BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}//p' "$REPO_DIR/image/Dockerfile" | head -1)"
+REFRESH_STAMP="$CONFIG_DIR/apt-refresh"
+APT_WEEK="$(date +%G-W%V)"
+APT_REFRESH="${AIRLOCK_APT_REFRESH:-}"
+if [ -z "$APT_REFRESH" ]; then
+  APT_REFRESH="$(cat "$REFRESH_STAMP" 2>/dev/null || true)"
+  case "$APT_REFRESH" in
+    "$APT_WEEK"|"$APT_WEEK".*) ;;          # this week's key, possibly a forced refresh
+    *) APT_REFRESH="$APT_WEEK" ;;          # a new week, or no record yet
+  esac
+fi
+
+echo "==> Refreshing the base tag ($BASE_IMAGE)"
+if ! "$AIRLOCK_ENGINE" pull -q "$BASE_IMAGE" >/dev/null; then
+  echo "    WARNING: could not pull $BASE_IMAGE - building from the cached copy." >&2
+  echo "             Debian's own rebuilds of the tag are missed until a pull succeeds;" >&2
+  echo "             the apt layer below still upgrades what the cached tag carries." >&2
+fi
+
+echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_VERSION, packages as of $APT_REFRESH"
+"$AIRLOCK_ENGINE" build \
+  --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
+  --build-arg "APT_REFRESH=$APT_REFRESH" \
   -t claude-airlock:base "$REPO_DIR/image"
+printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
 echo "==> Building dev image (claude-airlock:dev) — Python, Node 24, build tools"
-echo "    (a new Claude Code version moves the base, so this layer rebuilds too)"
+echo "    (a new Claude Code version or package refresh moves the base, so this layer rebuilds too)"
 "$AIRLOCK_ENGINE" build -t claude-airlock:dev "$REPO_DIR/image/dev"
 echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
 echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$REPO_DIR/image/playwright\""
