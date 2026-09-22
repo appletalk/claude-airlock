@@ -1310,14 +1310,26 @@ _gate_shares "${_REQ_SHARE_RW:-}" "$STATE_DIR/approved-shares-rw" rw SHARE_RW "$
 # path, this slug (and every path embedded in the transcripts) matches the host.
 HISTSLUG="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g')"
 
-# --- First-run identity/prefs seed (once); then always enforce friction-skips ---
+# --- First-run prefs seed (once); then always enforce friction-skips ---
+# Seeded by ALLOWLIST, not by deleting what we know is sensitive. The old
+# `del(.projects, .mcpServers)` carried everything else across: the account profile
+# (email, org and account UUIDs), the host install's stable userID and machineID, and
+# githubRepoPaths - a map of every other repo on the machine and where it lives, in a
+# box whose whole premise is that it sees only its own project. A denylist lets through
+# whatever Claude Code adds to this file next; this list is what a box has a use for.
+# Identity is deliberately absent: Claude generates fresh install identifiers per state
+# dir, and the injected token (or the box's own login) is all the account it needs.
+AIRLOCK_SEED_KEYS='theme editorMode preferredNotifChannel shiftEnterKeyBindingInstalled verbose'
 if [ ! -s "$STATE_DIR/claude.json" ] || ! jq -e . "$STATE_DIR/claude.json" >/dev/null 2>&1; then
   if [ -f "$HOME/.claude.json" ] && command -v jq >/dev/null 2>&1; then
     # The fifth of these, and the one that must not be an && || chain: `rm -f` always exits
   # 0, so an `|| echo '{}'` fallback after it is unreachable. That fallback is the whole
   # point of the block - $STATE_DIR/claude.json is bind-mounted into the box, and a
   # missing source becomes a DIRECTORY in the container rather than a config file.
-  if jq 'del(.projects, .mcpServers)' "$HOME/.claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
+  if jq --arg keys "$AIRLOCK_SEED_KEYS" '
+        . as $host | ($keys | split(" ")) as $k
+        | reduce $k[] as $key ({}; if ($host[$key] != null) then .[$key] = $host[$key] else . end)
+      ' "$HOME/.claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
     mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json"
   else
     rm -f "$STATE_DIR/claude.json.tmp.$$"
@@ -1334,12 +1346,24 @@ if command -v jq >/dev/null 2>&1; then
   # `set -e` that killed the launch with no message at all.
   HOST_THEME="$(jq -r '.theme // "dark"' "$HOME/.claude.json" 2>/dev/null)" || HOST_THEME=dark
   [ "${HOST_THEME:-}" = "null" ] && HOST_THEME="dark"
-  if jq --arg theme "$HOST_THEME" --arg ws "$WORKSPACE" '
+  # Strip, every launch, what the old seed carried into projects provisioned before the
+  # allowlist: githubRepoPaths unconditionally (the box re-adds its own repo if it wants
+  # to, which is harmless), and the host's userID / machineID / oauthAccount ONLY when
+  # they still equal the host's, i.e. they came from the seed. A box that generated its
+  # own identifiers, or logged itself in under `airlock login persist`, keeps them: those
+  # are the box's own state, and churning them every launch would be its own problem.
+  HOST_IDS="$(jq -c '{userID, machineID, oauthAccount}' "$HOME/.claude.json" 2>/dev/null)" || HOST_IDS='{}'
+  [ -n "$HOST_IDS" ] || HOST_IDS='{}'
+  if jq --arg theme "$HOST_THEME" --arg ws "$WORKSPACE" --argjson host "$HOST_IDS" '
       .hasCompletedOnboarding = true
     | .theme = (.theme // $theme)
     | .copyOnSelect = false
     | .projects[$ws] = ((.projects[$ws] // {}) +
         {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true, projectOnboardingSeenCount: 1})
+    | del(.githubRepoPaths)
+    | if (.userID != null and .userID == $host.userID) then del(.userID) else . end
+    | if (.machineID != null and .machineID == $host.machineID) then del(.machineID) else . end
+    | if (.oauthAccount != null and .oauthAccount == $host.oauthAccount) then del(.oauthAccount) else . end
   ' "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
     mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json"
   else
