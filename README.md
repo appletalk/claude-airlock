@@ -542,6 +542,82 @@ box reads it — exfiltration with no network involved. Both the launcher and th
 `~/.claude/projects/<slug>/`, and name it. They never delete it: a link there is either an
 attack you need to know about or something you did on purpose.
 
+## Host hardening for rootless Podman (optional, recommended)
+
+The box cannot exceed your own user's authority, so a container escape lands as *you*,
+not root. Hardening the host therefore does three things: it makes an escape harder (less
+kernel attack surface), it makes an escape worth less (less that your user can reach),
+and it keeps the runtime patched. None of this is required for airlock to work, and none
+of it relaxes anything airlock does inside the box.
+
+**Kernel sysctls.** A drop-in such as `/etc/sysctl.d/60-hardening.conf`:
+
+```ini
+kernel.unprivileged_bpf_disabled = 1
+net.core.bpf_jit_harden = 2
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+kernel.yama.ptrace_scope = 2
+# optional, see below
+kernel.io_uring_disabled = 2
+```
+
+Apply with `sudo sysctl --system`, then re-run `airlock doctor`. Trade-offs:
+`ptrace_scope = 2` also stops `strace -p` / `gdb -p` without sudo, on the host and in
+every box. `io_uring_disabled = 2` is belt-and-braces: the box's seccomp profile already
+refuses `io_uring_setup`, and this extends that to every process on the host, which
+breaks the few host programs that need io_uring (`1` limits it to the
+`kernel.io_uring_group` group instead).
+
+**Leave unprivileged user namespaces on.** Rootless Podman *is* a user namespace, so
+`kernel.unprivileged_userns_clone = 0` or `user.max_user_namespaces = 0` disables airlock
+altogether. The risky part, a process creating a *nested* namespace to get a full
+capability set, is already refused inside the box by `image/seccomp.json`.
+
+**Keep the runtime patched.** Almost every container escape is a bug in the kernel, the
+OCI runtime (`crun`/`runc`), `conmon`, or the network helper (`pasta`/`passt`). Update them
+with the rest of the system, reboot for kernel updates, then run `airlock doctor`, which
+proves the firewall still holds on the new kernel. `make install` rebuilds the images, so
+the userland inside the box stays current as well.
+
+**Set a memory ceiling.** Check that your user's systemd instance delegates the cgroup
+controllers (systemd does this by default on cgroup v2):
+
+```sh
+cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers
+# expect at least: memory pids
+```
+
+Then set `AIRLOCK_MEMORY` in `~/.config/claude-airlock/config` to a generous cap, for
+example about a third of host RAM. The pids cap is on by default. Without a memory cap, a
+runaway build or a compromised agent can push the whole host into swap or the OOM killer.
+
+**No container API socket.** Stay out of the `docker` group (it is root-equivalent, see
+[Why rootless Podman](#why-rootless-podman)), and leave the rootless `podman.socket` user
+unit disabled unless something needs it (`systemctl --user is-enabled podman.socket`).
+Airlock never mounts either socket. Don't add one with `airlock mount`: a box holding the
+socket can start a sibling container without any of airlock's restrictions.
+
+**Make an escape worth less.** Because an escape runs as you, anything your user can
+read without a prompt is in reach: `~/.ssh`, `~/.gnupg`, cloud and cluster credentials,
+browser profiles. The controls that help are the ones that need a human at each use:
+SSH keys on a hardware token, or passphrase-protected with agent confirmation
+(`ssh-add -c`); secrets in `pass`/gpg behind an agent with a short cache; admin
+credentials that step up interactively (OIDC with WebAuthn, not a static token in a
+config file); and **no `NOPASSWD` sudo**, which turns an escape as you into root.
+
+**Bind host services to loopback.** A box cannot reach host loopback, and under pasta the
+launcher removes the host mapping (`--map-guest-addr none`). A development server
+listening on `0.0.0.0` is still reachable at your LAN address by anything the box's
+firewall lets through, so give local services `127.0.0.1` unless they need the LAN.
+
+**LSMs: don't add one just for airlock.** The confinement a default container profile
+gives (no mounts, no ptrace, no `/proc/sys` writes) is already enforced by the dropped
+capabilities, seccomp and the user namespace, so enabling AppArmor or SELinux for airlock
+alone buys little. Airlock is developed and tested on hosts without an enforcing LSM. On
+an SELinux-enforcing host, note that the launcher does not relabel its bind mounts (no
+`:z`), so expect denials on the workspace; that combination is untested.
+
 ## Corporate / internal CA certs (optional)
 
 If you sit behind a TLS-inspecting proxy, or need to reach internal HTTPS services whose
