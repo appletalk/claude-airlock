@@ -6,10 +6,9 @@ live tests against the real `claude-airlock:base` / `:dev` images on the review 
 pasta 2026_07_28, runc 1.5.1, kernel 7.2.6-arch2-1, rootless, cgroup v2), and the launcher
 driven through its bats stubs. Report only; nothing was fixed. No host config was changed,
 `~/.config/claude-airlock` was not written, and no containers were left running (the one
-box that was up throughout is your own live airlock session on another project and was
-not touched).*
+box that was up throughout, an unrelated live session, was not touched).*
 
-*Not done: I did not read `~/.claude.json` or `~/.kube-claude/config` (the read was
+*Not done: I did not read `~/.claude.json` or the mounted kube credential (the read was
 declined), so "what the seeded claude.json leaks into the box" and "what the read-only
 kube token can actually do" were listed as checks for you rather than findings. Both
 were done from inside a box the same day. The kube role is `view` plus a read-only
@@ -58,7 +57,7 @@ that `--map-guest-addr none` is a cheap and working second layer for the host ma
 `169.254.1.1` works fine here, so the first-launch observation did not reproduce (§5.3).
 
 The image side has one real problem: `make install` does not refresh anything below the
-Claude Code layer. The apt layer in your `:base` dates from 2026-07-13, the local
+Claude Code layer. The apt layer in the review host's `:base` dates from 2026-07-13, the local
 `debian:trixie-slim` is the 2026-06-23 build while the registry serves 2026-09-18, and a
 box built an hour ago has 37 upgradable packages, 17 of them from `stable-security`
 (openssl, bind9, util-linux, jq). SECURITY.md's "rebuild to pick up security updates" is
@@ -77,10 +76,10 @@ needs no DNS at all. It is the largest item here (L) and the one with the most v
 | Claim (README / SECURITY.md) | Verdict | Evidence / note |
 |---|---|---|
 | Default-DROP egress on both families; refuses to start with unfilterable v6 | **Holds** | Live box on a host with global v6: `example.com blocked (IPv4)`, `(IPv6)`, `api.anthropic.com` reachable over v6. `curl -6 https://example.com` fails, `curl -6 https://api.anthropic.com` 404. |
-| Allowlist matches IPs, inherits CDN co-tenancy | **Holds, understated** | The text says "CDN". Your live case is an internal shared ingress VIP (two granted names resolving to the ingress address that fronts every internal service), which is the same problem with a worse blast radius: every internal service behind that VIP, not just co-tenants on an edge. Say "any shared IP: CDN edge, reverse proxy, ingress VIP, load balancer". |
+| Allowlist matches IPs, inherits CDN co-tenancy | **Holds, understated** | The text says "CDN". A common case is an internal shared ingress VIP (granted names resolving to the ingress address that fronts every internal service), which is the same problem with a worse blast radius: every internal service behind that VIP, not just co-tenants on an edge. Say "any shared IP: CDN edge, reverse proxy, ingress VIP, load balancer". |
 | DNS pinned to configured resolvers; names still tunnel data | **Holds** | `dig @8.8.8.8` → `host unreachable`; UDP and TCP to `169.254.1.1` answer. Honest wording. |
 | The OAuth token is in scope for DNS exfil; rotate if compromised | **Holds** | `env` in the box shows `CLAUDE_CODE_OAUTH_TOKEN`. Any allowed 443 destination that shares an IP is a far faster channel than DNS; say so. |
-| Grants live host-side, box cannot approve | **Holds** | `.airlock/config` has no mount key (bats: `a project .airlock/config cannot request a mount` passes); state dir never mounted (checked the real `podman run` argv of your live box). |
+| Grants live host-side, box cannot approve | **Holds** | `.airlock/config` has no mount key (bats: `a project .airlock/config cannot request a mount` passes); state dir never mounted (checked the real `podman run` argv of a live box). |
 | Least privilege: no caps, non-root, NNP | **Holds** | `CapEff 0`, `NoNewPrivs 1`, `Seccomp 2`. `CapBnd` still holds the four granted caps but nothing can re-acquire them under NNP. |
 | No mounted credentials | **Stale** | True until `ce7e94f`. `airlock mount` is documented, but this bullet should now read "no *host* credentials except what `airlock mount` grants". |
 | Secrets stay off the process table | **Holds** | `--env-file` at mode 0600 (bats hardening tests). |
@@ -88,8 +87,8 @@ needs no DNS at all. It is the largest item here (L) and the one with the most v
 | `.envrc` runs "the next time you cd in" | **Overstated** | direnv refuses a changed `.envrc` until `direnv allow`; the risk is the reflexive re-allow. direnv is not installed on the review host. |
 | `AIRLOCK_SHARE_MEMORY=ro` "closes the channel" | **Overstated** | It closes memory *authoring*. Transcripts remain rw (a box can forge prior turns a host `--resume` will trust), the workspace channels above remain, and in `rw` mode the symlink read-back (F1) is open. |
 | Transcripts read-write "in every mode" | **Holds, under-explained** | Say what that means: a box can rewrite the conversation the host resumes. |
-| "The box cannot exceed your unprivileged user's authority" | **Holds** | Correct, and worth keeping. Add that this authority includes `~/.ssh`, `~/.gnupg`, the docker socket if you are in `docker` (you are not), etc. so an escape is still total for you. |
-| Rootless Podman is the default engine | **Holds** | `podman info` rootless=true, no daemon; your user is not in `docker` even though dockerd exists. |
+| "The box cannot exceed your unprivileged user's authority" | **Holds** | Correct, and worth keeping. Add that this authority includes `~/.ssh`, `~/.gnupg`, the docker socket if you are in `docker`, etc. so an escape is still total for you. |
+| Rootless Podman is the default engine | **Holds** | `podman info` rootless=true, no daemon; the review user is not in `docker`. |
 | "Rebuild the images (`make install`) after pulling to pick up base-image and toolchain security updates" (SECURITY.md) | **False as written** | See F5. Only the Claude Code layer is cache-busted. |
 
 ### 1.2 The six named channels, honestly
@@ -114,14 +113,13 @@ the docs say so. What is missing: the token is a one-year credential and there i
 rotation cadence; and a root-held credential proxy (F13) would keep it out of `dev`'s
 reach entirely.
 
-**Egress by IP.** Documented for CDNs, not for internal shared VIPs. Your live case is
+**Egress by IP.** Documented for CDNs, not for internal shared VIPs. The shared-VIP case is
 the cleaner example and should be the one in the README. Design answer in §9.
 
 **Writable shared repos.** Documented for hooks/envrc/build files. Missing `.git/config`,
 `.claude/settings.json`, `.mcp.json`, `CLAUDE.md` (prompt injection into the host session
-with no execution needed). Your live box has `share_rw` on five infrastructure repos
-(cluster manifests, infrastructure, DNS zones, firewall config, host config), the largest
-Class-B surface on this host; nothing in airlock can bound it, only credential scoping
+with no execution needed). A box with `share_rw` on infrastructure repos (cluster
+manifests, DNS zones, firewall or host config) is the largest Class-B surface there is; nothing in airlock can bound it, only credential scoping
 and review.
 
 Proposed README replacement for the "Known limitation" pair is in §10.
@@ -297,7 +295,7 @@ in `test/config_parse.bats`.
 
 Podman already runs pasta as
 `--config-net --dns-forward 169.254.1.1 -t none -u none -T none -U none --no-map-gw --quiet --map-guest-addr 169.254.1.2`
-(from the real argv of your live box). So `--no-map-gw` is already on: the gateway
+(from the real argv of a live box). So `--no-map-gw` is already on: the gateway
 address does not reach the host. What `169.254.1.2` reaches is the host's *non-loopback*
 sockets:
 
@@ -328,7 +326,7 @@ hard-link scan). What I could and could not get past:
 | Deny list | **Incomplete, by nature** | Accepted on first try: `.config/rclone .config/helm .terraform.d .config/hcloud .config/Code .local/share/pass .config/op .config/git .cache .config/systemd .ansible .config/pip .m2 .config/tailscale .config/argocd .config/k9s` (bats). rclone.conf, helm registry creds, `credentials.tfrc.json`, `.config/git/credentials`, k9s/argocd tokens are all bearer secrets. |
 | Ancestor check | Holds | `~/.config` refused ("contains protected"). |
 | Symlink resolution | Holds at check time | `readlink -e`; swapped-for-symlink dirs are skipped at launch (existing tests). |
-| TOCTOU check→mount | **Window exists, narrow** | Stub engine swapped the dir for a symlink to `~/.ssh` *after* the check; the launcher still passed `-v ~/.kube-claude:~/.kube-claude:ro` and the runtime would resolve the symlink. Exploiting it needs a writer on an ancestor of the mount path during the launch window; no ancestor of `~/.kube-claude` is ever mounted rw, so a *box* cannot do it. Only relevant if someone runs airlock with `$HOME` or a parent as the workspace/`share_rw`. |
+| TOCTOU check→mount | **Window exists, narrow** | Stub engine swapped the dir for a symlink to `~/.ssh` *after* the check; the launcher still passed `-v <dir>:<dir>:ro` and the runtime would resolve the symlink. Exploiting it needs a writer on an ancestor of the mount path during the launch window; no ancestor of a granted mount is ever mounted rw, so a *box* cannot do it. Only relevant if someone runs airlock with `$HOME` or a parent as the workspace/`share_rw`. |
 | Hard-link scan | **Blind to nested mounts** | `find -xdev` stops at filesystem boundaries; podman's `-v` is `rbind`, so a FUSE/bind mount inside the dir *is* exposed but *not* scanned. Add `findmnt -R "$c"` and refuse if anything but the top is a mountpoint. T. **Fixed (2026-09-22):** any mount point below the directory is refused, at `add` and at launch. |
 | Owner / mode | Holds | `-perm /022`; an ACL-granted group write is caught because setfacl raises the mask bits (tested, refused). |
 | `mount rm` | Fine | Non-canonical spellings normalise via `readlink -f`; nothing else matches. |
@@ -522,7 +520,7 @@ Each row: what it adds on top of what you already have, what it breaks, verdict.
 | userns size | keep-id maps 1000→1000 and the rest to 100000+; 65536 ids | a smaller range changes nothing security-wise | Leave |
 | AppArmor | a modest profile (mount, ptrace, `/proc/sys` writes), all already blocked by caps/seccomp/userns | needs a kernel `lsm=` change and a reboot on the host | Skip |
 | Landlock | in-box, from the entrypoint: fs scoping (little gain: the container already scopes) and, on ABI v4+, per-process TCP connect port rules as a second egress layer independent of iptables | needs a Landlock wrapper binary; Debian has none packaged; would need to allow 443/53/22 | Maybe later; the CONNECT proxy is the better second layer |
-| cgroup limits | `pids` 4096 set; `memory`/`cpu` controllers are delegated (`cgroup.controllers: cpu memory pids`), so `--memory`/`--cpus` work rootless | too-low memory breaks builds (documented) | Set `AIRLOCK_MEMORY` to something generous on titan; add `--cpus` opt-in |
+| cgroup limits | `pids` 4096 set; `memory`/`cpu` controllers are delegated (`cgroup.controllers: cpu memory pids`), so `--memory`/`--cpus` work rootless | too-low memory breaks builds (documented) | Set `AIRLOCK_MEMORY` to something generous per host; add `--cpus` opt-in |
 | Host sysctls | `unprivileged_bpf_disabled=1`, `ptrace_scope=2`, `dmesg_restrict=1`, `kptr_restrict=2` already; `io_uring_disabled=0` but seccomp blocks it in the box | `ptrace_scope=2` means no `strace`/`gdb` in a box (host choice) | Already good; `io_uring_disabled=2` is optional belt-and-braces |
 | podman defaults | seccomp, masked paths, rprivate, no port forwarding, `--no-map-gw`, pids 2048, rootless userns | | Doing most of the work already |
 | gVisor | see below | | **Not viable as-is** |
@@ -546,7 +544,7 @@ is exactly what F6 is about; the cost is rewriting egress enforcement to live *o
 the box (host-side or a proxy). If you ever do the CONNECT-proxy design with the proxy
 outside the sandbox, gVisor becomes viable again; until then, no.
 
-**nftables (your mid-review question).** The image has no `nft` binary; `iptables` is
+**nftables (raised mid-review).** The image has no `nft` binary; `iptables` is
 `iptables-nft`, so every rule already lands in nftables. Moving to native `nft` would let
 you drop `ipset` and the `ip_set*`/`xt_set` modules (nft sets are native, fewer
 prerequisites in `modules-load.d`), load the whole ruleset atomically with `nft -f`
