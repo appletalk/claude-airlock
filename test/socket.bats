@@ -12,6 +12,7 @@ setup() {
   H="$AIRLOCK_HOME"
   SVC=777
   export FAKE_OWNERS="$BATS_TEST_TMPDIR/owners"
+  export FAKE_FSTYPE=tmpfs          # the runner's real /tmp may be overlay; only the FUSE test varies it
   : > "$FAKE_OWNERS"
   cat > "$STUBBIN/stat" <<'STUB'
 #!/usr/bin/env bash
