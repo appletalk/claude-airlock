@@ -333,7 +333,9 @@ is lost whenever the socket is recreated.
 The rule, with **no override**, at `add` and again at every launch: the socket must be
 owned by a dedicated service account (not you, not root), and every directory from it up
 to `/` must be owned by root and writable by nobody else. A directory above the socket's
-own may be world-writable only if it is sticky, like `/tmp`. So put the socket in a
+own may be world-writable only if it is sticky, like `/tmp`. The owner must be a system
+account: not `nobody`, and below `UID_MIN` in `/etc/login.defs`. The socket must be on
+tmpfs, ext4, xfs or btrfs, because a FUSE filesystem can report any owner. So put the socket in a
 root-owned directory (a systemd `.socket` unit does this), not in a `RuntimeDirectory=`
 owned by the service user.
 
@@ -344,7 +346,13 @@ the same files under several paths (`/mnt/wslg/...`), which no path list can kee
 Root-owned directories also mean nothing running as you, the box included, can swap the
 socket after approval. A deny list of well-known sockets stays as a second layer, paths
 with `:`, `,` or control characters are refused, and the socket's inode is re-checked
-immediately before the engine starts: if it changed, the launch stops.
+immediately before the engine starts: if it changed, the launch stops. That re-check sees
+the host's view; rootless podman resolves the path in its own mount namespace, which the
+box cannot reach, so it guards against the box and not against another process running
+as you.
+
+The owner rule tells a service account from a person, not a safe service from a dangerous
+one. Grant a socket only if you would let the box do everything that service allows.
 
 One file is mounted, not its directory, so a second socket beside it is not exposed. If
 the service's socket is recreated (restarting a systemd `.socket` unit does this; restarting
