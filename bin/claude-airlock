@@ -532,6 +532,106 @@ if [ "${1:-}" = "mount" ]; then
   exit 0
 fi
 
+# `airlock socket add|list|rm` bind-mounts one host Unix socket into this project's box, at
+# its real path - the way to give a box a credential-injecting proxy (gh-cred-proxy, say)
+# without giving it the credential. Host-only like `mount`: the store lives in STATE_DIR and
+# there is no .airlock/config key, so a box cannot request its own sockets.
+#
+# A socket is a capability, not data: the box talks to that service as YOU (keep-id maps the
+# box user to your uid; supplementary groups do not survive the user namespace, so grant the
+# uid, e.g. with an ACL, not a group). The checks refuse, with no override:
+#  - anything but a real socket reached with no symlink anywhere in the path;
+#  - a socket whose directory, or any ancestor, is writable by anyone but root or you (they
+#    could swap the socket after approval);
+#  - well-known sockets that hand over the host: container engines, D-Bus and systemd, your
+#    per-user runtime dir, gpg/ssh agents, display servers, the protected dot-dirs.
+# The deny list guards against habit; it cannot know every dangerous socket, so `add` also
+# says plainly what the box gains. The same check re-runs at every launch.
+
+# Canonical path on stdout if SOCKET may be mounted; otherwise the reason on stderr and 1.
+_airlock_socket_check() {
+  local want="$1" c home rt d dir agent
+  case "$want" in /*) ;; *) echo "'$want' must be an absolute path" >&2; return 1 ;; esac
+  c="$(readlink -e "$want" 2>/dev/null)" || { echo "'$want' does not exist" >&2; return 1; }
+  [ "$c" = "$want" ] || { echo "'$want' goes through a symlink (it resolves to $c); name the real path" >&2; return 1; }
+  [ -S "$c" ] || { echo "'$c' is not a Unix socket" >&2; return 1; }
+  home="$(readlink -f "$HOME" 2>/dev/null)" || { echo "cannot resolve \$HOME" >&2; return 1; }
+  rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  rt="$(readlink -f "$rt" 2>/dev/null || printf '%s' "$rt")"
+  case "$c" in
+    "$rt"/*|/run/user/*|/var/run/user/*)
+      echo "'$c' is in a per-user runtime dir (session bus, container engine, agents) (no override)" >&2; return 1 ;;
+    */docker.sock|*/podman.sock|*/containerd.sock|*/crio.sock|*/docker/*|*/podman/*|*/containerd/*|*/crio/*)
+      echo "'$c' looks like a container engine socket, which is root on the host (no override)" >&2; return 1 ;;
+    /run/dbus/*|/var/run/dbus/*|/run/systemd/*|/var/run/systemd/*)
+      echo "'$c' is a system bus or systemd socket (no override)" >&2; return 1 ;;
+    /tmp/.X11-unix/*|*/wayland-*|*/pulse/*|*/pipewire-*)
+      echo "'$c' is a display or audio server socket (no override)" >&2; return 1 ;;
+    */S.gpg-agent*|*/S.scdaemon*|*/S.dirmngr*|*/ssh-agent*|*/ssh-*/agent.*)
+      echo "'$c' is a key agent socket (no override)" >&2; return 1 ;;
+  esac
+  if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+    agent="$(readlink -f "$SSH_AUTH_SOCK" 2>/dev/null || printf '%s' "$SSH_AUTH_SOCK")"
+    [ "$c" = "$agent" ] && { echo "'$c' is your SSH agent (no override)" >&2; return 1; }
+  fi
+  for d in $AIRLOCK_MOUNT_DENY; do
+    case "$c" in "$home/$d"/*) echo "'$c' is inside protected ~/$d (no override)" >&2; return 1 ;; esac
+  done
+  case "$c" in
+    "$WORKSPACE"/*) echo "'$c' is inside the workspace; the box can already reach it" >&2; return 1 ;;
+  esac
+  # The socket's own directory must be writable by root or you alone. An ancestor may also
+  # be sticky and world-writable (/tmp): others cannot rename entries they do not own there.
+  dir="$(dirname "$c")"
+  if [ -n "$(find "$dir" -maxdepth 0 -perm /022 -print)" ]; then
+    echo "'$dir' (holding '$c') must not be group/world-writable" >&2; return 1
+  fi
+  while :; do
+    if [ "$(stat -c %u "$dir")" != 0 ] && [ "$(stat -c %u "$dir")" != "$(id -u)" ]; then
+      echo "'$dir' (holding or above '$c') must be owned by root or you" >&2; return 1
+    fi
+    if [ -n "$(find "$dir" -maxdepth 0 -perm /022 ! -perm -1000 -print)" ]; then
+      echo "'$dir' (above '$c') is group/world-writable without the sticky bit" >&2; return 1
+    fi
+    [ "$dir" = / ] && break
+    dir="$(dirname "$dir")"
+  done
+  printf '%s\n' "$c"
+}
+
+if [ "${1:-}" = "socket" ]; then
+  _kslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _kstore="$HOME/.config/claude-airlock/state/$_kslug/sockets"
+  mkdir -p "$(dirname "$_kstore")"
+  case "${2:-list}" in
+    add)
+      _kp="${3:?usage: airlock socket add SOCKET}"
+      _kc="$(_airlock_socket_check "$_kp" 2>&1)" || { echo "airlock: $_kc" >&2; exit 1; }
+      touch "$_kstore"
+      grep -qxF "$_kc" "$_kstore" || printf '%s\n' "$_kc" >> "$_kstore"
+      echo "airlock: $_kc will be bind-mounted into $(basename "$WORKSPACE")'s box (next launch)"
+      echo "  owner $(stat -c '%U:%G mode %a' "$_kc"). Every box on this project can connect to it as"
+      echo "  you (uid $(id -u)): whatever that service lets you do, the box can do." ;;
+    list)
+      echo "sockets for $(basename "$WORKSPACE")  ($_kstore):"
+      if [ -s "$_kstore" ]; then
+        while IFS= read -r _l || [ -n "$_l" ]; do
+          [ -n "$_l" ] || continue
+          if _kwhy="$(_airlock_socket_check "$_l" 2>&1)"; then echo "  $_l"
+          else echo "  $_l  (SKIPPED at launch: $_kwhy)"; fi
+        done < "$_kstore"
+      else echo "  (none)"; fi ;;
+    rm)
+      _kp="${3:?usage: airlock socket rm SOCKET}"
+      if [ -f "$_kstore" ] && grep -qxF "$_kp" "$_kstore"; then
+        grep -vxF -e "$_kp" "$_kstore" > "$_kstore.tmp.$$" || true; mv "$_kstore.tmp.$$" "$_kstore"
+        echo "airlock: removed socket $_kp"
+      else echo "airlock: no such socket '$_kp' (see 'airlock socket list')"; fi ;;
+    *) echo "usage: airlock socket add SOCKET  |  airlock socket list  |  airlock socket rm SOCKET" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
 # `airlock egress [show|list|minimal|dev|<groups>|add <groups>|rm <groups>]` reviews or
 # sets this project's egress POSTURE. Default 'minimal' = Anthropic core only (Claude
 # can't run without it) plus any host-approved `egress =` domains. 'dev' opens all
@@ -1711,6 +1811,16 @@ if [ -s "$STATE_DIR/mounts" ]; then
       echo "claude-airlock: NOT mounting $_m: $_mc" >&2
     fi
   done < "$STATE_DIR/mounts"
+fi
+
+# Host-added sockets (`airlock socket add`), re-checked here like mounts: a socket since
+# replaced by a symlink, a regular file, or moved under a writable directory is skipped.
+if [ -s "$STATE_DIR/sockets" ]; then
+  while IFS= read -r _k || [ -n "$_k" ]; do
+    [ -n "$_k" ] || continue
+    if _kc="$(_airlock_socket_check "$_k" 2>&1)"; then args+=( -v "$_kc:$_kc:ro" )
+    else echo "claude-airlock: NOT mounting socket $_k: $_kc" >&2; fi
+  done < "$STATE_DIR/sockets"
 fi
 
 # Broad read-only roots (host-set AIRLOCK_ROOTS) for cross-project inspection, under
