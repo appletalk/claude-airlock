@@ -222,6 +222,9 @@ airlock share rm RELPATH        revoke a share approval
 airlock mount add DIR           mount a host dir READ-ONLY into this project's box
 airlock mount list | rm DIR     (host-only; e.g. a scoped credential dir, see below)
 
+airlock socket add SOCKET       bind-mount a host Unix socket into this project's box
+airlock socket list | rm SOCKET (host-only; e.g. a credential-injecting proxy, see below)
+
 airlock egress                  show this project's egress posture
 airlock egress minimal|dev      Anthropic-only  |  + npm/PyPI/GitHub
 airlock egress github pypi      an explicit subset (replaces)
@@ -310,6 +313,38 @@ access, so it warns rather than aborts.
 The deny list is a guard against habit, not an inventory of where credentials live, so
 `mount add` also prints every file the box will be able to read. Look at that list: it is
 the grant.
+
+## Host sockets — `airlock socket`
+
+`airlock socket add SOCKET` bind-mounts one host Unix socket into this project's box, at
+its real path. It is host-only like `mount`: stored in the host state dir, with no
+`.airlock/config` key. The intended use is a proxy that holds a credential outside the
+box and injects it into requests, such as
+[gh-cred-proxy](https://github.com/appletalk/gh-cred-proxy), so the box can use GitHub
+without ever holding a token.
+
+A socket is a capability, not data. The box connects **as you**: with rootless podman,
+keep-id maps the box user to your uid, and your supplementary groups do not survive the
+user namespace. So a socket restricted to a group you are in is still refused inside the
+box; grant your uid instead, for example with `setfacl -m u:$USER:rw SOCKET`.
+
+Refused, with **no override**, at `add` and again at every launch: anything but a real
+Unix socket named by an absolute path with no symlink in it; a socket whose directory is
+writable by group or others, or whose directory or any ancestor is owned by someone other
+than root or you, or is world-writable without the sticky bit (someone could swap the
+socket after approval); container engine sockets (docker, podman, containerd, CRI-O);
+the system bus and systemd; anything in your per-user runtime dir (session bus, rootless
+engines, agents); gpg and ssh agents, including whatever `SSH_AUTH_SOCK` names; X11,
+Wayland and audio server sockets; sockets inside the protected dot-dirs; and the
+workspace.
+
+The deny list is a guard against habit; it cannot know every socket that hands over the
+host. `socket add` says what the grant means, and the only honest check is yours: grant a
+socket only if you would let the box do everything that service lets you do.
+
+One file is mounted, not its directory, so a second socket beside it is not exposed. If
+the service's socket is recreated (restarting a systemd `.socket` unit does this; restarting
+only the service does not), relaunch the box to pick up the new one.
 
 ## Host config — `~/.config/claude-airlock/config`
 
