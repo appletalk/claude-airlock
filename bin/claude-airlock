@@ -537,30 +537,46 @@ fi
 # without giving it the credential. Host-only like `mount`: the store lives in STATE_DIR and
 # there is no .airlock/config key, so a box cannot request its own sockets.
 #
-# A socket is a capability, not data: the box talks to that service as YOU (keep-id maps the
-# box user to your uid; supplementary groups do not survive the user namespace, so grant the
-# uid, e.g. with an ACL, not a group). The checks refuse, with no override:
-#  - anything but a real socket reached with no symlink anywhere in the path;
-#  - a socket whose directory, or any ancestor, is writable by anyone but root or you (they
-#    could swap the socket after approval);
-#  - well-known sockets that hand over the host: container engines, D-Bus and systemd, your
-#    per-user runtime dir, gpg/ssh agents, display servers, the protected dot-dirs.
-# The deny list guards against habit; it cannot know every dangerous socket, so `add` also
-# says plainly what the box gains. The same check re-runs at every launch.
+# A socket is a capability: the box connects as YOU (keep-id maps the box user to your uid;
+# supplementary groups do not survive the user namespace, so grant the uid with an ACL).
+# The rule, with no override, at add and at every launch:
+#   the socket is owned by a dedicated service account (not you, not root), and every
+#   directory from it up to / is owned by root and writable by nobody else; a directory
+#   above the socket's own may be world-writable only if sticky (/tmp).
+# Sockets owned by you (session bus, agents, screen/tmux, credential caches) or by root
+# (WSL interop, libvirt, snapd) are refused whatever path reaches them - WSLg exposes the
+# same files under /mnt/wslg, so a path deny list alone cannot hold. Root-owned directories
+# also mean nothing running as you, the box included, can swap the socket. A deny list of
+# well-known sockets stays as a second layer, and the socket's identity is re-checked
+# immediately before the engine starts.
 
 # Canonical path on stdout if SOCKET may be mounted; otherwise the reason on stderr and 1.
 _airlock_socket_check() {
-  local want="$1" c home rt d dir agent
+  local want="$1" c me owner home rt d dir
   case "$want" in /*) ;; *) echo "'$want' must be an absolute path" >&2; return 1 ;; esac
+  case "$want" in
+    *:*|*,*|*[[:cntrl:]]*) echo "'$want' contains ':', ',' or a control character" >&2; return 1 ;;
+  esac
   c="$(readlink -e "$want" 2>/dev/null)" || { echo "'$want' does not exist" >&2; return 1; }
-  [ "$c" = "$want" ] || { echo "'$want' goes through a symlink (it resolves to $c); name the real path" >&2; return 1; }
+  if [ "$c" != "$want" ]; then
+    case "$want" in
+      *//*|*/./*|*/../*|*/.|*/..|*/) echo "'$want' is not a canonical path; use $c" >&2 ;;
+      *) echo "'$want' goes through a symlink (it resolves to $c); name the real path" >&2 ;;
+    esac
+    return 1
+  fi
   [ -S "$c" ] || { echo "'$c' is not a Unix socket" >&2; return 1; }
+  me="$(id -u)"; owner="$(stat -c %u "$c")"
+  if [ "$owner" = 0 ] || [ "$owner" = "$me" ]; then
+    echo "'$c' is owned by $([ "$owner" = 0 ] && echo root || echo you); only a socket owned by a dedicated service account can be granted (no override)" >&2
+    return 1
+  fi
   home="$(readlink -f "$HOME" 2>/dev/null)" || { echo "cannot resolve \$HOME" >&2; return 1; }
-  rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  rt="${XDG_RUNTIME_DIR:-/run/user/$me}"
   rt="$(readlink -f "$rt" 2>/dev/null || printf '%s' "$rt")"
   case "$c" in
-    "$rt"/*|/run/user/*|/var/run/user/*)
-      echo "'$c' is in a per-user runtime dir (session bus, container engine, agents) (no override)" >&2; return 1 ;;
+    "$rt"/*|/run/user/*|/var/run/user/*|/mnt/wslg/*|/run/WSL/*|/var/run/WSL/*)
+      echo "'$c' is in a per-user runtime or WSL dir (session bus, engines, agents, Windows interop) (no override)" >&2; return 1 ;;
     */docker.sock|*/podman.sock|*/containerd.sock|*/crio.sock|*/docker/*|*/podman/*|*/containerd/*|*/crio/*)
       echo "'$c' looks like a container engine socket, which is root on the host (no override)" >&2; return 1 ;;
     /run/dbus/*|/var/run/dbus/*|/run/systemd/*|/var/run/systemd/*)
@@ -570,9 +586,9 @@ _airlock_socket_check() {
     */S.gpg-agent*|*/S.scdaemon*|*/S.dirmngr*|*/ssh-agent*|*/ssh-*/agent.*)
       echo "'$c' is a key agent socket (no override)" >&2; return 1 ;;
   esac
-  if [ -n "${SSH_AUTH_SOCK:-}" ]; then
-    agent="$(readlink -f "$SSH_AUTH_SOCK" 2>/dev/null || printf '%s' "$SSH_AUTH_SOCK")"
-    [ "$c" = "$agent" ] && { echo "'$c' is your SSH agent (no override)" >&2; return 1; }
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -e "$SSH_AUTH_SOCK" ] \
+      && [ "$(stat -L -c %d:%i "$SSH_AUTH_SOCK")" = "$(stat -c %d:%i "$c")" ]; then
+    echo "'$c' is your SSH agent (no override)" >&2; return 1
   fi
   for d in $AIRLOCK_MOUNT_DENY; do
     case "$c" in "$home/$d"/*) echo "'$c' is inside protected ~/$d (no override)" >&2; return 1 ;; esac
@@ -580,15 +596,13 @@ _airlock_socket_check() {
   case "$c" in
     "$WORKSPACE"/*) echo "'$c' is inside the workspace; the box can already reach it" >&2; return 1 ;;
   esac
-  # The socket's own directory must be writable by root or you alone. An ancestor may also
-  # be sticky and world-writable (/tmp): others cannot rename entries they do not own there.
   dir="$(dirname "$c")"
   if [ -n "$(find "$dir" -maxdepth 0 -perm /022 -print)" ]; then
     echo "'$dir' (holding '$c') must not be group/world-writable" >&2; return 1
   fi
   while :; do
-    if [ "$(stat -c %u "$dir")" != 0 ] && [ "$(stat -c %u "$dir")" != "$(id -u)" ]; then
-      echo "'$dir' (holding or above '$c') must be owned by root or you" >&2; return 1
+    if [ "$(stat -c %u "$dir")" != 0 ]; then
+      echo "'$dir' (holding or above '$c') must be owned by root, so nothing running as you can swap the socket" >&2; return 1
     fi
     if [ -n "$(find "$dir" -maxdepth 0 -perm /022 ! -perm -1000 -print)" ]; then
       echo "'$dir' (above '$c') is group/world-writable without the sticky bit" >&2; return 1
@@ -1815,10 +1829,13 @@ fi
 
 # Host-added sockets (`airlock socket add`), re-checked here like mounts: a socket since
 # replaced by a symlink, a regular file, or moved under a writable directory is skipped.
+_ksock_pins=()
 if [ -s "$STATE_DIR/sockets" ]; then
   while IFS= read -r _k || [ -n "$_k" ]; do
     [ -n "$_k" ] || continue
-    if _kc="$(_airlock_socket_check "$_k" 2>&1)"; then args+=( -v "$_kc:$_kc:ro" )
+    if _kc="$(_airlock_socket_check "$_k" 2>&1)"; then
+      args+=( -v "$_kc:$_kc:ro" )
+      _ksock_pins+=( "$(stat -c %d:%i "$_kc") $_kc" )
     else echo "claude-airlock: NOT mounting socket $_k: $_kc" >&2; fi
   done < "$STATE_DIR/sockets"
 fi
@@ -1996,6 +2013,18 @@ fi
 # raw host `claude`, which uses $AIRLOCK_TMP under the same name. The wrapper registers
 # in sessions/ via `airlock session`, so it IS counted - but only if that call succeeded,
 # which is why its failure is reported rather than swallowed.
+# Granted sockets were checked while the launch was assembled, and prompts may have run
+# since. Re-check each and require the same inode right before the engine starts; any
+# change aborts the launch rather than mounting something that was never approved.
+for _kp in "${_ksock_pins[@]}"; do
+  _kpath="${_kp#* }"
+  if ! _kwhy="$(_airlock_socket_check "$_kpath" 2>&1)" \
+      || [ "$(stat -c %d:%i "$_kpath" 2>/dev/null)" != "${_kp%% *}" ]; then
+    echo "claude-airlock: socket $_kpath changed after it was checked (${_kwhy:-different inode}); not launching" >&2
+    exit 1
+  fi
+done
+
 MOUNTED=1
 if [ "$AIRLOCK_SHELL" = 1 ]; then
   "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" bash -l
