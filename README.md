@@ -335,7 +335,9 @@ owned by a dedicated service account (not you, not root), and every directory fr
 to `/` must be owned by root and writable by nobody else. A directory above the socket's
 own may be world-writable only if it is sticky, like `/tmp`. The owner must be a system
 account: not `nobody`, and below `UID_MIN` in `/etc/login.defs`. The socket must be on
-tmpfs, ext4, xfs or btrfs, because a FUSE filesystem can report any owner. So put the socket in a
+tmpfs, ext4, xfs or btrfs, because a FUSE filesystem can report any owner. Services run
+with systemd `DynamicUser=` get uids above `UID_MIN`, so their sockets cannot be granted;
+give such a service a static system user instead. So put the socket in a
 root-owned directory (a systemd `.socket` unit does this), not in a `RuntimeDirectory=`
 owned by the service user.
 
