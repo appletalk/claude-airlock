@@ -326,21 +326,25 @@ without ever holding a token.
 A socket is a capability, not data. The box connects **as you**: with rootless podman,
 keep-id maps the box user to your uid, and your supplementary groups do not survive the
 user namespace. So a socket restricted to a group you are in is still refused inside the
-box; grant your uid instead, for example with `setfacl -m u:$USER:rw SOCKET`.
+box; grant your uid instead, for example with `setfacl -m u:$USER:rw SOCKET`. Set that in
+the service's unit (an `ExecStartPost=` on a systemd `.socket` unit), not by hand: the ACL
+is lost whenever the socket is recreated.
 
-Refused, with **no override**, at `add` and again at every launch: anything but a real
-Unix socket named by an absolute path with no symlink in it; a socket whose directory is
-writable by group or others, or whose directory or any ancestor is owned by someone other
-than root or you, or is world-writable without the sticky bit (someone could swap the
-socket after approval); container engine sockets (docker, podman, containerd, CRI-O);
-the system bus and systemd; anything in your per-user runtime dir (session bus, rootless
-engines, agents); gpg and ssh agents, including whatever `SSH_AUTH_SOCK` names; X11,
-Wayland and audio server sockets; sockets inside the protected dot-dirs; and the
-workspace.
+The rule, with **no override**, at `add` and again at every launch: the socket must be
+owned by a dedicated service account (not you, not root), and every directory from it up
+to `/` must be owned by root and writable by nobody else. A directory above the socket's
+own may be world-writable only if it is sticky, like `/tmp`. So put the socket in a
+root-owned directory (a systemd `.socket` unit does this), not in a `RuntimeDirectory=`
+owned by the service user.
 
-The deny list is a guard against habit; it cannot know every socket that hands over the
-host. `socket add` says what the grant means, and the only honest check is yours: grant a
-socket only if you would let the box do everything that service lets you do.
+Why an owner rule and not a list of bad paths: the sockets that hand over the host (your
+session bus and systemd manager, SSH and gpg agents, `screen` and `tmux`, credential
+caches, WSL's Windows interop, libvirt, snapd) are owned by you or by root, and WSL exposes
+the same files under several paths (`/mnt/wslg/...`), which no path list can keep up with.
+Root-owned directories also mean nothing running as you, the box included, can swap the
+socket after approval. A deny list of well-known sockets stays as a second layer, paths
+with `:`, `,` or control characters are refused, and the socket's inode is re-checked
+immediately before the engine starts: if it changed, the launch stops.
 
 One file is mounted, not its directory, so a second socket beside it is not exposed. If
 the service's socket is recreated (restarting a systemd `.socket` unit does this; restarting
