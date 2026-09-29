@@ -552,7 +552,7 @@ fi
 
 # Canonical path on stdout if SOCKET may be mounted; otherwise the reason on stderr and 1.
 _airlock_socket_check() {
-  local want="$1" c me owner home rt d dir
+  local want="$1" c me owner uid_min home rt d dir
   case "$want" in /*) ;; *) echo "'$want' must be an absolute path" >&2; return 1 ;; esac
   case "$want" in
     *:*|*,*|*[[:cntrl:]]*) echo "'$want' contains ':', ',' or a control character" >&2; return 1 ;;
@@ -571,6 +571,20 @@ _airlock_socket_check() {
     echo "'$c' is owned by $([ "$owner" = 0 ] && echo root || echo you); only a socket owned by a dedicated service account can be granted (no override)" >&2
     return 1
   fi
+  # A dedicated service account is a system account: not nobody (shared by unrelated
+  # daemons) and not a human login (UID_MIN and up).
+  uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
+  case "$uid_min" in ''|*[!0-9]*) uid_min=1000 ;; esac
+  if [ "$owner" = 65534 ] || [ "$owner" -ge "$uid_min" ]; then
+    echo "'$c' is owned by uid $owner, which is nobody or a login account, not a system service account (no override)" >&2
+    return 1
+  fi
+  # Ownership is only as honest as the filesystem reporting it; a FUSE mount can claim any
+  # owner. Accept the local filesystems a service socket actually lives on.
+  case "$(stat -f -c %T "$c" 2>/dev/null)" in
+    tmpfs|ext2/ext3|xfs|btrfs) ;;
+    *) echo "'$c' is on a $(stat -f -c %T "$c" 2>/dev/null) filesystem; only tmpfs, ext4, xfs or btrfs are trusted to report owners" >&2; return 1 ;;
+  esac
   home="$(readlink -f "$HOME" 2>/dev/null)" || { echo "cannot resolve \$HOME" >&2; return 1; }
   rt="${XDG_RUNTIME_DIR:-/run/user/$me}"
   rt="$(readlink -f "$rt" 2>/dev/null || printf '%s' "$rt")"
@@ -2016,6 +2030,10 @@ fi
 # Granted sockets were checked while the launch was assembled, and prompts may have run
 # since. Re-check each and require the same inode right before the engine starts; any
 # change aborts the launch rather than mounting something that was never approved.
+# This proves identity in the host's mount namespace. Rootless podman resolves -v in its
+# own namespace, where a process running as you could bind-mount over the path; the box
+# cannot reach that namespace (no host podman, unshare/setns refused by seccomp), so this
+# only matters against something already running as you on the host.
 for _kp in "${_ksock_pins[@]}"; do
   _kpath="${_kp#* }"
   if ! _kwhy="$(_airlock_socket_check "$_kpath" 2>&1)" \

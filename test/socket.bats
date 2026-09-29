@@ -10,11 +10,12 @@ load helper
 setup() {
   setup_airlock_env
   H="$AIRLOCK_HOME"
-  SVC=4242
+  SVC=777
   export FAKE_OWNERS="$BATS_TEST_TMPDIR/owners"
   : > "$FAKE_OWNERS"
   cat > "$STUBBIN/stat" <<'STUB'
 #!/usr/bin/env bash
+if [ "$1" = -f ] && [ -n "${FAKE_FSTYPE:-}" ]; then echo "$FAKE_FSTYPE"; exit 0; fi
 if [ "$1" = -c ] && [ "$2" = %u ] && [ -s "${FAKE_OWNERS:-}" ]; then
   u="$(awk -v p="$3" '{ q = $0; sub(/^[^ ]+ /, "", q) } q == p { u = $1 } END { print u }' "$FAKE_OWNERS")"
   [ -n "$u" ] && { echo "$u"; exit 0; }
@@ -69,6 +70,27 @@ launched() { engine_args | grep -q '^ENGINE_INVOKED='; }
   [ "$status" -ne 0 ]; [[ "$output" == *"owned by you"* ]]
   run _launch "$p" socket add "$SD/root.sock"
   [ "$status" -ne 0 ]; [[ "$output" == *"owned by root"* ]]
+}
+
+@test "refuses nobody and login-account owners: only system accounts count as services" {
+  p="$(mkproj skuid)"
+  mksock "$SD/nobody.sock"; owns 65534 "$SD/nobody.sock"
+  mksock "$SD/human.sock"; owns 1500 "$SD/human.sock"
+  for s in "$SD/nobody.sock" "$SD/human.sock"; do
+    run _launch "$p" socket add "$s"
+    [ "$status" -ne 0 ] || { echo "accepted $s"; false; }
+    [[ "$output" == *"not a system service account"* ]]
+  done
+}
+
+@test "refuses a socket on a filesystem that can lie about owners (FUSE)" {
+  export FAKE_FSTYPE=fuseblk
+  run _launch "$(mkproj skfuse)" socket add "$SD/p.sock"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"fuseblk filesystem"* ]]
+  export FAKE_FSTYPE=tmpfs
+  run _launch "$(mkproj skfuse2)" socket add "$SD/p.sock"
+  [ "$status" -eq 0 ]
 }
 
 @test "refuses non-sockets, missing and relative paths, and paths with : , or newlines" {
@@ -217,6 +239,18 @@ rm -f "$SD/p.sock"
 python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SD/p.sock"
 echo value
 STUB
+  chmod +x "$STUBBIN/pass"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"changed after it was checked"* ]]
+  ! launched
+}
+
+@test "a directory made writable between assembly and engine start aborts the launch" {
+  p="$(mkproj skpindir)"
+  _launch "$p" socket add "$SD/p.sock"
+  _launch "$p" secret set PIN_TRIGGER pass:x >/dev/null
+  printf '#!/usr/bin/env bash\nchmod 777 "%s"\necho value\n' "$SD" > "$STUBBIN/pass"
   chmod +x "$STUBBIN/pass"
   run _launch "$p"
   [ "$status" -ne 0 ]
