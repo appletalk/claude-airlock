@@ -1849,7 +1849,7 @@ if [ -s "$STATE_DIR/sockets" ]; then
     [ -n "$_k" ] || continue
     if _kc="$(_airlock_socket_check "$_k" 2>&1)"; then
       args+=( -v "$_kc:$_kc:ro" )
-      _ksock_pins+=( "$(stat -c %d:%i:%.9Z "$_kc") $_kc" )
+      _ksock_pins+=( "$(stat -c %d:%i:%.9Z:%u:%f "$_kc") $_kc" )
     else echo "claude-airlock: NOT mounting socket $_k: $_kc" >&2; fi
   done < "$STATE_DIR/sockets"
 fi
@@ -2028,8 +2028,8 @@ fi
 # in sessions/ via `airlock session`, so it IS counted - but only if that call succeeded,
 # which is why its failure is reported rather than swallowed.
 # Granted sockets were checked while the launch was assembled, and prompts may have run
-# since. Re-check each and require the same device, inode and change time (to the
-# nanosecond) right before the engine starts; any change aborts the launch rather than
+# since. Re-check each and require the same device, inode, change time (to the
+# nanosecond), owner and mode right before the engine starts; any change aborts the launch rather than
 # mounting something that was never approved. The inode number alone is not enough: a
 # filesystem may hand a deleted socket's inode number straight to its replacement.
 # This proves identity in the host's mount namespace. Rootless podman resolves -v in its
@@ -2039,8 +2039,8 @@ fi
 for _kp in "${_ksock_pins[@]}"; do
   _kpath="${_kp#* }"
   if ! _kwhy="$(_airlock_socket_check "$_kpath" 2>&1)" \
-      || [ "$(stat -c %d:%i:%.9Z "$_kpath" 2>/dev/null)" != "${_kp%% *}" ]; then
-    echo "claude-airlock: socket $_kpath changed after it was checked (${_kwhy:-different inode}); not launching" >&2
+      || [ "$(stat -c %d:%i:%.9Z:%u:%f "$_kpath" 2>/dev/null)" != "${_kp%% *}" ]; then
+    echo "claude-airlock: socket $_kpath changed after it was checked (${_kwhy:-different inode, change time, owner or mode}); not launching" >&2
     exit 1
   fi
 done
