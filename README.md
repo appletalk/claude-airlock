@@ -128,11 +128,14 @@ fix is the same two commands.
 ### 3. Shell integration
 
 `make install` exports the checked-out **commit** (never uncommitted edits) to
-`~/.local/share/claude-airlock/versions/<commit>/` and points
-`~/.local/share/claude-airlock/current` at it; `~/.local/bin/claude-airlock` links
-through `current`. The launcher never runs from this working tree, so switching branches
-or editing files here changes nothing until the next `make install`. The two previous
-versions are kept; `current/VERSION` says which commit is live.
+`~/.local/share/claude-airlock/versions/<commit>/`, builds the images from that copy,
+and only when the build succeeds points `~/.local/share/claude-airlock/current` at it.
+`~/.local/bin/claude-airlock` and the shell integration go through `current`, so the
+launcher never runs from this working tree: switching branches or editing files here
+changes nothing until the next `make install`, and a failed build leaves the previous
+version live. Local CA certs in `image/certs/` (untracked by design) are copied into each
+install. The live version and the two most recently activated others are kept;
+`current/VERSION` says which commit is live.
 
 Add to `~/.zshrc` (or `~/.zshrc.local`) and reload:
 
@@ -140,8 +143,9 @@ Add to `~/.zshrc` (or `~/.zshrc.local`) and reload:
 source "$HOME/.local/share/claude-airlock/current/shell/claude-airlock.zsh"
 ```
 
-After an upgrade (`git pull && make install`), open a new shell: an open one keeps the
-launcher it resolved when it started.
+Open shells pick up a new install on their next `airlock`. If an rc file still sources
+the zsh file, or calls the launcher, from a checkout, `make install` warns: that line
+keeps the launcher in the working tree.
 
 This gives you `airlock` (Claude Code in the box) and a lock-aware `claude` on the host
 that warns if an airlock session for the same project is already open.

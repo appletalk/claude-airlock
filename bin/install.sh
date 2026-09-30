@@ -37,12 +37,21 @@ fi
 
 # The launcher runs from an installed copy of one commit, never from this working tree:
 # a checkout changes whenever someone switches branch or edits a file, and the launcher is
-# what sets the box's limits. Each install exports HEAD (never uncommitted edits) into
-# versions/<commit>/ and flips `current` to it in one rename; older versions stay until
-# pruned so a shell that sourced one keeps working.
+# what sets the box's limits. The rule: an install builds and checks a complete version
+# first, and only then makes it live in one rename; everything, open shells included,
+# follows `current`. So: export HEAD (never uncommitted edits) to a stage, verify it,
+# move it to versions/<commit>, build the images from THAT directory, and only when the
+# build succeeds flip `current`, relink the launcher and prune.
 INSTALL_ROOT="${AIRLOCK_INSTALL_ROOT:-$HOME/.local/share/claude-airlock}"
+case "$INSTALL_ROOT" in
+  /*) ;;
+  *) echo "claude-airlock: AIRLOCK_INSTALL_ROOT must be an absolute path (got '$INSTALL_ROOT')." >&2; exit 1 ;;
+esac
 mkdir -p "$INSTALL_ROOT/versions"
-if git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+chmod go-w "$INSTALL_ROOT" "$INSTALL_ROOT/versions"
+_stage=""
+trap '[ -n "$_stage" ] && rm -rf -- "$_stage"' EXIT
+if [ "$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$REPO_DIR" && pwd -P)" ]; then
   REV="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)"
   BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)"
   if [ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no)" ]; then
@@ -50,6 +59,7 @@ if git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
   fi
   _export() { git -C "$REPO_DIR" archive --format=tar HEAD | tar -x -C "$1"; }
 else
+  # Not a checkout of its own (a release tarball, or a subdirectory of some other repo).
   REV="nogit-$(date +%Y%m%d%H%M%S)"; BRANCH="-"
   _export() { tar -C "$REPO_DIR" --exclude=.git -cf - . | tar -x -C "$1"; }
 fi
@@ -58,25 +68,32 @@ echo "==> Installing commit $REV ($BRANCH) -> $DEST"
 if [ ! -d "$DEST" ]; then
   _stage="$(mktemp -d "$INSTALL_ROOT/versions/.stage.XXXXXX")"
   _export "$_stage"
+  if [ ! -x "$_stage/bin/claude-airlock" ] || [ ! -f "$_stage/image/Dockerfile" ]; then
+    echo "claude-airlock: the export of $REPO_DIR has no launcher or Dockerfile; nothing was changed." >&2
+    exit 1
+  fi
   printf 'commit %s\nbranch %s\ninstalled %s\nfrom %s\n' "$REV" "$BRANCH" "$(date -u +%FT%TZ)" "$REPO_DIR" \
     > "$_stage/VERSION"
   chmod -R go-w "$_stage"
   chmod 755 "$_stage"
-  mv "$_stage" "$DEST"
+  # Another install of the same commit may have won the race; theirs is identical.
+  mv -T "$_stage" "$DEST" 2>/dev/null || [ -d "$DEST" ]
+  rm -rf -- "$_stage"; _stage=""
 fi
-ln -sfn "versions/$REV" "$INSTALL_ROOT/current.new"
-mv -Tf "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
-# Keep the current version and the two newest others.
-find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage.*' ! -name "$REV" \
-    -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2- | while IFS= read -r _old; do
-  rm -rf -- "$_old"
+# Corporate CA certs are a deliberate LOCAL, untracked drop-in (.gitignore), so the export
+# never carries them. Sync them into this version's build context on every install.
+find "$DEST/image/certs" -maxdepth 1 -name '*.crt' -delete
+_certs=0
+for _c in "$REPO_DIR"/image/certs/*.crt; do
+  [ -f "$_c" ] || continue
+  install -m 0644 "$_c" "$DEST/image/certs/"
+  echo "    local CA cert -> image: $(basename "$_c")"
+  _certs=$((_certs + 1))
 done
-SRC_DIR="$INSTALL_ROOT/current"
+[ "$_certs" -gt 0 ] || echo "    no local CA certs in $REPO_DIR/image/certs/"
+SRC_DIR="$DEST"
 
-echo "==> Installing launcher -> $BIN_TARGET/claude-airlock"
 mkdir -p "$BIN_TARGET" "$CONFIG_DIR"
-ln -sfn "$SRC_DIR/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
-
 if [ ! -f "$CONFIG_DIR/config" ]; then
   cp "$SRC_DIR/config/config.example" "$CONFIG_DIR/config"
   echo "    wrote default config -> $CONFIG_DIR/config"
@@ -228,6 +245,34 @@ echo "    (a new Claude Code version or package refresh moves the base, so this 
 echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
 echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
 
+# The images built: make this version live. `current` flips in one rename (a unique temp
+# name, so concurrent installs cannot trip over each other); the launcher link and every
+# shell follow it. Touching DEST records activation time, which the prune orders by.
+touch "$DEST"
+_cur_tmp="$INSTALL_ROOT/.current.$$"
+ln -sfn "versions/$REV" "$_cur_tmp"
+mv -Tf "$_cur_tmp" "$INSTALL_ROOT/current"
+echo "==> Live: $INSTALL_ROOT/current -> versions/$REV"
+echo "==> Installing launcher -> $BIN_TARGET/claude-airlock"
+ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
+# Keep the live version and the two most recently activated others.
+find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage.*' ! -name "$REV" \
+    -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2- | while IFS= read -r _old; do
+  rm -rf -- "$_old"
+done
+
+# An rc file that still sources the zsh file (or calls the launcher) from this checkout
+# keeps the live launcher in the working tree: its alias beats the ~/.local/bin link.
+for _rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.zshenv" "$HOME/.zprofile"; do
+  [ -f "$_rc" ] || continue
+  if grep -nF -e "$REPO_DIR/shell/claude-airlock.zsh" -e "$REPO_DIR/bin/claude-airlock" "$_rc" >/dev/null; then
+    echo "" >&2
+    echo "claude-airlock: WARNING: $_rc still runs the launcher from the checkout at $REPO_DIR:" >&2
+    grep -nF -e "$REPO_DIR/shell/claude-airlock.zsh" -e "$REPO_DIR/bin/claude-airlock" "$_rc" | sed 's/^/    /' >&2
+    echo "  Change it to use $INSTALL_ROOT/current (see the source line below), then open a new shell." >&2
+  fi
+done
+
 echo "==> Verifying the host can actually contain a box (airlock doctor)"
 if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DIR/scripts/airlock-doctor.sh"; then
   echo
@@ -241,7 +286,7 @@ cat <<EOF
 
 ==> Almost done. Add this line to your ~/.zshrc (or ~/.zshrc.local), then reload:
 
-    source "$SRC_DIR/shell/claude-airlock.zsh"
+    source "$INSTALL_ROOT/current/shell/claude-airlock.zsh"
 
 That gives you:
     airlock   -> Claude Code in the sandbox (use this for a project)
