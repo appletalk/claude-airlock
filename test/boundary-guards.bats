@@ -25,6 +25,8 @@ EOF
 
 approve() { local sd; sd="$(state_dir "$1")"; mkdir -p "$sd"; printf '%s\n' "$2" >> "$sd/approved-shares${3:-}"; }
 shared() { engine_args | grep -q -- "$SHARE_BASE/$1:$SHARE_BASE/$1:"; }
+# bats ignores a non-final `! cmd`, so negative checks must fail explicitly.
+refute_shared() { if shared "$1"; then echo "unexpectedly shared: $1"; return 1; fi; }
 
 @test "an approved share that later becomes a symlink out of the base is not mounted" {
   p="$(mkproj swap)"
@@ -37,7 +39,7 @@ shared() { engine_args | grep -q -- "$SHARE_BASE/$1:$SHARE_BASE/$1:"; }
   : > "$ENGINE_ARGS_FILE"
   run _launch "$p"
   [[ "$output" == *"not a plain path"* ]]
-  ! shared repo
+  refute_shared repo
   [[ "$(engine_args)" != *"elsewhere"* ]]
 }
 
@@ -71,7 +73,7 @@ shared() { engine_args | grep -q -- "$SHARE_BASE/$1:$SHARE_BASE/$1:"; }
   approve "$p" repo
   run _launch "$p"
   [[ "$output" == *"overlaps protected"* ]]
-  ! shared repo
+  refute_shared repo
 }
 
 @test "a share holding gpg's home (wherever gpgconf says it is) is refused" {
@@ -88,7 +90,7 @@ EOF
   approve "$p" repo
   run _launch "$p"
   [[ "$output" == *"overlaps protected"* ]]
-  ! shared repo
+  refute_shared repo
 }
 
 @test "AIRLOCK_PROTECTED_PATHS refuses a share that contains an entry, or is one" {
@@ -98,8 +100,8 @@ EOF
   write_config "$p" "share = repo other"
   approve "$p" repo; approve "$p" other
   run _launch "$p"
-  ! shared repo
-  ! shared other
+  refute_shared repo
+  refute_shared other
   [[ "$output" == *"overlaps protected"* ]]
 }
 
@@ -169,4 +171,95 @@ EOF
   printf 'AIRLOCK_SECRET_DENY="github/*"\n' > "$CFG"
   run _launch "$p" secret set KEY pass:github/gh_token
   [ "$status" -ne 0 ]
+}
+
+@test "a share inside an AIRLOCK_PROTECTED_PATHS entry is refused" {
+  p="$(mkproj inside)"
+  mkdir -p "$SHARE_BASE/vault/sub"
+  printf 'AIRLOCK_PROTECTED_PATHS="%s"\n' "$SHARE_BASE/vault" > "$CFG"
+  write_config "$p" "share = vault/sub"
+  approve "$p" vault/sub
+  run _launch "$p"
+  [[ "$output" == *"overlaps protected"* ]]
+  refute_shared vault/sub
+}
+
+@test "a share that is exactly a protected path is refused" {
+  p="$(mkproj exact)"
+  mkdir -p "$SHARE_BASE/vault"
+  printf 'AIRLOCK_PROTECTED_PATHS="%s"\n' "$SHARE_BASE/vault" > "$CFG"
+  write_config "$p" "share = vault"
+  approve "$p" vault
+  run _launch "$p"
+  [[ "$output" == *"overlaps protected"* ]]
+  refute_shared vault
+}
+
+@test "AIRLOCK_PROTECTED_PATHS expands ~/" {
+  p="$(mkproj tilde)"
+  mkdir -p "$SHARE_BASE/repo" "$H/prot"
+  ln -s "$SHARE_BASE/repo" "$H/prot/link-to-repo" 2>/dev/null || true
+  printf 'AIRLOCK_PROTECTED_PATHS="~/prot/link-to-repo"\n' > "$CFG"
+  write_config "$p" "share = repo"; approve "$p" repo
+  run _launch "$p"
+  [[ "$output" == *"overlaps protected"* ]]
+  refute_shared repo
+}
+
+@test "a / entry protects everything, a relative entry fails closed" {
+  p="$(mkproj slash)"
+  mkdir -p "$SHARE_BASE/repo"
+  write_config "$p" "share = repo"; approve "$p" repo
+  printf 'AIRLOCK_PROTECTED_PATHS="/"\n' > "$CFG"
+  run _launch "$p"
+  refute_shared repo
+  : > "$ENGINE_ARGS_FILE"
+  printf 'AIRLOCK_PROTECTED_PATHS="relative/path"\n' > "$CFG"
+  run _launch "$p"
+  [[ "$output" == *"not absolute"* ]]
+  refute_shared repo
+}
+
+@test "a share inside one of the project's share_rw folders is refused" {
+  p="$(mkproj nest)"
+  mkdir -p "$SHARE_BASE/rw/sub"
+  write_config "$p" "share_rw = rw
+share = rw/sub"
+  approve "$p" rw -rw; approve "$p" rw/sub
+  run _launch "$p"
+  [[ "$output" == *"inside share_rw"* ]]
+  refute_shared rw/sub
+  shared rw
+}
+
+@test "a share swapped for a symlink during pinentry is caught before the engine runs" {
+  p="$(mkproj toctou)"
+  mkdir -p "$SHARE_BASE/repo" "$H/.ssh"
+  write_config "$p" "share = repo"; approve "$p" repo
+  # pass runs after the share gate and before the engine: swap the share there.
+  printf '#!/usr/bin/env bash\nrm -rf "%s"; ln -s "%s" "%s"\necho swapped\n' \
+    "$SHARE_BASE/repo" "$H/.ssh" "$SHARE_BASE/repo" > "$STUBBIN/pass"
+  chmod +x "$STUBBIN/pass"
+  _launch "$p" secret set K pass:x >/dev/null
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"changed after it was checked"* ]]
+  [ ! -s "$ENGINE_ARGS_FILE" ]
+}
+
+@test "the deny glob matches the entry pass would actually read" {
+  p="$(mkproj norm)"
+  printf 'AIRLOCK_SECRET_DENY="github/*"\n' > "$CFG"
+  for e in /github/gh_token ./github/gh_token github//gh_token github/./gh_token ././github/gh_token; do
+    run _launch "$p" secret set KEY "pass:$e"
+    [ "$status" -ne 0 ] || { echo "accepted $e"; false; }
+  done
+}
+
+@test "~/.keychain (where keychain keeps the ssh agent socket) cannot be mounted" {
+  p="$(mkproj keych)"
+  mkdir -p "$H/.keychain"; chmod 700 "$H/.keychain"
+  run _launch "$p" mount add "$H/.keychain"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
 }

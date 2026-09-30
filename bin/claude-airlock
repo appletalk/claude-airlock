@@ -258,6 +258,7 @@ _resolve_egress_groups() {
 
 # True if directory $1 is, contains, or sits inside path $2 (both canonical).
 _airlock_overlaps() {
+  [ "$1" = / ] || [ "$2" = / ] && return 0
   case "$2" in "$1"|"$1"/*) return 0 ;; esac
   case "$1" in "$2"/*) return 0 ;; esac
   return 1
@@ -286,7 +287,17 @@ _airlock_protected_check() {
   fi
   local -a extra=()
   read -ra extra <<< "$AIRLOCK_PROTECTED_PATHS"
-  prot+=( "${extra[@]}" )
+  for p in "${extra[@]}"; do
+    # shellcheck disable=SC2088  # matching a literal ~/ the config quoted, on purpose
+    case "$p" in
+      "~") p="$HOME" ;;
+      "~/"*) p="$HOME/${p#\~/}" ;;
+      /*) ;;
+      *) echo "AIRLOCK_PROTECTED_PATHS entry '$p' is not absolute; refusing rather than protecting nothing" >&2
+         return 1 ;;
+    esac
+    prot+=( "$p" )
+  done
   for p in "${prot[@]}"; do
     [ -n "$p" ] || continue
     p="$(readlink -f "$p" 2>/dev/null || printf '%s' "$p")"
@@ -298,15 +309,36 @@ _airlock_protected_check() {
   return 0
 }
 
-# True (0) if pass entry $1 matches a glob in the host-set AIRLOCK_SECRET_DENY.
+# True (0) if pass entry $1 matches a glob in the host-set AIRLOCK_SECRET_DENY. The name
+# is normalised first (leading /, ./ segments, repeated /), because pass resolves
+# "/a", "./a" and "a//b" to the same entry as "a" and "a/b". A symlinked .gpg alias in
+# the store cannot be caught by name.
 _airlock_secret_denied() {
-  local pat; local -a pats=()
+  local pat e="$1" prev=""; local -a pats=()
+  while [ "$e" != "$prev" ]; do
+    prev="$e"
+    e="$(printf '%s' "$e" | sed -E 's#(^|/)\./#\1#g; s#/+#/#g; s#^/##')"
+  done
   read -ra pats <<< "$AIRLOCK_SECRET_DENY"
   for pat in "${pats[@]}"; do
     # shellcheck disable=SC2254
-    case "$1" in $pat) return 0 ;; esac
+    case "$e" in $pat) return 0 ;; esac
   done
   return 1
+}
+
+# Canonical path of share relpath $1 on stdout if it may be mounted; the reason on stderr
+# and 1 otherwise. Run when the share is gated and again just before the engine starts.
+_airlock_share_check() {
+  local base real
+  base="$(readlink -e "$AIRLOCK_SHARE_BASE" 2>/dev/null)" || { echo "the share base does not resolve" >&2; return 1; }
+  real="$(readlink -e "$AIRLOCK_SHARE_BASE/$1" 2>/dev/null)" || real=""
+  if [ "$real" != "$base/$1" ]; then
+    echo "it is not a plain path under the share base (it resolves to ${real:-nothing}) (no override)" >&2; return 1
+  fi
+  [ -d "$real" ] || { echo "it is not a directory" >&2; return 1; }
+  _airlock_protected_check "$real" || return 1
+  printf '%s\n' "$real"
 }
 
 # Gate a space-separated list of requested share relpaths ($1) against a host-side
@@ -326,9 +358,7 @@ _gate_shares() {
     return 0
   fi
   touch "$_store"
-  local _base _real _why
-  _base="$(readlink -e "$AIRLOCK_SHARE_BASE" 2>/dev/null)" || {
-    echo "claude-airlock: AIRLOCK_SHARE_BASE $AIRLOCK_SHARE_BASE does not resolve - skipping shares." >&2; return 0; }
+  local _real _why _rw
   set -f                                                    # split, never glob (see the config parser)
   for _s in $_req; do
     _abs="$AIRLOCK_SHARE_BASE/$_s"
@@ -339,12 +369,16 @@ _gate_shares() {
     # Checked on every launch, approved or not: the box can write .airlock/config and any
     # share_rw directory, so a path approved once can later become a symlink to anywhere
     # (a key agent, /run). The base is host-set and may itself be a link; below it, none.
-    _real="$(readlink -e "$_abs" 2>/dev/null)" || _real=""
-    if [ "$_real" != "$_base/$_s" ]; then
-      echo "claude-airlock: share '$_s' is not a plain path under the share base (it resolves to ${_real:-nothing}); not shared (no override)." >&2
-      continue
-    fi
-    if ! _why="$(_airlock_protected_check "$_real" 2>&1)"; then
+    # A share inside one of this project's share_rw folders is refused outright: the box
+    # could swap it between this check and the mount.
+    for _rw in ${_REQ_SHARE_RW:-}; do
+      case "$_s" in "$_rw"/*)
+        echo "claude-airlock: share '$_s' is inside share_rw '$_rw', which the box can rewrite; not shared (no override)." >&2
+        continue 2 ;;
+      esac
+    done
+    if ! _real="$(_airlock_share_check "$_s" 2>/dev/null)"; then
+      _why="$(_airlock_share_check "$_s" 2>&1 >/dev/null)" || true
       echo "claude-airlock: share '$_s': $_why; not shared." >&2
       continue
     fi
@@ -375,6 +409,7 @@ _gate_shares() {
         grep -vxF "$_s" "$_other" > "$_other.tmp.$$" 2>/dev/null || true; mv "$_other.tmp.$$" "$_other"
       fi
       _dst+=( "$_abs" )
+      SHARE_PINS+=( "$(stat -c %d:%i "$_real") $_s" )
     fi
   done
   set +f
@@ -516,7 +551,7 @@ fi
 #
 # The deny list is a guard against habit, not an inventory of where credentials live -
 # it cannot be complete. `mount add` therefore also prints what the box will get.
-AIRLOCK_MOUNT_DENY=".ssh .gnupg .kube .password-store .claude .aws .azure .docker .pki
+AIRLOCK_MOUNT_DENY=".ssh .keychain .gnupg .kube .password-store .claude .aws .azure .docker .pki
   .mozilla .config/sops .config/age .config/claude-airlock .config/gcloud .config/gh
   .config/tea .config/containers .config/chromium .config/google-chrome
   .config/rclone .config/helm .config/hcloud .config/op .config/git .config/argocd
@@ -1496,7 +1531,7 @@ fi
 # Read and write shares each gate against their own store; the CURRENT config's mode
 # wins and the helper keeps the two stores mutually exclusive (approving in one clears
 # the other), so switching `share` <-> `share_rw` migrates cleanly with no stale entry.
-SHARE_RO=(); SHARE_RW=()
+SHARE_RO=(); SHARE_RW=(); SHARE_PINS=()
 _gate_shares "${_REQ_SHARE:-}"    "$STATE_DIR/approved-shares"    ro SHARE_RO "$STATE_DIR/approved-shares-rw"
 _gate_shares "${_REQ_SHARE_RW:-}" "$STATE_DIR/approved-shares-rw" rw SHARE_RW "$STATE_DIR/approved-shares"
 
@@ -2113,6 +2148,18 @@ for _kp in "${_ksock_pins[@]}"; do
   if ! _kwhy="$(_airlock_socket_check "$_kpath" 2>&1)" \
       || [ "$(stat -c %d:%i:%.9Z:%u:%f "$_kpath" 2>/dev/null)" != "${_kp%% *}" ]; then
     echo "claude-airlock: socket $_kpath changed after it was checked (${_kwhy:-different inode, change time, owner or mode}); not launching" >&2
+    exit 1
+  fi
+done
+
+# Shares too: re-run every check and require the same directory, so a path swapped for a
+# symlink while a prompt or pinentry waited is never mounted. -v still resolves the path
+# again, so this narrows the window to the time between here and the engine's own lookup.
+for _kp in "${SHARE_PINS[@]}"; do
+  _ks="${_kp#* }"
+  if ! _kreal="$(_airlock_share_check "$_ks" 2>/dev/null)" \
+      || [ "$(stat -c %d:%i "$_kreal" 2>/dev/null)" != "${_kp%% *}" ]; then
+    echo "claude-airlock: share $_ks changed after it was checked; not launching" >&2
     exit 1
   fi
 done
