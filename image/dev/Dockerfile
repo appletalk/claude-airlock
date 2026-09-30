@@ -8,7 +8,9 @@
 # see the "config validators" section below for exactly what is and is not in
 # scope. Genuinely heavy, specialized stacks (Playwright browsers) still go in
 # opt-in images layered on top of THIS one.
-FROM claude-airlock:base
+# install.sh builds each commit under its own tags and retags only when both builds succeed.
+ARG BASE_IMAGE=claude-airlock:base
+FROM ${BASE_IMAGE}
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive

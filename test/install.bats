@@ -276,11 +276,58 @@ STUB
   [ "$(readlink "$(IROOT)/current")" = "versions/$first" ]
 }
 
-@test "install warns when an rc file still runs the launcher from the checkout" {
+@test "install warns about rc lines that run the launcher from anywhere but the install" {
   mkclone
-  printf 'source "%s/shell/claude-airlock.zsh"\n' "$CLONE" > "$AIRLOCK_HOME/.zshrc.local"
+  for line in "source \"$CLONE/shell/claude-airlock.zsh\"" 'source "$HOME/dev/claude-airlock/shell/claude-airlock.zsh"' \
+              'otto() { ~/dev/claude-airlock/bin/claude-airlock "$@"; }'; do
+    printf '%s\n' "$line" > "$AIRLOCK_HOME/.zshrc.local"
+    _install_clone
+    grep -q "WARNING: $AIRLOCK_HOME/.zshrc.local runs the launcher from somewhere other than the install" \
+      "$BATS_TEST_TMPDIR/install.err" || { echo "no warning for: $line"; false; }
+  done
+  printf 'source "$HOME/.local/share/claude-airlock/current/shell/claude-airlock.zsh"\n' > "$AIRLOCK_HOME/.zshrc.local"
   _install_clone
-  grep -q "WARNING: $AIRLOCK_HOME/.zshrc.local still runs the launcher from the checkout" "$BATS_TEST_TMPDIR/install.err"
+  refute grep -q 'WARNING' "$BATS_TEST_TMPDIR/install.err"
+}
+
+@test "a failed dev build moves no image tag and leaves the previous version live" {
+  mkclone
+  _install_clone; first="$(rev)"
+  gitc commit -q --allow-empty -m next; second="$(rev)"
+  cat > "$STUBBIN/$ENGINE" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+[ "${1:-}" = build ] && [[ "${*: -1}" == */image/dev ]] && exit 1
+exit 0
+STUB
+  chmod +x "$STUBBIN/$ENGINE"
+  : > "$ENGINE_ARGS_FILE"
+  _install_clone
+  [ "$(readlink "$(IROOT)/current")" = "versions/$first" ]
+  engine_args | grep -qx -- "claude-airlock:base-$second"     # base did build, under its own tag
+  ! engine_args | grep -qx -- tag || false
+  refute test -d "$(IROOT)/versions/$second"                 # never went live, so not kept
+}
+
+@test "a checkout git cannot read is refused, not copied with its uncommitted edits" {
+  mkclone
+  printf '#!/bin/sh\necho "fatal: detected dubious ownership" >&2\nexit 128\n' > "$STUBBIN/git"
+  chmod +x "$STUBBIN/git"
+  printf '# LOCAL EDIT\n' >> "$CLONE/bin/claude-airlock"
+  run env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" AIRLOCK_ENGINE="$ENGINE" \
+    CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" bash "$CLONE/bin/install.sh" </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"git cannot read it"* ]]
+  refute test -e "$(IROOT)/current"
+}
+
+@test "stage dirs left by a hard kill are swept after an hour" {
+  mkclone
+  mkdir -p "$(IROOT)/versions/.stage.dead" "$(IROOT)/versions/.stage.recent"
+  touch -d '2 hours ago' "$(IROOT)/versions/.stage.dead"
+  _install_clone
+  refute test -d "$(IROOT)/versions/.stage.dead"
+  [ -d "$(IROOT)/versions/.stage.recent" ]
 }
 
 @test "a checkout inside some other repo is copied whole, never exported as an empty tree" {
@@ -291,6 +338,7 @@ STUB
   CLONE="$outer/sub" _install_clone
   live="$(readlink -f "$(IROOT)/current")"
   [ -x "$live/bin/claude-airlock" ]
+  grep -q 'not a git checkout; installing the whole tree' "$BATS_TEST_TMPDIR/install.err"
 }
 
 @test "a relative AIRLOCK_INSTALL_ROOT is refused" {
