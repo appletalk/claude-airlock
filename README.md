@@ -347,8 +347,9 @@ caches, WSL's Windows interop, libvirt, snapd) are owned by you or by root, and 
 the same files under several paths (`/mnt/wslg/...`), which no path list can keep up with.
 Root-owned directories also mean nothing running as you, the box included, can swap the
 socket after approval. A deny list of well-known sockets stays as a second layer, paths
-with `:`, `,` or control characters are refused, and the socket's inode is re-checked
-immediately before the engine starts: if it changed, the launch stops. That re-check sees
+with `:`, `,` or control characters are refused, and the socket's device, inode and
+change time are re-checked immediately before the engine starts: if any changed, the
+launch stops. That re-check sees
 the host's view; rootless podman resolves the path in its own mount namespace, which the
 box cannot reach, so it guards against the box and not against another process running
 as you.

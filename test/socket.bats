@@ -247,6 +247,20 @@ STUB
   ! launched
 }
 
+@test "a socket changed in place (same inode, new ctime) between assembly and engine start aborts" {
+  # Stands in for a replacement that reuses the deleted socket's inode number, which some
+  # filesystems do immediately (CI's did): only the change time tells them apart.
+  p="$(mkproj skpinctime)"
+  _launch "$p" socket add "$SD/p.sock"
+  _launch "$p" secret set PIN_TRIGGER pass:x >/dev/null
+  printf '#!/usr/bin/env bash\nsleep 0.01; chmod 600 "%s"; chmod 755 "%s"\necho value\n' "$SD/p.sock" "$SD/p.sock" > "$STUBBIN/pass"
+  chmod +x "$STUBBIN/pass"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"changed after it was checked"* ]]
+  ! launched
+}
+
 @test "a directory made writable between assembly and engine start aborts the launch" {
   p="$(mkproj skpindir)"
   _launch "$p" socket add "$SD/p.sock"
