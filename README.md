@@ -334,7 +334,7 @@ the grant.
 its real path. It is host-only like `mount`: stored in the host state dir, with no
 `.airlock/config` key. The intended use is a proxy that holds a credential outside the
 box and injects it into requests, such as
-[gh-cred-proxy](https://github.com/appletalk/gh-cred-proxy), so the box can use GitHub
+[airlock-cred-proxy](https://github.com/appletalk/airlock-cred-proxy), so the box can use GitHub
 without ever holding a token.
 
 A socket is a capability, not data. The box connects **as you**: with rootless podman,

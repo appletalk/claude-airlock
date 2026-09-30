@@ -533,7 +533,7 @@ if [ "${1:-}" = "mount" ]; then
 fi
 
 # `airlock socket add|list|rm` bind-mounts one host Unix socket into this project's box, at
-# its real path - the way to give a box a credential-injecting proxy (gh-cred-proxy, say)
+# its real path - the way to give a box a credential-injecting proxy (airlock-cred-proxy, say)
 # without giving it the credential. Host-only like `mount`: the store lives in STATE_DIR and
 # there is no .airlock/config key, so a box cannot request its own sockets.
 #
