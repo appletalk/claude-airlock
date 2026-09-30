@@ -263,3 +263,28 @@ share = rw/sub"
   [ "$status" -ne 0 ]
   [[ "$output" == *"protected"* ]]
 }
+
+@test "a real directory renamed into a share's place is caught before the engine runs" {
+  p="$(mkproj rename)"
+  mkdir -p "$SHARE_BASE/repo" "$SHARE_BASE/other"
+  write_config "$p" "share = repo"; approve "$p" repo
+  # No symlink: a different real directory now sits at the approved path.
+  printf '#!/usr/bin/env bash\nmv "%s" "%s.old"; mv "%s" "%s"\necho swapped\n' \
+    "$SHARE_BASE/repo" "$SHARE_BASE/repo" "$SHARE_BASE/other" "$SHARE_BASE/repo" > "$STUBBIN/pass"
+  chmod +x "$STUBBIN/pass"
+  _launch "$p" secret set K pass:x >/dev/null
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"changed after it was checked"* ]]
+  [ ! -s "$ENGINE_ARGS_FILE" ]
+}
+
+@test "an AIRLOCK_ROOTS entry holding a protected location is not mounted" {
+  p="$(mkproj roots)"
+  mkdir -p "$BATS_TEST_TMPDIR/rootdir/vault"
+  printf 'AIRLOCK_PROTECTED_PATHS="%s"\n' "$BATS_TEST_TMPDIR/rootdir/vault" > "$CFG"
+  printf 'AIRLOCK_ROOTS="%s"\n' "$BATS_TEST_TMPDIR/rootdir" >> "$CFG"
+  run _launch "$p"
+  [[ "$output" == *"AIRLOCK_ROOTS entry"* ]]
+  if engine_args | grep -q "/roots/rootdir"; then echo "root mounted"; false; fi
+}

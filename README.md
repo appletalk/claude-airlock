@@ -312,7 +312,10 @@ ssh agent socket, gpg's home or socket directory (located with `gpgconf`, so a c
 entry fails closed). A share inside one of the project's own `share_rw` folders is refused
 outright, since the box could swap it. Every check runs again just before the engine
 starts, and a share that changed in between stops the launch; `-v` still resolves the path
-once more, so this narrows the window to milliseconds rather than closing it. `airlock
+once more, so this narrows the window to milliseconds rather than closing it. Nesting
+across projects (project A has `share_rw = X`, project B has `share = X/sub`) is only
+narrowed this way, not refused: avoid it. `AIRLOCK_ROOTS` entries get the same
+protected-location check. `airlock
 mount` applies the same protected-location check.
 
 ## Read-only host mounts — `airlock mount`

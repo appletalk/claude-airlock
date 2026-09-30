@@ -277,14 +277,19 @@ _airlock_protected_check() {
     case "$c" in "$d"|"$d"/*) echo "'$c' is inside protected ${d/#$home/\~} (no override)" >&2; return 1 ;; esac
     case "$d" in "$c"/*) echo "'$c' contains protected ${d/#$home/\~} (no override)" >&2; return 1 ;; esac
   done
-  local -a prot=()
-  [ -n "${SSH_AUTH_SOCK:-}" ] && prot+=( "$SSH_AUTH_SOCK" )
-  [ -n "${GNUPGHOME:-}" ] && prot+=( "$GNUPGHOME" )
-  if command -v gpgconf >/dev/null 2>&1; then
-    for d in homedir socketdir; do
-      p="$(gpgconf --list-dirs "$d" 2>/dev/null)" && [ -n "$p" ] && prot+=( "$p" )
-    done
+  # Located once per launch: gpgconf costs ~10ms a call and every share is checked twice.
+  if [ -z "${_AIRLOCK_AGENTS_DONE:-}" ]; then
+    _AIRLOCK_AGENTS=()
+    [ -n "${SSH_AUTH_SOCK:-}" ] && _AIRLOCK_AGENTS+=( "$SSH_AUTH_SOCK" )
+    [ -n "${GNUPGHOME:-}" ] && _AIRLOCK_AGENTS+=( "$GNUPGHOME" )
+    if command -v gpgconf >/dev/null 2>&1; then
+      for d in homedir socketdir; do
+        p="$(gpgconf --list-dirs "$d" 2>/dev/null)" && [ -n "$p" ] && _AIRLOCK_AGENTS+=( "$p" )
+      done
+    fi
+    _AIRLOCK_AGENTS_DONE=1
   fi
+  local -a prot=( "${_AIRLOCK_AGENTS[@]}" )
   local -a extra=()
   read -ra extra <<< "$AIRLOCK_PROTECTED_PATHS"
   for p in "${extra[@]}"; do
@@ -1965,6 +1970,10 @@ for r in "${roots[@]}"; do
   [ -z "$r" ] && continue
   [ -d "$r" ] || continue
   [ "$r" = "$WORKSPACE" ] && continue
+  if ! _rwhy="$(_airlock_protected_check "$(readlink -f "$r")" 2>&1)"; then
+    echo "claude-airlock: AIRLOCK_ROOTS entry $r: $_rwhy; not mounted." >&2
+    continue
+  fi
   args+=( -v "$r:/roots/$(basename "$r"):ro" )
 done
 
