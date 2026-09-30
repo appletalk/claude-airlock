@@ -17,7 +17,9 @@
 # Resolve the repo's launcher relative to THIS file, so `airlock` works whether
 # or not bin/claude-airlock is on PATH. Kept (not unset) because `alpaste` needs it:
 # an alias would not expand inside a function body defined here.
-_AIRLOCK_LAUNCHER="${${(%):-%x}:A:h:h}/bin/claude-airlock"
+# :a, not :A: keep symlinks, so a file sourced through ~/.local/share/claude-airlock/current
+# follows `current` to each new install instead of pinning the version it started on.
+_AIRLOCK_LAUNCHER="${${(%):-%x}:a:h:h}/bin/claude-airlock"
 if [[ -x "$_AIRLOCK_LAUNCHER" ]]; then
   alias airlock="$_AIRLOCK_LAUNCHER"
 else

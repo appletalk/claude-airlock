@@ -165,8 +165,11 @@ mkclone() {
   unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
   CLONE="$BATS_TEST_TMPDIR/clone"
   git clone -q "$BATS_TEST_DIRNAME/.." "$CLONE"
-  cp "$BATS_TEST_DIRNAME/../bin/install.sh" "$CLONE/bin/install.sh"
-  gitc add -A && gitc commit -q --allow-empty -m "test install.sh"
+  # Overlay the working tree, so uncommitted changes under test are what gets installed.
+  # Local CA certs stay out: the tests that need one make their own.
+  tar -C "$BATS_TEST_DIRNAME/.." --exclude=.git --exclude=.tooling --exclude='image/certs/*.crt' -cf - . \
+    | tar -x -C "$CLONE"
+  gitc add -A && gitc commit -q --allow-empty -m "working tree under test"
 }
 gitc() { git -C "$CLONE" -c user.name=t -c user.email=t@example.com "$@"; }
 rev() { git -C "$CLONE" rev-parse --short=12 HEAD; }
@@ -189,11 +192,11 @@ _install_clone() {
   ! readlink -f "$AIRLOCK_HOME/.local/bin/claude-airlock" | grep -q "^$CLONE" || false
 }
 
-@test "images are built from the installed copy, not the checkout" {
+@test "images are built from the new version's own directory, not the checkout" {
   mkclone
   _install_clone
-  engine_args | grep -qx -- "$(IROOT)/current/image"
-  engine_args | grep -qx -- "$(IROOT)/current/image/dev"
+  engine_args | grep -qx -- "$(IROOT)/versions/$(rev)/image"
+  engine_args | grep -qx -- "$(IROOT)/versions/$(rev)/image/dev"
   ! engine_args | grep -q -- "$CLONE/image" || false
 }
 
@@ -224,20 +227,98 @@ _install_clone() {
   [ "$(find "$(IROOT)/versions" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]
 }
 
-@test "old versions are pruned to the current one plus the two newest others" {
+@test "the prune keeps the live version and the two most recently activated others" {
   mkclone
+  revs=()
   for i in 1 2 3 4 5; do
-    gitc commit -q --allow-empty -m "c$i"
-    _install_clone
-    sleep 1
+    gitc commit -q --allow-empty -m "c$i"; _install_clone; revs+=("$(rev)"); sleep 1
   done
   [ "$(find "$(IROOT)/versions" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 3 ]
-  [ -d "$(IROOT)/versions/$(rev)" ]
+  for r in "${revs[2]}" "${revs[3]}" "${revs[4]}"; do [ -d "$(IROOT)/versions/$r" ]; done
+  refute test -d "$(IROOT)/versions/${revs[0]}"
+  refute test -d "$(IROOT)/versions/${revs[1]}"
+}
+
+@test "a rollback counts as an activation: the prune does not drop the version just made live" {
+  mkclone
+  gitc commit -q --allow-empty -m A; _install_clone; a="$(rev)"; sleep 1
+  gitc commit -q --allow-empty -m B; _install_clone; b="$(rev)"; sleep 1
+  gitc commit -q --allow-empty -m C; _install_clone; c="$(rev)"; sleep 1
+  gitc checkout -q "$a"; _install_clone; sleep 1              # roll back to A
+  [ "$(readlink "$(IROOT)/current")" = "versions/$a" ]
+  gitc checkout -q -; gitc commit -q --allow-empty -m D; _install_clone; d="$(rev)"
+  [ -d "$(IROOT)/versions/$d" ]; [ -d "$(IROOT)/versions/$a" ]; [ -d "$(IROOT)/versions/$c" ]
+  refute test -d "$(IROOT)/versions/$b"
+}
+
+@test "local CA certs (untracked by design) are copied into the build context and listed" {
+  mkclone
+  printf 'CERT\n' > "$CLONE/image/certs/corp-root.crt"
+  _install_clone
+  [ -f "$(IROOT)/versions/$(rev)/image/certs/corp-root.crt" ]
+  rm "$CLONE/image/certs/corp-root.crt"
+  _install_clone
+  refute test -f "$(IROOT)/versions/$(rev)/image/certs/corp-root.crt"
+}
+
+@test "a failed image build leaves the previous version live" {
+  mkclone
+  _install_clone; first="$(rev)"
+  gitc commit -q --allow-empty -m next
+  cat > "$STUBBIN/$ENGINE" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+[ "${1:-}" = build ] && exit 1
+exit 0
+STUB
+  chmod +x "$STUBBIN/$ENGINE"
+  _install_clone
+  [ "$(readlink "$(IROOT)/current")" = "versions/$first" ]
+}
+
+@test "install warns when an rc file still runs the launcher from the checkout" {
+  mkclone
+  printf 'source "%s/shell/claude-airlock.zsh"\n' "$CLONE" > "$AIRLOCK_HOME/.zshrc.local"
+  _install_clone
+  grep -q "WARNING: $AIRLOCK_HOME/.zshrc.local still runs the launcher from the checkout" "$BATS_TEST_TMPDIR/install.err"
+}
+
+@test "a checkout inside some other repo is copied whole, never exported as an empty tree" {
+  mkclone
+  outer="$BATS_TEST_TMPDIR/outer"; mkdir -p "$outer/sub"
+  git -C "$outer" init -q
+  tar -C "$CLONE" --exclude=.git -cf - . | tar -x -C "$outer/sub"
+  CLONE="$outer/sub" _install_clone
+  live="$(readlink -f "$(IROOT)/current")"
+  [ -x "$live/bin/claude-airlock" ]
+}
+
+@test "a relative AIRLOCK_INSTALL_ROOT is refused" {
+  mkclone
+  run env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" AIRLOCK_ENGINE="$ENGINE" \
+    CLAUDE_CODE_VERSION=1.2.3 AIRLOCK_INSTALL_ROOT=rel/root bash "$CLONE/bin/install.sh" </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be an absolute path"* ]]
+}
+
+@test "two installs of the same commit at once leave one clean version" {
+  mkclone
+  _install_clone & _install_clone & wait
+  [ "$(find "$(IROOT)/versions/$(rev)" -maxdepth 1 -name '.stage.*' | wc -l)" -eq 0 ]
+  [ "$(find "$(IROOT)/versions" -maxdepth 1 -name '.stage.*' | wc -l)" -eq 0 ]
+}
+
+@test "a shell that sourced the installed zsh file follows current to the next install" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  mkclone
+  _install_clone
+  out="$(HOME="$AIRLOCK_HOME" zsh -fc "source '$(IROOT)/current/shell/claude-airlock.zsh'; print -r -- \$_AIRLOCK_LAUNCHER")"
+  [ "$out" = "$(IROOT)/current/bin/claude-airlock" ]
 }
 
 @test "the containment check and the printed source line use the installed copy" {
   # Both run after the build, past the point the stubbed engine lets install.sh reach.
   grep -q '"$SRC_DIR/scripts/airlock-doctor.sh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
-  grep -q 'source "$SRC_DIR/shell/claude-airlock.zsh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
-  ! grep -q '"$REPO_DIR/scripts\|"$REPO_DIR/shell\|"$REPO_DIR/image\|"$REPO_DIR/bin' "$BATS_TEST_DIRNAME/../bin/install.sh" || false
+  grep -q 'source "$INSTALL_ROOT/current/shell/claude-airlock.zsh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
+  grep -q 'ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"' "$BATS_TEST_DIRNAME/../bin/install.sh"
 }
