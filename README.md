@@ -127,11 +127,21 @@ fix is the same two commands.
 
 ### 3. Shell integration
 
+`make install` exports the checked-out **commit** (never uncommitted edits) to
+`~/.local/share/claude-airlock/versions/<commit>/` and points
+`~/.local/share/claude-airlock/current` at it; `~/.local/bin/claude-airlock` links
+through `current`. The launcher never runs from this working tree, so switching branches
+or editing files here changes nothing until the next `make install`. The two previous
+versions are kept; `current/VERSION` says which commit is live.
+
 Add to `~/.zshrc` (or `~/.zshrc.local`) and reload:
 
 ```sh
-source "$PWD/shell/claude-airlock.zsh"
+source "$HOME/.local/share/claude-airlock/current/shell/claude-airlock.zsh"
 ```
+
+After an upgrade (`git pull && make install`), open a new shell: an open one keeps the
+launcher it resolved when it started.
 
 This gives you `airlock` (Claude Code in the box) and a lock-aware `claude` on the host
 that warns if an airlock session for the same project is already open.

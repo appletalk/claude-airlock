@@ -35,12 +35,50 @@ if [ "$AIRLOCK_ENGINE" = docker ]; then
   echo "          is the safer engine — see README ('Why rootless Podman')."
 fi
 
+# The launcher runs from an installed copy of one commit, never from this working tree:
+# a checkout changes whenever someone switches branch or edits a file, and the launcher is
+# what sets the box's limits. Each install exports HEAD (never uncommitted edits) into
+# versions/<commit>/ and flips `current` to it in one rename; older versions stay until
+# pruned so a shell that sourced one keeps working.
+INSTALL_ROOT="${AIRLOCK_INSTALL_ROOT:-$HOME/.local/share/claude-airlock}"
+mkdir -p "$INSTALL_ROOT/versions"
+if git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  REV="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)"
+  BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)"
+  if [ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no)" ]; then
+    echo "    NOTE: uncommitted changes in $REPO_DIR are NOT installed; installing commit $REV." >&2
+  fi
+  _export() { git -C "$REPO_DIR" archive --format=tar HEAD | tar -x -C "$1"; }
+else
+  REV="nogit-$(date +%Y%m%d%H%M%S)"; BRANCH="-"
+  _export() { tar -C "$REPO_DIR" --exclude=.git -cf - . | tar -x -C "$1"; }
+fi
+DEST="$INSTALL_ROOT/versions/$REV"
+echo "==> Installing commit $REV ($BRANCH) -> $DEST"
+if [ ! -d "$DEST" ]; then
+  _stage="$(mktemp -d "$INSTALL_ROOT/versions/.stage.XXXXXX")"
+  _export "$_stage"
+  printf 'commit %s\nbranch %s\ninstalled %s\nfrom %s\n' "$REV" "$BRANCH" "$(date -u +%FT%TZ)" "$REPO_DIR" \
+    > "$_stage/VERSION"
+  chmod -R go-w "$_stage"
+  chmod 755 "$_stage"
+  mv "$_stage" "$DEST"
+fi
+ln -sfn "versions/$REV" "$INSTALL_ROOT/current.new"
+mv -Tf "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
+# Keep the current version and the two newest others.
+find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage.*' ! -name "$REV" \
+    -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2- | while IFS= read -r _old; do
+  rm -rf -- "$_old"
+done
+SRC_DIR="$INSTALL_ROOT/current"
+
 echo "==> Installing launcher -> $BIN_TARGET/claude-airlock"
 mkdir -p "$BIN_TARGET" "$CONFIG_DIR"
-ln -sf "$REPO_DIR/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
+ln -sfn "$SRC_DIR/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
 
 if [ ! -f "$CONFIG_DIR/config" ]; then
-  cp "$REPO_DIR/config/config.example" "$CONFIG_DIR/config"
+  cp "$SRC_DIR/config/config.example" "$CONFIG_DIR/config"
   echo "    wrote default config -> $CONFIG_DIR/config"
 fi
 
@@ -131,7 +169,7 @@ fi
 # used is remembered in the config dir, and a later `make install` in the SAME week reuses
 # it: with the bare week key it would re-tag :base onto the cached, older week layer and
 # silently undo the refresh, with doctor reporting the week as if nothing had happened.
-BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}//p' "$REPO_DIR/image/Dockerfile" | head -1)"
+BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}//p' "$SRC_DIR/image/Dockerfile" | head -1)"
 REFRESH_STAMP="$CONFIG_DIR/apt-refresh"
 APT_WEEK="$(date +%G-W%V)"
 APT_REFRESH="${AIRLOCK_APT_REFRESH:-}"
@@ -153,13 +191,13 @@ fi
 # reading the diff (`make claude-installer-diff`).
 echo "==> Checking the vendored Claude Code installer against upstream"
 if upstream="$(curl -fsSL --max-time 20 https://claude.ai/install.sh 2>/dev/null)" && [ -n "$upstream" ]; then
-  if [ "$upstream" = "$(cat "$REPO_DIR/image/claude-install.sh")" ]; then
+  if [ "$upstream" = "$(cat "$SRC_DIR/image/claude-install.sh")" ]; then
     echo "    image/claude-install.sh matches upstream"
   else
     # `|| true` twice over: diff exits 1 when the files differ (always, here) and grep -c
     # exits 1 on zero matches; under pipefail + errexit either would end the install
     # silently at the very line that exists to make the drift loud.
-    drift="$(diff <(printf '%s\n' "$upstream") "$REPO_DIR/image/claude-install.sh" 2>/dev/null | grep -c '^[<>]' || true)"
+    drift="$(diff <(printf '%s\n' "$upstream") "$SRC_DIR/image/claude-install.sh" 2>/dev/null | grep -c '^[<>]' || true)"
     echo >&2
     echo "    !!! INSTALLER DRIFT: image/claude-install.sh no longer matches https://claude.ai/install.sh" >&2
     echo "    !!! ($drift changed line(s)). This build still uses the vendored copy. Review and update:" >&2
@@ -182,16 +220,16 @@ echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_V
 "$AIRLOCK_ENGINE" build \
   --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
   --build-arg "APT_REFRESH=$APT_REFRESH" \
-  -t claude-airlock:base "$REPO_DIR/image"
+  -t claude-airlock:base "$SRC_DIR/image"
 printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
 echo "==> Building dev image (claude-airlock:dev) — Python, Node 24, build tools"
 echo "    (a new Claude Code version or package refresh moves the base, so this layer rebuilds too)"
-"$AIRLOCK_ENGINE" build -t claude-airlock:dev "$REPO_DIR/image/dev"
+"$AIRLOCK_ENGINE" build -t claude-airlock:dev "$SRC_DIR/image/dev"
 echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
-echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$REPO_DIR/image/playwright\""
+echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
 
 echo "==> Verifying the host can actually contain a box (airlock doctor)"
-if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$REPO_DIR/scripts/airlock-doctor.sh"; then
+if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DIR/scripts/airlock-doctor.sh"; then
   echo
   echo "claude-airlock: the install completed, but the host FAILED its containment check." >&2
   echo "  Fix the items above before trusting the sandbox — see README (Setup, step 1:" >&2
@@ -203,7 +241,7 @@ cat <<EOF
 
 ==> Almost done. Add this line to your ~/.zshrc (or ~/.zshrc.local), then reload:
 
-    source "$REPO_DIR/shell/claude-airlock.zsh"
+    source "$SRC_DIR/shell/claude-airlock.zsh"
 
 That gives you:
     airlock   -> Claude Code in the sandbox (use this for a project)
