@@ -270,6 +270,8 @@ launch.
 `AIRLOCK_SECRET_DENY` in the host config lists pass entries that must never reach a box,
 as space-separated globs (`AIRLOCK_SECRET_DENY="github/*"`). `secret set` refuses a
 matching `pass:` entry, and a launch whose store holds one stops before the box starts.
+Names are normalised first (`/a`, `./a` and `a//b` are the entries pass would read), but
+the match is on the name: a symlinked `.gpg` alias in the store is not caught.
 Use it for credentials another tool holds on the box's behalf, such as a token a
 credential proxy fronts. It is empty by default, so every secret works as before.
 
@@ -306,8 +308,12 @@ any part of it below the share base is a symlink (the box can write `.airlock/co
 every `share_rw` directory, so an approved path could otherwise be swapped for a link to
 anywhere), when it overlaps a protected dot-dir, or when it contains or sits inside your
 ssh agent socket, gpg's home or socket directory (located with `gpgconf`, so a custom
-`GNUPGHOME` counts), or a path in `AIRLOCK_PROTECTED_PATHS`. `airlock mount` applies the
-same protected-location check.
+`GNUPGHOME` counts), or a path in `AIRLOCK_PROTECTED_PATHS` (absolute or `~/`; a relative
+entry fails closed). A share inside one of the project's own `share_rw` folders is refused
+outright, since the box could swap it. Every check runs again just before the engine
+starts, and a share that changed in between stops the launch; `-v` still resolves the path
+once more, so this narrows the window to milliseconds rather than closing it. `airlock
+mount` applies the same protected-location check.
 
 ## Read-only host mounts — `airlock mount`
 
