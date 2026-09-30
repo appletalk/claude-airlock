@@ -37,9 +37,10 @@ fi
 
 # The launcher runs from an installed copy of one commit, never from this working tree:
 # a checkout changes whenever someone switches branch or edits a file, and the launcher is
-# what sets the box's limits. The rule: an install builds and checks a complete version
-# first, and only then makes it live in one rename; everything, open shells included,
-# follows `current`. So: export HEAD (never uncommitted edits) to a stage, verify it,
+# what sets the box's limits. The rule: an install builds a complete version (export and
+# images) first, and only then makes it live in one step; everything, open shells
+# included, follows `current`. The host containment check runs after, against the live
+# version. So: export HEAD (never uncommitted edits) to a stage, verify it,
 # move it to versions/<commit>, build the images from THAT directory, and only when the
 # build succeeds flip `current`, relink the launcher and prune.
 INSTALL_ROOT="${AIRLOCK_INSTALL_ROOT:-$HOME/.local/share/claude-airlock}"
@@ -49,8 +50,13 @@ case "$INSTALL_ROOT" in
 esac
 mkdir -p "$INSTALL_ROOT/versions"
 chmod go-w "$INSTALL_ROOT" "$INSTALL_ROOT/versions"
-_stage=""
-trap '[ -n "$_stage" ] && rm -rf -- "$_stage"' EXIT
+_stage=""; _fresh=""; _live=""
+# On any exit before this version goes live: drop a half-made stage, and a version this
+# run exported (it never activated, so nothing uses it and it must not outrank older
+# live ones in the prune).
+trap '[ -n "$_stage" ] && rm -rf -- "$_stage"; [ -n "$_fresh" ] && [ -z "$_live" ] && rm -rf -- "$DEST"' EXIT
+# Stage dirs left by a hard kill (the trap never ran).
+find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d -name '.stage.*' -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
 if [ "$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$REPO_DIR" && pwd -P)" ]; then
   REV="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)"
   BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)"
@@ -58,10 +64,18 @@ if [ "$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$REP
     echo "    NOTE: uncommitted changes in $REPO_DIR are NOT installed; installing commit $REV." >&2
   fi
   _export() { git -C "$REPO_DIR" archive --format=tar HEAD | tar -x -C "$1"; }
+elif [ -e "$REPO_DIR/.git" ]; then
+  # A checkout git would not read: git missing, or its "dubious ownership" refusal (a
+  # checkout under /mnt/c, say). Copying the tree would install uncommitted edits.
+  echo "claude-airlock: $REPO_DIR is a git checkout, but git cannot read it:" >&2
+  git -C "$REPO_DIR" rev-parse --show-toplevel 2>&1 | sed 's/^/    /' >&2 || true
+  echo "  Fix that (install git, or 'git config --global --add safe.directory $REPO_DIR'); nothing was changed." >&2
+  exit 1
 else
-  # Not a checkout of its own (a release tarball, or a subdirectory of some other repo).
+  # Not a checkout (a release tarball, or a directory inside some other repo).
   REV="nogit-$(date +%Y%m%d%H%M%S)"; BRANCH="-"
-  _export() { tar -C "$REPO_DIR" --exclude=.git -cf - . | tar -x -C "$1"; }
+  echo "    WARNING: $REPO_DIR is not a git checkout; installing the whole tree as it is." >&2
+  _export() { tar -C "$REPO_DIR" --exclude=.git --exclude=.tooling -cf - . | tar -x -C "$1"; }
 fi
 DEST="$INSTALL_ROOT/versions/$REV"
 echo "==> Installing commit $REV ($BRANCH) -> $DEST"
@@ -77,8 +91,13 @@ if [ ! -d "$DEST" ]; then
   chmod -R go-w "$_stage"
   chmod 755 "$_stage"
   # Another install of the same commit may have won the race; theirs is identical.
-  mv -T "$_stage" "$DEST" 2>/dev/null || [ -d "$DEST" ]
-  rm -rf -- "$_stage"; _stage=""
+  if mv -T "$_stage" "$DEST" 2>"$_stage.err"; then
+    _fresh=1
+  elif [ ! -d "$DEST" ]; then
+    echo "claude-airlock: could not move the export into place:" >&2; sed 's/^/    /' "$_stage.err" >&2
+    rm -f "$_stage.err"; exit 1
+  fi
+  rm -f "$_stage.err"; rm -rf -- "$_stage"; _stage=""
 fi
 # Corporate CA certs are a deliberate LOCAL, untracked drop-in (.gitignore), so the export
 # never carries them. Sync them into this version's build context on every install.
@@ -234,24 +253,31 @@ if ! "$AIRLOCK_ENGINE" pull -q "$BASE_IMAGE" >/dev/null; then
 fi
 
 echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_VERSION, packages as of $APT_REFRESH"
+# Built under this commit's own tags; :base and :dev move only when both builds succeed.
 "$AIRLOCK_ENGINE" build \
   --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
   --build-arg "APT_REFRESH=$APT_REFRESH" \
-  -t claude-airlock:base "$SRC_DIR/image"
-printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
+  -t "claude-airlock:base-$REV" "$SRC_DIR/image"
 echo "==> Building dev image (claude-airlock:dev) — Python, Node 24, build tools"
 echo "    (a new Claude Code version or package refresh moves the base, so this layer rebuilds too)"
-"$AIRLOCK_ENGINE" build -t claude-airlock:dev "$SRC_DIR/image/dev"
+"$AIRLOCK_ENGINE" build --build-arg "BASE_IMAGE=claude-airlock:base-$REV" \
+  -t "claude-airlock:dev-$REV" "$SRC_DIR/image/dev"
 echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
 echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
 
-# The images built: make this version live. `current` flips in one rename (a unique temp
-# name, so concurrent installs cannot trip over each other); the launcher link and every
-# shell follow it. Touching DEST records activation time, which the prune orders by.
+# Both images built: make this version live. The image tags and `current` move together;
+# `current` flips in one rename (a unique temp name, so concurrent installs cannot trip over
+# each other), and the launcher link and every shell follow it. Touching DEST records
+# activation time, which the prune orders by.
+"$AIRLOCK_ENGINE" tag "claude-airlock:base-$REV" claude-airlock:base
+"$AIRLOCK_ENGINE" tag "claude-airlock:dev-$REV" claude-airlock:dev
+"$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
+printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
 touch "$DEST"
 _cur_tmp="$INSTALL_ROOT/.current.$$"
 ln -sfn "versions/$REV" "$_cur_tmp"
 mv -Tf "$_cur_tmp" "$INSTALL_ROOT/current"
+_live=1
 echo "==> Live: $INSTALL_ROOT/current -> versions/$REV"
 echo "==> Installing launcher -> $BIN_TARGET/claude-airlock"
 ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
@@ -263,12 +289,16 @@ done
 
 # An rc file that still sources the zsh file (or calls the launcher) from this checkout
 # keeps the live launcher in the working tree: its alias beats the ~/.local/bin link.
+# Matched by shape, not by this checkout's path, so $HOME/..., ~/... and symlinked
+# spellings are caught too; lines that already go through the install root are fine.
 for _rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.zshenv" "$HOME/.zprofile"; do
   [ -f "$_rc" ] || continue
-  if grep -nF -e "$REPO_DIR/shell/claude-airlock.zsh" -e "$REPO_DIR/bin/claude-airlock" "$_rc" >/dev/null; then
+  _old="$(grep -nE '(shell/claude-airlock\.zsh|bin/claude-airlock)' "$_rc" \
+    | grep -vF -e "$INSTALL_ROOT/current" -e '.local/share/claude-airlock/current' -e '.local/bin/claude-airlock' || true)"
+  if [ -n "$_old" ]; then
     echo "" >&2
-    echo "claude-airlock: WARNING: $_rc still runs the launcher from the checkout at $REPO_DIR:" >&2
-    grep -nF -e "$REPO_DIR/shell/claude-airlock.zsh" -e "$REPO_DIR/bin/claude-airlock" "$_rc" | sed 's/^/    /' >&2
+    echo "claude-airlock: WARNING: $_rc runs the launcher from somewhere other than the install:" >&2
+    printf '%s\n' "$_old" | sed 's/^/    /' >&2
     echo "  Change it to use $INSTALL_ROOT/current (see the source line below), then open a new shell." >&2
   fi
 done
