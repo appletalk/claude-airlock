@@ -53,8 +53,11 @@ chmod go-w "$INSTALL_ROOT" "$INSTALL_ROOT/versions"
 # One install at a time: export, build, flip and prune all touch shared state.
 exec 9>"$INSTALL_ROOT/.lock"
 if ! flock -n 9; then
-  echo "==> Another install is running; waiting for it to finish"
-  flock 9
+  echo "==> Another install is running; waiting up to 10 minutes for it to finish"
+  if ! flock -w 600 9; then
+    echo "claude-airlock: $INSTALL_ROOT/.lock is still held; see who has it: fuser -v $INSTALL_ROOT/.lock" >&2
+    exit 1
+  fi
 fi
 _stage=""; _fresh=""; _live=""; DEST=""; REV=""
 _prev="$(readlink "$INSTALL_ROOT/current" 2>/dev/null || true)"
@@ -327,7 +330,8 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DI
   echo "claude-airlock: commit $REV is now live, but it FAILED the containment check." >&2
   echo "  The cause may be the host (see README, Setup, step 1: 'Rootless Podman" >&2
   echo "  prerequisites') or this version (its seccomp profile and image are what ran)." >&2
-  if [ -n "$_prev" ] && [ "$_prev" != "versions/$REV" ] && [ -d "$INSTALL_ROOT/$_prev" ]; then
+  if [ -n "$_prev" ] && [ "$_prev" != "versions/$REV" ] && [ -d "$INSTALL_ROOT/$_prev" ] \
+      && [ "${_prev#versions/nogit-}" = "$_prev" ]; then
     echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install" >&2
   fi
   exit 1
