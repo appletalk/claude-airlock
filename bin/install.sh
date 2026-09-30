@@ -342,6 +342,10 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:dev "$SRC_DIR
   echo
   echo "claude-airlock: commit $REV is now live, but its dev image FAILED the smoke test above." >&2
   echo "  Boxes still start; a tool listed as FAIL will not work inside them." >&2
+  if [ -n "$_prev" ] && [ "$_prev" != "versions/$REV" ] && [ -d "$INSTALL_ROOT/$_prev" ] \
+      && [ "${_prev#versions/nogit-}" = "$_prev" ]; then
+    echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install" >&2
+  fi
   exit 1
 fi
 
