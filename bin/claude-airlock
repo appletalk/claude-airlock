@@ -33,6 +33,8 @@ AIRLOCK_MODEL="${AIRLOCK_MODEL:-opus}"                # default model in the box
 AIRLOCK_ARTIFACT_DIRS="${AIRLOCK_ARTIFACT_DIRS:-.venv node_modules}"  # env-built dirs kept container-local
 AIRLOCK_PIDS_LIMIT="${AIRLOCK_PIDS_LIMIT:-4096}"     # cap in-box process count (fork-bomb guard); 0/"" = engine default
 AIRLOCK_MEMORY="${AIRLOCK_MEMORY:-}"                 # host RAM cap, e.g. 8g; empty = no limit (too low breaks real builds)
+AIRLOCK_PROTECTED_PATHS="${AIRLOCK_PROTECTED_PATHS:-}" # extra host paths no share or mount may contain (space-separated)
+AIRLOCK_SECRET_DENY="${AIRLOCK_SECRET_DENY:-}"       # pass entry globs `airlock secret` must never inject (space-separated)
 
 # Container engine. Rootless podman is the DEFAULT and the recommended posture:
 # belonging to the `docker` group is root-equivalent on the host (`docker run -v /:/host`
@@ -254,6 +256,59 @@ _resolve_egress_groups() {
   printf '%s' "$out"
 }
 
+# True if directory $1 is, contains, or sits inside path $2 (both canonical).
+_airlock_overlaps() {
+  case "$2" in "$1"|"$1"/*) return 0 ;; esac
+  case "$1" in "$2"/*) return 0 ;; esac
+  return 1
+}
+
+# Refuse (reason on stderr, return 1) a canonical directory $1 that overlaps a protected
+# location: the dot-dir deny list, the ssh agent socket, gpg's home and socket dir, or
+# anything in the host-set AIRLOCK_PROTECTED_PATHS. Key agents do not always live in
+# ~/.gnupg or /run/user (a custom GNUPGHOME, `ssh-agent -a`), so they are located, not
+# assumed. No override.
+_airlock_protected_check() {
+  local c="$1" home d p
+  home="$(readlink -f "$HOME" 2>/dev/null)" || { echo "cannot resolve \$HOME" >&2; return 1; }
+  for d in $AIRLOCK_MOUNT_DENY; do
+    d="$home/$d"
+    case "$c" in "$d"|"$d"/*) echo "'$c' is inside protected ${d/#$home/\~} (no override)" >&2; return 1 ;; esac
+    case "$d" in "$c"/*) echo "'$c' contains protected ${d/#$home/\~} (no override)" >&2; return 1 ;; esac
+  done
+  local -a prot=()
+  [ -n "${SSH_AUTH_SOCK:-}" ] && prot+=( "$SSH_AUTH_SOCK" )
+  [ -n "${GNUPGHOME:-}" ] && prot+=( "$GNUPGHOME" )
+  if command -v gpgconf >/dev/null 2>&1; then
+    for d in homedir socketdir; do
+      p="$(gpgconf --list-dirs "$d" 2>/dev/null)" && [ -n "$p" ] && prot+=( "$p" )
+    done
+  fi
+  local -a extra=()
+  read -ra extra <<< "$AIRLOCK_PROTECTED_PATHS"
+  prot+=( "${extra[@]}" )
+  for p in "${prot[@]}"; do
+    [ -n "$p" ] || continue
+    p="$(readlink -f "$p" 2>/dev/null || printf '%s' "$p")"
+    if _airlock_overlaps "$c" "$p"; then
+      echo "'$c' overlaps protected $p (a key agent, gpg home or AIRLOCK_PROTECTED_PATHS entry) (no override)" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# True (0) if pass entry $1 matches a glob in the host-set AIRLOCK_SECRET_DENY.
+_airlock_secret_denied() {
+  local pat; local -a pats=()
+  read -ra pats <<< "$AIRLOCK_SECRET_DENY"
+  for pat in "${pats[@]}"; do
+    # shellcheck disable=SC2254
+    case "$1" in $pat) return 0 ;; esac
+  done
+  return 1
+}
+
 # Gate a space-separated list of requested share relpaths ($1) against a host-side
 # approval store ($2) for access mode $3 (ro|rw); approved ABSOLUTE paths are appended
 # to the array named $4, and $5 is the OTHER mode's store. The CURRENT config's mode is
@@ -271,11 +326,26 @@ _gate_shares() {
     return 0
   fi
   touch "$_store"
+  local _base _real _why
+  _base="$(readlink -e "$AIRLOCK_SHARE_BASE" 2>/dev/null)" || {
+    echo "claude-airlock: AIRLOCK_SHARE_BASE $AIRLOCK_SHARE_BASE does not resolve - skipping shares." >&2; return 0; }
   set -f                                                    # split, never glob (see the config parser)
   for _s in $_req; do
     _abs="$AIRLOCK_SHARE_BASE/$_s"
     if [ ! -d "$_abs" ]; then
       echo "claude-airlock: shared folder '$_s' not found under $AIRLOCK_SHARE_BASE — skipping." >&2
+      continue
+    fi
+    # Checked on every launch, approved or not: the box can write .airlock/config and any
+    # share_rw directory, so a path approved once can later become a symlink to anywhere
+    # (a key agent, /run). The base is host-set and may itself be a link; below it, none.
+    _real="$(readlink -e "$_abs" 2>/dev/null)" || _real=""
+    if [ "$_real" != "$_base/$_s" ]; then
+      echo "claude-airlock: share '$_s' is not a plain path under the share base (it resolves to ${_real:-nothing}); not shared (no override)." >&2
+      continue
+    fi
+    if ! _why="$(_airlock_protected_check "$_real" 2>&1)"; then
+      echo "claude-airlock: share '$_s': $_why; not shared." >&2
       continue
     fi
     _ok=0
@@ -363,6 +433,11 @@ if [ "${1:-}" = "secret" ]; then
       case "$_sk" in ''|*[!A-Za-z0-9_]*) echo "airlock: invalid key '$_sk' (A-Z 0-9 _ only)" >&2; exit 1 ;; esac
       shift 3; _sv="$*"
       [ -n "$_sv" ] || { echo "airlock: no value given for $_sk" >&2; exit 1; }
+      case "$_sv" in
+        pass:*) if _airlock_secret_denied "${_sv#pass:}"; then
+                  echo "airlock: '${_sv#pass:}' matches AIRLOCK_SECRET_DENY; it must never enter a box (no override)" >&2; exit 1
+                fi ;;
+      esac
       touch "$_sstore"; chmod 600 "$_sstore"
       sed -i "/^${_sk}=/d" "$_sstore" 2>/dev/null || true
       printf '%s=%s\n' "$_sk" "$_sv" >> "$_sstore"
@@ -459,15 +534,7 @@ _airlock_mount_check() {
     "$home"/*) ;;
     *) echo "'$c' is outside \$HOME ($home)" >&2; return 1 ;;
   esac
-  for d in $AIRLOCK_MOUNT_DENY; do
-    d="$home/$d"
-    case "$c" in
-      "$d"|"$d"/*) echo "'$c' is inside protected ${d/#$home/\~} (no override)" >&2; return 1 ;;
-    esac
-    case "$d" in
-      "$c"/*) echo "'$c' contains protected ${d/#$home/\~} (no override)" >&2; return 1 ;;
-    esac
-  done
+  _airlock_protected_check "$c" || return 1
   case "$c" in
     "$WORKSPACE"|"$WORKSPACE"/*) echo "'$c' is inside the workspace, which is already mounted" >&2; return 1 ;;
   esac
@@ -1962,6 +2029,11 @@ if [ -f "$SECRETS_FILE" ]; then
     _sval="$(printf '%s' "${_sline#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     case "$_sval" in
       pass:*)
+        if _airlock_secret_denied "${_sval#pass:}"; then
+          echo "claude-airlock: secret $_skey names '${_sval#pass:}', which matches AIRLOCK_SECRET_DENY;" >&2
+          echo "  refusing to start. Remove it: airlock secret rm $_skey" >&2
+          exit 1
+        fi
         _resolved="$(pass show "${_sval#pass:}" 2>/dev/null | head -n1)"
         if [ -z "$_resolved" ]; then
           echo "claude-airlock: could not resolve secret $_skey via 'pass show ${_sval#pass:}'." >&2

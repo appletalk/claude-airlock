@@ -141,3 +141,10 @@ AIRLOCK_MODEL=opus
 # to the allowlist regardless of posture. Space or comma separated. For per-project,
 # box-approved domains use `egress =` in that project's .airlock/config instead.
 # AIRLOCK_EXTRA_EGRESS="registry.terraform.io"
+
+# Extra host paths no share or mount may contain or sit inside. The ssh agent socket
+# and gpg's home and socket directory are always protected; add others here.
+# AIRLOCK_PROTECTED_PATHS="/run/airlock-cred-proxy"
+
+# pass entries `airlock secret` must never inject into a box, as globs. Empty by default.
+# AIRLOCK_SECRET_DENY="github/*"
