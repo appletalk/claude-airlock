@@ -211,8 +211,8 @@ EOF
   write_config "$p" "artifact_dirs = * ok-dir"
   run _launch "$p"
   [[ "$output" == *"ignoring artifact_dirs entry '*'"* ]]
-  ! engine_args | grep -q -- "zzz-dir:rw"
-  ! engine_args | grep -q -- "/aaa:rw"
+  ! engine_args | grep -q -- "zzz-dir:rw" || false
+  ! engine_args | grep -q -- "/aaa:rw" || false
   [ ! -e "$p/*" ]                                        # no literal '*' directory either
   engine_args | grep -q -- "/ok-dir:rw"                  # the sane entry still works
 }
@@ -231,5 +231,5 @@ EOF
   run _launch "$p"
   [ ! -e "$p/pwned" ]
   engine_args | grep -q -- "/frontend/node_modules:rw"
-  ! engine_args | grep -q -- "a;b"
+  ! engine_args | grep -q -- "a;b" || false
 }

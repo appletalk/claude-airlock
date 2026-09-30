@@ -41,7 +41,7 @@ setup() { setup_airlock_env; }
   # Memory is served from the per-project state dir...
   grep -qE "^.*/box-memory:[^:]+/memory:rw$" "$ENGINE_ARGS_FILE"
   # ...and the host's real memories are never mounted at all.
-  ! grep -qE "^${AIRLOCK_HOME}/\.claude/projects/[^:]+/memory:" "$ENGINE_ARGS_FILE"
+  refute grep -qE "^${AIRLOCK_HOME}/\.claude/projects/[^:]+/memory:" "$ENGINE_ARGS_FILE"
 }
 
 @test "an invalid AIRLOCK_SHARE_MEMORY is rejected rather than silently ignored" {

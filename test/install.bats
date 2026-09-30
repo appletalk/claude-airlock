@@ -59,7 +59,7 @@ EOF
   : > "$ENGINE_ARGS_FILE"
   _install
   engine_args | grep -qx -- "APT_REFRESH=$(week).2026-09-22-0700"
-  ! engine_args | grep -qx -- "APT_REFRESH=$(week)"
+  ! engine_args | grep -qx -- "APT_REFRESH=$(week)" || false
 }
 
 @test "a remembered key from an earlier week is superseded by this week's" {
@@ -94,7 +94,7 @@ EOF
 
 @test "Claude Code is installed from the vendored installer, never piped from the network" {
   df="$BATS_TEST_DIRNAME/../image/Dockerfile"
-  ! grep -qE 'curl[^|]*install\.sh[^|]*\|[[:space:]]*bash' "$df"
+  ! grep -qE 'curl[^|]*install\.sh[^|]*\|[[:space:]]*bash' "$df" || false
   grep -q 'COPY .*claude-install.sh' "$df"
   grep -q 'bash /tmp/claude-install.sh' "$df"
   [ -s "$BATS_TEST_DIRNAME/../image/claude-install.sh" ]
@@ -105,7 +105,7 @@ EOF
 @test "Node is pinned by version and per-arch sha256, not resolved at build time" {
   df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
   grep -qE '^ARG NODE_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$df"
-  ! grep -q 'nodejs.org/dist/index.json' "$df"
+  refute grep -q 'nodejs.org/dist/index.json' "$df"
   awk '/ARG NODE_VERSION/{f=1} f&&/sha256sum -c/{ok=1} f&&/node --version/{exit} END{exit !ok}' "$df"
 }
 
@@ -138,7 +138,7 @@ _stub_upstream_installer() {   # $1 = file to serve as https://claude.ai/install
 @test "install is quiet about the installer when the vendored copy matches upstream" {
   _stub_upstream_installer "$BATS_TEST_DIRNAME/../image/claude-install.sh"
   _install
-  ! grep -q 'INSTALLER DRIFT' "$BATS_TEST_TMPDIR/install.err"
+  refute grep -q 'INSTALLER DRIFT' "$BATS_TEST_TMPDIR/install.err"
 }
 
 @test "install warns, without failing, when upstream cannot be fetched to compare" {

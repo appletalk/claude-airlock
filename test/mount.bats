@@ -20,7 +20,7 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
   [ "$status" -eq 0 ]
   _launch "$p" >/dev/null 2>&1 || true
   mounted "$H/.kube-claude"
-  ! engine_args | grep -q -- "$H/.kube-claude:$H/.kube-claude:rw"
+  ! engine_args | grep -q -- "$H/.kube-claude:$H/.kube-claude:rw" || false
 }
 
 @test "list shows the mount; rm removes it and the next launch drops it" {
@@ -33,7 +33,7 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
   [[ "$output" == *"(none)"* ]] || [[ "$output" != *".kube-claude  (ro)"* ]]
   : > "$ENGINE_ARGS_FILE"
   _launch "$p" >/dev/null 2>&1 || true
-  ! mounted "$H/.kube-claude"
+  refute mounted "$H/.kube-claude"
 }
 
 @test "refuses protected directories and anything inside them (no override)" {
@@ -112,8 +112,8 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
   rm -rf "$H/.kube-claude"; ln -s "$H/.ssh" "$H/.kube-claude"
   run _launch "$p"
   [[ "$output" == *"NOT mounting"* ]]
-  ! engine_args | grep -q -- "$H/.ssh"
-  ! engine_args | grep -q -- "$H/.kube-claude:"
+  ! engine_args | grep -q -- "$H/.ssh" || false
+  ! engine_args | grep -q -- "$H/.kube-claude:" || false
 }
 
 @test "launch re-checks: an approved path that now resolves ELSEWHERE (even somewhere allowed) is not mounted" {
@@ -123,7 +123,7 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
   rm -rf "$H/.kube-claude"; ln -s "$H/elsewhere" "$H/.kube-claude"
   run _launch "$p"
   [[ "$output" == *"now resolves to"* ]]
-  ! engine_args | grep -q -- "$H/elsewhere"
+  ! engine_args | grep -q -- "$H/elsewhere" || false
 }
 
 @test "launch re-checks: a hard link added after approval gets the dir skipped" {
@@ -132,14 +132,14 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
   ln "$H/.ssh/id_ed25519" "$H/.kube-claude/token"
   run _launch "$p"
   [[ "$output" == *"NOT mounting"* ]]
-  ! mounted "$H/.kube-claude"
+  refute mounted "$H/.kube-claude"
 }
 
 @test "a project .airlock/config cannot request a mount" {
   p="$(mkproj mntcfg)"
   write_config "$p" "mount = $H/.kube-claude"
   _launch "$p" >/dev/null 2>&1 || true
-  ! mounted "$H/.kube-claude"
+  refute mounted "$H/.kube-claude"
 }
 
 # The hard-link scan is -xdev and the engine's bind is recursive, so a mount point nested
@@ -155,7 +155,7 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
   [[ "$output" == *"contains a mount point"* ]]
   run _launch "$p"
   [[ "$output" == *"NOT mounting"* ]]
-  ! mounted "$H/.kube-claude"
+  refute mounted "$H/.kube-claude"
 }
 
 @test "a mount point elsewhere does not trip the check (prefix match on the target only)" {

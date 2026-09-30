@@ -147,3 +147,12 @@ launcher_registered() {
   [ -n "$pid" ] || return 1
   live_sessions | grep -qx "$(_slug "$1")/$pid"
 }
+
+# Negative assertion. A bare `! cmd` never trips errexit, so in the middle of a bats test
+# it asserts nothing (only a test's last command counts). Use `refute cmd ...` instead.
+refute() {
+  if "$@"; then
+    echo "refute: expected failure, but this succeeded: $*" >&2
+    return 1
+  fi
+}

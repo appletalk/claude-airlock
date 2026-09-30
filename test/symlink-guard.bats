@@ -56,7 +56,7 @@ plant() {  # plant a symlink at $1/memory/MEMORY.md pointing at a host file
     AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN=t ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
     AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" AIRLOCK_SHARE_HISTORY=0 bash "$AIRLOCK" </dev/null
   [ "$status" -eq 0 ]
-  ! engine_args | grep -q -- "$d"
+  ! engine_args | grep -q -- "$d" || false
 }
 
 # --- the host wrapper ---------------------------------------------------------------
