@@ -267,6 +267,12 @@ lands in your shell history when you type it; `pass:PATH` keeps the secret encry
 rest and is only resolved — into the mode-0600 env-file, never the command line — at
 launch.
 
+`AIRLOCK_SECRET_DENY` in the host config lists pass entries that must never reach a box,
+as space-separated globs (`AIRLOCK_SECRET_DENY="github/*"`). `secret set` refuses a
+matching `pass:` entry, and a launch whose store holds one stops before the box starts.
+Use it for credentials another tool holds on the box's behalf, such as a token a
+credential proxy fronts. It is empty by default, so every secret works as before.
+
 ## Per-project config — `<project>/.airlock/config`
 
 Committed with the project, **safe-parsed** (never sourced) since the project dir is
@@ -294,6 +300,14 @@ the box, including a hostname that resolves to one. An operator who really means
 
 Share paths are relative to `AIRLOCK_SHARE_BASE` (default `~/development`), so committed
 configs never contain absolute `/home` paths, and `..`/absolute are rejected.
+
+Every launch re-checks each share, approved or not. It is skipped, with no override, when
+any part of it below the share base is a symlink (the box can write `.airlock/config` and
+every `share_rw` directory, so an approved path could otherwise be swapped for a link to
+anywhere), when it overlaps a protected dot-dir, or when it contains or sits inside your
+ssh agent socket, gpg's home or socket directory (located with `gpgconf`, so a custom
+`GNUPGHOME` counts), or a path in `AIRLOCK_PROTECTED_PATHS`. `airlock mount` applies the
+same protected-location check.
 
 ## Read-only host mounts — `airlock mount`
 
@@ -380,7 +394,9 @@ only the service does not), relaunch the box to pick up the new one.
 
 Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
 `AIRLOCK_SHARE_BASE`, `AIRLOCK_EGRESS_MODE` (default posture for new projects),
-`AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`.
+`AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`,
+`AIRLOCK_PROTECTED_PATHS` (extra paths no share or mount may overlap) and
+`AIRLOCK_SECRET_DENY` (pass entries never injected).
 
 ## Statusline — `config/airlock-statusline.sh`
 
