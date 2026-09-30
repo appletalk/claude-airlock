@@ -152,3 +152,92 @@ _stub_upstream_installer() {   # $1 = file to serve as https://claude.ai/install
   grep -qE '^claude-installer-diff:' "$BATS_TEST_DIRNAME/../Makefile"
   grep -qE '^claude-installer-update:' "$BATS_TEST_DIRNAME/../Makefile"
 }
+
+# --- the installed copy -------------------------------------------------------------
+# The launcher runs from an export of one commit under ~/.local/share, never the working
+# tree. These run install.sh from a throwaway clone so the tests control its commits.
+
+IROOT() { printf '%s' "$AIRLOCK_HOME/.local/share/claude-airlock"; }
+
+mkclone() {
+  # A git hook (the repo's pre-commit runs this suite) exports GIT_DIR, GIT_INDEX_FILE and
+  # friends; left set, every git call below would act on the real repo, not the clone.
+  unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+  CLONE="$BATS_TEST_TMPDIR/clone"
+  git clone -q "$BATS_TEST_DIRNAME/.." "$CLONE"
+  cp "$BATS_TEST_DIRNAME/../bin/install.sh" "$CLONE/bin/install.sh"
+  gitc add -A && gitc commit -q --allow-empty -m "test install.sh"
+}
+gitc() { git -C "$CLONE" -c user.name=t -c user.email=t@example.com "$@"; }
+rev() { git -C "$CLONE" rev-parse --short=12 HEAD; }
+
+_install_clone() {
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+    AIRLOCK_ENGINE="$ENGINE" CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
+    bash "$CLONE/bin/install.sh" </dev/null 2>"$BATS_TEST_TMPDIR/install.err" >/dev/null || true
+}
+
+@test "install exports the commit under ~/.local/share and links the launcher through current" {
+  mkclone
+  _install_clone
+  r="$(rev)"
+  [ "$(readlink "$(IROOT)/current")" = "versions/$r" ]
+  [ -x "$(IROOT)/versions/$r/bin/claude-airlock" ]
+  [ "$(readlink "$AIRLOCK_HOME/.local/bin/claude-airlock")" = "$(IROOT)/current/bin/claude-airlock" ]
+  grep -qx "commit $r" "$(IROOT)/versions/$r/VERSION"
+  [ ! -e "$(IROOT)/versions/$r/.git" ]
+  ! readlink -f "$AIRLOCK_HOME/.local/bin/claude-airlock" | grep -q "^$CLONE" || false
+}
+
+@test "images are built from the installed copy, not the checkout" {
+  mkclone
+  _install_clone
+  engine_args | grep -qx -- "$(IROOT)/current/image"
+  engine_args | grep -qx -- "$(IROOT)/current/image/dev"
+  ! engine_args | grep -q -- "$CLONE/image" || false
+}
+
+@test "uncommitted edits in the checkout are not installed, and install says so" {
+  mkclone
+  printf '# local edit\n' >> "$CLONE/README.md"
+  _install_clone
+  refute grep -q '# local edit' "$(IROOT)/versions/$(rev)/README.md"
+  grep -q 'uncommitted changes' "$BATS_TEST_TMPDIR/install.err"
+}
+
+@test "a new commit installs beside the old one and current moves to it" {
+  mkclone
+  _install_clone; first="$(rev)"
+  gitc commit -q --allow-empty -m next
+  _install_clone; second="$(rev)"
+  [ "$first" != "$second" ]
+  [ -d "$(IROOT)/versions/$first" ]
+  [ "$(readlink "$(IROOT)/current")" = "versions/$second" ]
+}
+
+@test "reinstalling the same commit is idempotent" {
+  mkclone
+  _install_clone
+  printf 'marker\n' > "$(IROOT)/versions/$(rev)/.marker"
+  _install_clone
+  [ -f "$(IROOT)/versions/$(rev)/.marker" ]
+  [ "$(find "$(IROOT)/versions" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]
+}
+
+@test "old versions are pruned to the current one plus the two newest others" {
+  mkclone
+  for i in 1 2 3 4 5; do
+    gitc commit -q --allow-empty -m "c$i"
+    _install_clone
+    sleep 1
+  done
+  [ "$(find "$(IROOT)/versions" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 3 ]
+  [ -d "$(IROOT)/versions/$(rev)" ]
+}
+
+@test "the containment check and the printed source line use the installed copy" {
+  # Both run after the build, past the point the stubbed engine lets install.sh reach.
+  grep -q '"$SRC_DIR/scripts/airlock-doctor.sh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
+  grep -q 'source "$SRC_DIR/shell/claude-airlock.zsh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
+  ! grep -q '"$REPO_DIR/scripts\|"$REPO_DIR/shell\|"$REPO_DIR/image\|"$REPO_DIR/bin' "$BATS_TEST_DIRNAME/../bin/install.sh" || false
+}
