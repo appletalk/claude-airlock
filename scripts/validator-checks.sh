@@ -137,6 +137,9 @@ expect_fail "ImageMagick rejects a non-image"  magick_to_png image/not-an-image.
 # Pillow's absence is an ImportError (exit 1), not 127, so expect_fail's guard cannot
 # see it -- assert the module is importable explicitly.
 expect_ok   "Pillow is importable"             python3 -c 'import PIL'
+expect_ok   "cryptography is importable"       python3 -c 'import cryptography'
+expect_ok   "requests is importable"           python3 -c 'import requests'
+expect_ok   "openpyxl is importable"           python3 -c 'import openpyxl'
 expect_ok   "Pillow produces a real PNG"       pil_to_png image/sample.bmp out-pil.png
 expect_fail "Pillow rejects a non-image"       pil_open image/not-an-image.bmp
 
