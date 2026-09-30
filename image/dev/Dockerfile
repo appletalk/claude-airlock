@@ -19,7 +19,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # python3-yaml + yamllint are the DISTRO packages (not pip), so they need no PyPI
 # egress and match the system python — they cover the near-universal "parse/lint
 # YAML" need (pre-commit hooks, config/registry scripts) that would otherwise force
-# a project to open PyPI just to `import yaml`. This is for ubiquitous system-level
+# a project to open PyPI just to `import yaml`. cryptography, requests and openpyxl
+# are here for the same reason: ad-hoc scripts reach for them constantly, and a box
+# with minimal egress cannot pip install them. This is for ubiquitous system-level
 # tooling only; project-specific deps still go in the project's own venv (which,
 # being isolated, won't see these unless it needs `airlock egress pypi`).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,6 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python-is-python3 \
       python3-yaml \
       yamllint \
+      python3-cryptography \
+      python3-requests \
+      python3-openpyxl \
       build-essential \
       pkg-config \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
