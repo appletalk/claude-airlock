@@ -45,7 +45,7 @@ launched() { engine_args | grep -q '^ENGINE_INVOKED='; }
   [[ "$output" == *"as"*"you (uid"* ]]
   _launch "$p" >/dev/null 2>&1 || true
   mounted "$SD/p.sock"
-  ! engine_args | grep -q -- "$SD/p.sock:$SD/p.sock:rw"
+  ! engine_args | grep -q -- "$SD/p.sock:$SD/p.sock:rw" || false
 }
 
 @test "list shows it; rm removes it and the next launch drops only that one" {
@@ -60,7 +60,7 @@ launched() { engine_args | grep -q '^ENGINE_INVOKED='; }
   _launch "$p" >/dev/null 2>&1 || true
   launched
   mounted "$SD/q.sock"
-  ! mounted "$SD/p.sock"
+  refute mounted "$SD/p.sock"
 }
 
 @test "refuses sockets owned by you or by root, whatever their path" {
@@ -216,7 +216,7 @@ b.sock"
   run _launch "$p"
   [[ "$output" == *"NOT mounting socket"* ]]
   launched
-  ! mounted "$SD/p.sock"
+  refute mounted "$SD/p.sock"
   mounted "$SD/q.sock"
 }
 
@@ -226,7 +226,7 @@ b.sock"
   chmod 777 "$SD"
   run _launch "$p"
   [[ "$output" == *"NOT mounting socket"* ]]
-  ! mounted "$SD/p.sock"
+  refute mounted "$SD/p.sock"
 }
 
 @test "a socket swapped between assembly and engine start aborts the launch" {
@@ -244,7 +244,7 @@ STUB
   run _launch "$p"
   [ "$status" -ne 0 ]
   [[ "$output" == *"changed after it was checked"* ]]
-  ! launched
+  refute launched
 }
 
 @test "a socket changed in place (same inode, new ctime) between assembly and engine start aborts" {
@@ -258,7 +258,7 @@ STUB
   run _launch "$p"
   [ "$status" -ne 0 ]
   [[ "$output" == *"changed after it was checked"* ]]
-  ! launched
+  refute launched
 }
 
 @test "a directory made writable between assembly and engine start aborts the launch" {
@@ -270,7 +270,7 @@ STUB
   run _launch "$p"
   [ "$status" -ne 0 ]
   [[ "$output" == *"changed after it was checked"* ]]
-  ! launched
+  refute launched
 }
 
 @test "a project .airlock/config cannot request a socket" {
@@ -281,5 +281,5 @@ STUB
   _launch "$p" >/dev/null 2>&1 || true
   launched
   mounted "$SD/q.sock"
-  ! mounted "$SD/p.sock"
+  refute mounted "$SD/p.sock"
 }

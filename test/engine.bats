@@ -90,7 +90,7 @@ setup() { setup_airlock_env; }
 @test "docker gets no --dns by default (keeps its own list; the firewall filters it)" {
   p="$(mkproj engdnsdocker)"
   AIRLOCK_ENGINE_OVERRIDE=docker _launch "$p" >/dev/null 2>&1 || true
-  ! engine_args | grep -q -- '^--dns='
+  ! engine_args | grep -q -- '^--dns=' || false
 }
 
 @test "AIRLOCK_DNS overrides the resolver under BOTH engines" {
