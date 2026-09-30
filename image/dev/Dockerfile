@@ -21,7 +21,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # YAML" need (pre-commit hooks, config/registry scripts) that would otherwise force
 # a project to open PyPI just to `import yaml`. cryptography, requests and openpyxl
 # are here for the same reason: ad-hoc scripts reach for them constantly, and a box
-# with minimal egress cannot pip install them. This is for ubiquitous system-level
+# with minimal egress cannot pip install them (an ad-hoc venv sees them with
+# `python3 -m venv --system-site-packages`). This is for ubiquitous system-level
 # tooling only; project-specific deps still go in the project's own venv (which,
 # being isolated, won't see these unless it needs `airlock egress pypi`).
 RUN apt-get update && apt-get install -y --no-install-recommends \

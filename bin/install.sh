@@ -337,6 +337,14 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DI
   exit 1
 fi
 
+echo "==> Checking the dev image's tools work offline (image smoke)"
+if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:dev "$SRC_DIR/scripts/image-smoke.sh"; then
+  echo
+  echo "claude-airlock: commit $REV is now live, but its dev image FAILED the smoke test above." >&2
+  echo "  Boxes still start; a tool listed as FAIL will not work inside them." >&2
+  exit 1
+fi
+
 cat <<EOF
 
 ==> Almost done. Add this line to your ~/.zshrc (or ~/.zshrc.local), then reload:

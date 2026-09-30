@@ -137,11 +137,16 @@ expect_fail "ImageMagick rejects a non-image"  magick_to_png image/not-an-image.
 # Pillow's absence is an ImportError (exit 1), not 127, so expect_fail's guard cannot
 # see it -- assert the module is importable explicitly.
 expect_ok   "Pillow is importable"             python3 -c 'import PIL'
-expect_ok   "cryptography is importable"       python3 -c 'import cryptography'
-expect_ok   "requests is importable"           python3 -c 'import requests'
-expect_ok   "openpyxl is importable"           python3 -c 'import openpyxl'
 expect_ok   "Pillow produces a real PNG"       pil_to_png image/sample.bmp out-pil.png
 expect_fail "Pillow rejects a non-image"       pil_open image/not-an-image.bmp
+
+# Distro Python modules baked in so ad-hoc scripts work with minimal egress. Each check
+# exercises the compiled part, not just the package wrapper: the cryptography OpenSSL
+# binding and openpyxl's lxml, which it loads lazily.
+hdr "distro python modules (no PyPI needed)"
+expect_ok   "cryptography binding loads"       python3 -c 'from cryptography.hazmat.primitives.asymmetric import rsa; rsa.generate_private_key(public_exponent=65537, key_size=2048)'
+expect_ok   "requests imports"                 python3 -c 'import requests'
+expect_ok   "openpyxl builds a workbook"       python3 -c 'import lxml.etree, openpyxl; openpyxl.Workbook()'
 
 # The scope claim in image/dev/Dockerfile cuts both ways: the network-dependent
 # commands must NOT quietly appear to work. The firewall DROPs (does not reject),
