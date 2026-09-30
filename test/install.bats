@@ -177,6 +177,7 @@ rev() { git -C "$CLONE" rev-parse --short=12 HEAD; }
 _install_clone() {
   env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
     AIRLOCK_ENGINE="$ENGINE" CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
+    ${STUB_MODE:+STUB_MODE="$STUB_MODE"} \
     bash "$CLONE/bin/install.sh" </dev/null 2>"$BATS_TEST_TMPDIR/install.err" >/dev/null || true
 }
 
@@ -307,6 +308,50 @@ STUB
   engine_args | grep -qx -- "claude-airlock:base-$second"     # base did build, under its own tag
   ! engine_args | grep -qx -- tag || false
   refute test -d "$(IROOT)/versions/$second"                 # never went live, so not kept
+}
+
+stub_modes() {
+  cat > "$STUBBIN/$ENGINE" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+if [ "${STUB_MODE:-}" = faildev ] && [ "${1:-}" = build ]; then
+  [[ "${*: -1}" == */image ]] && sleep 2
+  [[ "${*: -1}" == */image/dev ]] && exit 1
+fi
+exit 0
+STUB
+  chmod +x "$STUBBIN/$ENGINE"
+}
+
+@test "a failing install never deletes the version a concurrent install of that commit made live" {
+  mkclone
+  stub_modes
+  STUB_MODE=faildev _install_clone &
+  sleep 0.5
+  _install_clone
+  wait
+  live="$(readlink -f "$(IROOT)/current")"
+  [ -x "$live/bin/claude-airlock" ]
+  [ -x "$(readlink -f "$AIRLOCK_HOME/.local/bin/claude-airlock")" ]
+}
+
+@test "a failed build untags its per-commit images" {
+  mkclone
+  stub_modes
+  : > "$ENGINE_ARGS_FILE"
+  STUB_MODE=faildev _install_clone
+  engine_args | grep -qx -- rmi
+  engine_args | grep -qx -- "claude-airlock:base-$(rev)"
+  engine_args | awk '$0=="rmi"{f=1} f && $0 ~ /^claude-airlock:base-/{ok=1} END{exit !ok}'
+}
+
+@test "the rc warning ignores comments and XDG-style spellings of the install" {
+  mkclone
+  printf '%s\n' '# source ~/dev/claude-airlock/shell/claude-airlock.zsh' \
+    'source "${XDG_DATA_HOME:-$HOME/.local/share}/claude-airlock/current/shell/claude-airlock.zsh"' \
+    > "$AIRLOCK_HOME/.zshrc.local"
+  _install_clone
+  refute grep -q 'WARNING' "$BATS_TEST_TMPDIR/install.err"
 }
 
 @test "a checkout git cannot read is refused, not copied with its uncommitted edits" {

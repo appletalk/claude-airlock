@@ -50,11 +50,28 @@ case "$INSTALL_ROOT" in
 esac
 mkdir -p "$INSTALL_ROOT/versions"
 chmod go-w "$INSTALL_ROOT" "$INSTALL_ROOT/versions"
-_stage=""; _fresh=""; _live=""
-# On any exit before this version goes live: drop a half-made stage, and a version this
-# run exported (it never activated, so nothing uses it and it must not outrank older
-# live ones in the prune).
-trap '[ -n "$_stage" ] && rm -rf -- "$_stage"; [ -n "$_fresh" ] && [ -z "$_live" ] && rm -rf -- "$DEST"' EXIT
+# One install at a time: export, build, flip and prune all touch shared state.
+exec 9>"$INSTALL_ROOT/.lock"
+if ! flock -n 9; then
+  echo "==> Another install is running; waiting for it to finish"
+  flock 9
+fi
+_stage=""; _fresh=""; _live=""; DEST=""; REV=""
+_prev="$(readlink "$INSTALL_ROOT/current" 2>/dev/null || true)"
+# On any exit before this version goes live: drop a half-made stage, a version this run
+# exported (it never activated, so it must not outrank older live ones in the prune) and
+# its per-commit image tags. Never remove whatever `current` points at.
+_cleanup() {
+  [ -n "$_stage" ] && rm -rf -- "$_stage"
+  [ -n "$_live" ] && return 0
+  if [ -n "$_fresh" ] && [ "$(readlink "$INSTALL_ROOT/current" 2>/dev/null)" != "versions/$REV" ]; then
+    rm -rf -- "$DEST"
+  fi
+  if [ -n "$REV" ] && [ -n "${AIRLOCK_ENGINE:-}" ]; then
+    "$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
+  fi
+}
+trap _cleanup EXIT
 # Stage dirs left by a hard kill (the trap never ran).
 find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d -name '.stage.*' -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
 if [ "$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$REPO_DIR" && pwd -P)" ]; then
@@ -294,7 +311,8 @@ done
 for _rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.zshenv" "$HOME/.zprofile"; do
   [ -f "$_rc" ] || continue
   _old="$(grep -nE '(shell/claude-airlock\.zsh|bin/claude-airlock)' "$_rc" \
-    | grep -vF -e "$INSTALL_ROOT/current" -e '.local/share/claude-airlock/current' -e '.local/bin/claude-airlock' || true)"
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | grep -vF -e "$INSTALL_ROOT/current" -e 'claude-airlock/current/' -e '.local/bin/claude-airlock' || true)"
   if [ -n "$_old" ]; then
     echo "" >&2
     echo "claude-airlock: WARNING: $_rc runs the launcher from somewhere other than the install:" >&2
@@ -306,9 +324,12 @@ done
 echo "==> Verifying the host can actually contain a box (airlock doctor)"
 if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DIR/scripts/airlock-doctor.sh"; then
   echo
-  echo "claude-airlock: the install completed, but the host FAILED its containment check." >&2
-  echo "  Fix the items above before trusting the sandbox — see README (Setup, step 1:" >&2
-  echo "  'Rootless Podman prerequisites')." >&2
+  echo "claude-airlock: commit $REV is now live, but it FAILED the containment check." >&2
+  echo "  The cause may be the host (see README, Setup, step 1: 'Rootless Podman" >&2
+  echo "  prerequisites') or this version (its seccomp profile and image are what ran)." >&2
+  if [ -n "$_prev" ] && [ "$_prev" != "versions/$REV" ] && [ -d "$INSTALL_ROOT/$_prev" ]; then
+    echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install" >&2
+  fi
   exit 1
 fi
 
