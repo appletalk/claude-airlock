@@ -46,7 +46,10 @@ our risk assessment, is very welcome):
   your project can later be run or read by the *unsandboxed* host, and some run with no
   build step and no prompt: `.git/config` keys such as `core.fsmonitor` on a plain host
   `git status`, hooks in `.claude/settings.json` and servers in `.mcp.json` when you open
-  host `claude` there, plus git hooks, `.envrc` and build scripts. Shared memory is read
+  host `claude` there, plus git hooks, `.envrc` and build scripts. In this repo that
+  includes the gitignored `.tooling/` shellcheck/bats that `make check` and the
+  pre-commit hook fall back to when no system copy is installed: `make bootstrap`
+  re-verifies them, run with no box open on the checkout. Shared memory is read
   by the host agent every session. The firewall cannot see a file write, and there is no
   wrapper policing host `git` by design. Review a touched repo, including `.git/config`
   and `.claude/`, before host tooling runs in it; tighten memory with

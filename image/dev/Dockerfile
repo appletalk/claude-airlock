@@ -9,12 +9,22 @@
 # scope. Genuinely heavy, specialized stacks (Playwright browsers) still go in
 # opt-in images layered on top of THIS one.
 # install.sh builds each commit under its own tags and retags only when both builds succeed.
+#
+# Built FROM the base's `os` stage (everything but Claude Code), with the base's Claude
+# Code install copied in as the very last layer. A Claude Code release then rebuilds one
+# small layer here instead of every toolchain layer, and the dev image carries exactly
+# the binary the base image shipped (and doctor tested), not a second, separate install.
 ARG BASE_IMAGE=claude-airlock:base
-FROM ${BASE_IMAGE}
+ARG OS_IMAGE=claude-airlock:os
+FROM ${BASE_IMAGE} AS claude
+FROM ${OS_IMAGE}
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Every Debian package the dev image adds, in ONE layer (one index fetch, one snapshot of
+# the archive). What each group is for:
+#
 # Python + a C/C++ build toolchain (many pip packages compile native extensions).
 # python3-yaml + yamllint are the DISTRO packages (not pip), so they need no PyPI
 # egress and match the system python — they cover the near-universal "parse/lint
@@ -25,6 +35,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 # `python3 -m venv --system-site-packages`). This is for ubiquitous system-level
 # tooling only; project-specific deps still go in the project's own venv (which,
 # being isolated, won't see these unless it needs `airlock egress pypi`).
+#
+# ImageMagick and Pillow back `airlock paste`: WSLg offers BMP, the Claude API takes
+# PNG/JPEG/GIF/WebP, so without a converter a paste on that platform fails. They also
+# let an agent generate image fixtures and VERIFY what it produced (real format, real
+# dimensions) rather than trusting a file it just wrote.
+#
+# PostgreSQL (server + client) for projects with DB-backed tests. Present but NOT
+# running — it costs only disk until a project starts it on demand with
+# `airlock-pg-start` (localhost:5432). Postgres is the only DB in the stack, so it
+# lives in the dev base rather than a separate opt-in image.
+#
+# unzip: terraform, tflint, alloy and the PSScriptAnalyzer .nupkg ship as zips.
+# drill (ldnsutils) sits beside dnsutils' dig for hosts whose tooling standardizes on ldns.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 \
       python3-pip \
@@ -38,37 +61,50 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-openpyxl \
       build-essential \
       pkg-config \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Shell lint + test, and image conversion.
-#
-# shellcheck and bats are what this repo's OWN gates run (`make lint`, `make test`,
-# hooks/pre-commit). Without them in the image, developing claude-airlock from inside
-# a box means the pre-commit hook takes its lenient "tool not found — skipping" branch
-# and exits 0 having checked NOTHING — the same silent-no-op this image's validator
-# policy exists to prevent. apt is deliberate: CI installs both with apt too, so the
-# box and CI cannot drift onto different versions.
-#
-# ImageMagick and Pillow back `airlock paste`: WSLg offers BMP, the Claude API takes
-# PNG/JPEG/GIF/WebP, so without a converter a paste on that platform fails. They also
-# let an agent generate image fixtures and VERIFY what it produced (real format, real
-# dimensions) rather than trusting a file it just wrote.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      shellcheck \
-      bats \
       imagemagick \
       python3-pil \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# PostgreSQL (server + client) for projects with DB-backed tests. Present but
-# NOT running — it costs only disk until a project starts it on demand with
-# `airlock-pg-start` (localhost:5432). Postgres is the only DB in the stack, so
-# it lives in the dev base rather than a separate opt-in image.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      postgresql postgresql-client \
+      postgresql \
+      postgresql-client \
+      unzip \
+      ldnsutils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY airlock-pg-start /usr/local/bin/airlock-pg-start
 RUN chmod 0555 /usr/local/bin/airlock-pg-start
+
+# Shell lint + test: shellcheck and bats are what this repo's OWN gates run (`make lint`,
+# `make test`, hooks/pre-commit). Without them in the image, developing claude-airlock
+# from inside a box means the pre-commit hook takes its lenient "tool not found —
+# skipping" branch and exits 0 having checked NOTHING.
+#
+# Pinned, NOT apt: lint findings depend on the shellcheck version (0.11 added checks
+# 0.10 does not have), and Debian's, Ubuntu's and Arch's packages all differ, so an apt
+# install let the box, CI and a host disagree about whether the tree is clean. The same
+# versions are pinned in scripts/bootstrap-tools.sh, which is what CI and `make
+# bootstrap` use; test/install.bats fails if the two drift. shellcheck is a release
+# tarball checked by sha256; bats is a git checkout of the release tag verified against
+# its commit id (bats publishes no release artifact, and GitHub's generated tag archives
+# are not guaranteed byte-stable).
+ARG SHELLCHECK_VERSION=0.11.0
+ARG BATS_VERSION=1.14.0
+ARG BATS_COMMIT=eb7f42f8d608ac693d7a4b67474f6714ea68cfc5
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) scarch=x86_64;  sha=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;; \
+      arm64) scarch=aarch64; sha=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.${scarch}.tar.xz" -o /tmp/sc.txz; \
+    echo "${sha}  /tmp/sc.txz" | sha256sum -c -; \
+    tar -xJf /tmp/sc.txz -C /tmp --no-same-owner "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"; \
+    install -m 0555 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck; \
+    rm -rf /tmp/sc.txz "/tmp/shellcheck-v${SHELLCHECK_VERSION}"; \
+    git -c advice.detachedHead=false clone -q --depth 1 --branch "v${BATS_VERSION}" \
+      https://github.com/bats-core/bats-core.git /tmp/bats; \
+    test "$(git -C /tmp/bats rev-parse HEAD)" = "$BATS_COMMIT"; \
+    /tmp/bats/install.sh /usr/local >/dev/null; \
+    rm -rf /tmp/bats; \
+    shellcheck --version; bats --version
 
 # Node.js 24 from the official multi-distro binary tarball (nodejs.org), NOT apt
 # or NodeSource. This keeps the layer distro-agnostic: the exact same step ports
@@ -124,10 +160,6 @@ RUN set -eux; \
 # Downloads are pinned by version AND sha256 (per arch). Unlike the Node layer
 # above, which trusts TLS alone, these pins also detect an upstream re-tag: a
 # rebuild either produces the same validator or fails.
-
-# unzip: terraform and tflint ship zips, and nothing else in the image needs it.
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # promtool from the Prometheus release tarball. Only the promtool binary is
 # extracted; the prometheus server itself is ~half the tarball and we never run it.
@@ -267,16 +299,28 @@ ENV POWERSHELL_TELEMETRY_OPTOUT=1 \
 # fresh at every build, so a rebuild could pull a different tree - or a poisoned one -
 # without anything in the repo changing. To bump: edit the version in the .in line at
 # the top of that file's header, regenerate with pip-compile in a box, review the diff.
+#
+# Set BEFORE the install so the build-time `ansible-lint --version` runs the way every
+# box will: offline, with no PyPI version check.
+#
+# ansible-lint is exposed through a wrapper rather than a symlink: it expects its own
+# venv's bin dir on PATH (to find ansible-playbook and friends) and, when it is not,
+# prepends it itself with a "PATH altered ... broken local setup" WARNING on every run.
+# The wrapper puts the venv first for that one process only; putting /opt/ansible/bin on
+# the box's global PATH would also expose the venv's python, pip and yamllint.
+ENV ANSIBLE_LINT_NODEPS=1
 COPY ansible-requirements.txt /tmp/ansible-requirements.txt
 RUN set -eux; \
     python3 -m venv /opt/ansible; \
     /opt/ansible/bin/pip install --no-cache-dir --require-hashes -r /tmp/ansible-requirements.txt; \
     rm -f /tmp/ansible-requirements.txt; \
-    for b in ansible ansible-playbook ansible-galaxy ansible-doc ansible-lint; do \
+    for b in ansible ansible-playbook ansible-galaxy ansible-doc; do \
       ln -s "/opt/ansible/bin/$b" "/usr/local/bin/$b"; \
     done; \
+    printf '%s\n' '#!/bin/sh' 'PATH="/opt/ansible/bin:$PATH" exec /opt/ansible/bin/ansible-lint "$@"' \
+      > /usr/local/bin/ansible-lint; \
+    chmod 0555 /usr/local/bin/ansible-lint; \
     ansible-lint --version
-ENV ANSIBLE_LINT_NODEPS=1
 
 # ============================================================================
 # Infra clients - kubectl, helm, sops, tea, drill.
@@ -286,13 +330,8 @@ ENV ANSIBLE_LINT_NODEPS=1
 # host), and they ship with NO credentials. A kubeconfig, token or age key is a
 # host-side grant, never baked in. The offline halves still work at minimal egress:
 # `helm lint|template` on a local chart, `kubectl kustomize`, `sops filestatus`.
-# Pinned by version + sha256 per arch, same as the validators.
-#
-# drill (ldnsutils) sits beside dnsutils' dig for hosts whose tooling standardizes
-# on ldns.
-RUN apt-get update && apt-get install -y --no-install-recommends ldnsutils \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
+# Pinned by version + sha256 per arch, same as the validators. drill comes from the apt
+# layer at the top.
 ARG KUBECTL_VERSION=1.37.1
 ARG HELM_VERSION=4.3.0
 ARG SOPS_VERSION=3.13.3
@@ -328,5 +367,11 @@ RUN set -eux; \
 # sops checks GitHub for a newer release; blocked in a box, that is a stall per call.
 ENV SOPS_DISABLE_VERSION_CHECK=1
 
-# ENTRYPOINT / CMD / USID(root) / WORKDIR are all inherited from the base image:
-# the entrypoint still raises the firewall as root, then drops to the dev user.
+# Claude Code LAST: copied from the base image built alongside this one (see the top of
+# this file). Only ~/.local: the rest of the base's $HOME is installer residue that the
+# launcher's mounts (~/.claude, ~/.claude.json) cover at runtime anyway.
+COPY --from=claude --chown=dev:dev /home/dev/.local /home/dev/.local
+RUN gosu dev claude --version
+
+# ENTRYPOINT / CMD / USER(root) / WORKDIR / PATH are all inherited from the base's `os`
+# stage: the entrypoint still raises the firewall as root, then drops to the dev user.

@@ -314,6 +314,12 @@ stub_modes() {
   cat > "$STUBBIN/$ENGINE" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+  case "${*: -1}" in
+    claude-airlock:os-*)   echo "sha256:os " ;;
+    claude-airlock:base-*) echo "sha256:os sha256:claude " ;;
+  esac
+fi
 if [ "${STUB_MODE:-}" = faildev ] && [ "${1:-}" = build ]; then
   [[ "${*: -1}" == */image ]] && sleep 2
   [[ "${*: -1}" == */image/dev ]] && exit 1
@@ -414,4 +420,224 @@ STUB
   grep -q '"$SRC_DIR/scripts/airlock-doctor.sh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
   grep -q 'source "$INSTALL_ROOT/current/shell/claude-airlock.zsh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
   grep -q 'ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"' "$BATS_TEST_DIRNAME/../bin/install.sh"
+}
+
+# --- dev image layering: Claude Code last (a release must not rebuild the toolchain) ----
+
+@test "the dev image builds on the base's os stage and gets Claude Code from the base" {
+  mkclone
+  _install_clone
+  r="$(rev)"
+  engine_args | grep -qx -- "--target"
+  engine_args | grep -qx -- "claude-airlock:os-$r"
+  engine_args | grep -qx -- "OS_IMAGE=claude-airlock:os-$r"
+  engine_args | grep -qx -- "BASE_IMAGE=claude-airlock:base-$r"
+  engine_args | grep -qx -- "debian:trixie-slim"        # the pull strips `AS os`
+  engine_args | grep -qx -- "claude-airlock:os"         # :os moves with :base and :dev
+  df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  grep -qE '^FROM \$\{BASE_IMAGE\} AS claude$' "$df"
+  grep -qE '^FROM \$\{OS_IMAGE\}$' "$df"
+  grep -qE '^FROM debian:trixie-slim AS os$' "$BATS_TEST_DIRNAME/../image/Dockerfile"
+  # Nothing but the version check may follow the Claude Code copy: any RUN/COPY/ADD
+  # after it would be rebuilt by every Claude Code release.
+  copy="$(grep -n '^COPY --from=claude ' "$df" | cut -d: -f1)"
+  [ -n "$copy" ]
+  [ "$(awk -v c="$copy" 'NR > c && /^(RUN|COPY|ADD) /' "$df")" = "RUN gosu dev claude --version" ]
+}
+
+@test "a failed os build stops the install and untags all three per-commit images" {
+  mkclone
+  cat > "$STUBBIN/$ENGINE" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+[ "${1:-}" = build ] && [ "${2:-}" = --target ] && exit 1
+exit 0
+STUB
+  chmod +x "$STUBBIN/$ENGINE"
+  : > "$ENGINE_ARGS_FILE"
+  _install_clone
+  refute test -e "$(IROOT)/current"
+  refute grep -qx -- "$(IROOT)/versions/$(rev)/image/dev" "$ENGINE_ARGS_FILE"   # dev never built
+  engine_args | awk '$0=="rmi"{f=1} f && $0 ~ /^claude-airlock:os-/{ok=1} END{exit !ok}'
+}
+
+@test "an os image that is not the base's own os stage is refused before going live" {
+  mkclone
+  cat > "$STUBBIN/$ENGINE" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+  case "${*: -1}" in
+    claude-airlock:os-*)   echo "sha256:a sha256:x " ;;
+    claude-airlock:base-*) echo "sha256:a sha256:b sha256:c " ;;
+  esac
+fi
+exit 0
+STUB
+  chmod +x "$STUBBIN/$ENGINE"
+  _install_clone
+  grep -q "is not the base image's os stage" "$BATS_TEST_TMPDIR/install.err"
+  refute test -e "$(IROOT)/current"
+}
+
+@test "an os image with no layers listed is refused (the check must not skip itself)" {
+  mkclone
+  cat > "$STUBBIN/$ENGINE" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+exit 0
+STUB
+  chmod +x "$STUBBIN/$ENGINE"
+  _install_clone
+  grep -q "is not the base image's os stage" "$BATS_TEST_TMPDIR/install.err"
+  refute test -e "$(IROOT)/current"
+}
+
+@test "an os image whose layers start the base's passes the check" {
+  mkclone
+  cat > "$STUBBIN/$ENGINE" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+  case "${*: -1}" in
+    claude-airlock:os-*)   echo "sha256:a sha256:b " ;;
+    claude-airlock:base-*) echo "sha256:a sha256:b sha256:c " ;;
+  esac
+fi
+exit 0
+STUB
+  chmod +x "$STUBBIN/$ENGINE"
+  _install_clone
+  refute grep -q "is not the base image's os stage" "$BATS_TEST_TMPDIR/install.err"
+  [ -e "$(IROOT)/current" ]
+}
+
+@test "a failed build untags the per-commit os image too" {
+  mkclone
+  stub_modes
+  : > "$ENGINE_ARGS_FILE"
+  STUB_MODE=faildev _install_clone
+  engine_args | awk '$0=="rmi"{f=1} f && $0 ~ /^claude-airlock:os-/{ok=1} END{exit !ok}'
+}
+
+# --- shellcheck/bats: one pinned version for the image, CI and `make bootstrap` --------
+
+@test "the image and bootstrap pin the same shellcheck and bats" {
+  df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  bs="$BATS_TEST_DIRNAME/../scripts/bootstrap-tools.sh"
+  arg() { sed -n "s/^ARG $1=//p" "$df"; }
+  var() { sed -n "s/^$1=\"\\(.*\\)\"$/\\1/p" "$bs"; }
+  [ -n "$(arg SHELLCHECK_VERSION)" ] && [ "$(arg SHELLCHECK_VERSION)" = "$(var SC_VER)" ]
+  [ -n "$(arg BATS_VERSION)" ]       && [ "$(arg BATS_VERSION)" = "$(var BATS_VER)" ]
+  [ -n "$(arg BATS_COMMIT)" ]        && [ "$(arg BATS_COMMIT)" = "$(var BATS_COMMIT)" ]
+  grep -q "amd64) scarch=x86_64;  sha=$(var SC_SHA_X86_64) " "$df"
+  grep -q "arm64) scarch=aarch64; sha=$(var SC_SHA_AARCH64) " "$df"
+  # Neither comes from apt any more (that is how the versions drifted), in any layout.
+  apt_pkgs="$(awk '/apt-get install/{f=1} f{print} /apt-get clean/{f=0}' "$df")"
+  refute grep -qw shellcheck <<<"$apt_pkgs"
+  refute grep -qw bats <<<"$apt_pkgs"
+}
+
+@test "the pins are actually checked, in the image and in bootstrap" {
+  df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  bs="$BATS_TEST_DIRNAME/../scripts/bootstrap-tools.sh"
+  # image: the tarball against its sha256, the clone against the pinned commit
+  awk '/ARG SHELLCHECK_VERSION/{f=1} f&&/sha256sum -c -/{ok=1} f&&/shellcheck --version/{exit} END{exit !ok}' "$df"
+  grep -qF 'test "$(git -C /tmp/bats rev-parse HEAD)" = "$BATS_COMMIT"' "$df"
+  # ...and nothing on those lines can swallow a failure (the RUN is `set -e`). A guard
+  # against accidental edits, not a proof: the build itself is the behavioural test.
+  awk '/ARG SHELLCHECK_VERSION/{f=1} f&&/set -eux/{ok=1} f&&/shellcheck --version/{exit} END{exit !ok}' "$df"
+  [ "$(grep -E 'sha256sum -c -|= "\$BATS_COMMIT"' "$df" | grep -c '||')" -eq 0 ]
+  # bootstrap: tarball, extracted binary and any existing copy by sha256; bats by commit
+  grep -qF 'echo "$sc_sha  $tmp/sc.tar.xz" | sha256sum -c -' "$bs"
+  grep -qF 'echo "$sc_bin_sha  $tmp/shellcheck-v${SC_VER}/shellcheck" | sha256sum -c -' "$bs"
+  grep -qF 'echo "$sc_bin_sha  $BIN/shellcheck" | sha256sum -c -' "$bs"
+  grep -qF '[ "$(git -C "$TOOLDIR/bats-core" rev-parse HEAD)" != "$BATS_COMMIT" ]' "$bs"
+}
+
+@test "make and the hook prefer a system shellcheck/bats over the box-writable .tooling/" {
+  mk="$BATS_TEST_DIRNAME/../Makefile"
+  grep -qF 'SHELLCHECK ?= $(shell command -v shellcheck 2>/dev/null || echo .tooling/bin/shellcheck)' "$mk"
+  grep -qF 'BATS       ?= $(shell command -v bats 2>/dev/null || echo .tooling/bin/bats)' "$mk"
+  grep -qF 'shellcheck_bin="$(command -v shellcheck 2>/dev/null || echo .tooling/bin/shellcheck)"' \
+    "$BATS_TEST_DIRNAME/../hooks/pre-commit"
+}
+
+@test "CI lints and tests with the bootstrapped tools, not the runner's" {
+  ci="$BATS_TEST_DIRNAME/../.github/workflows/ci.yml"
+  [ "$(grep -c 'bash scripts/bootstrap-tools.sh' "$ci")" -ge 2 ]
+  grep -q 'make lint SHELLCHECK=\.tooling/bin/shellcheck' "$ci"
+  refute grep -q 'apt-get install -y shellcheck' "$ci"
+  refute grep -q 'apt-get install -y bats' "$ci"
+  grep -q '\.tooling/bin/bats test/' "$ci"
+}
+
+# --- closing instructions: only the steps that are not done yet -------------------------
+
+# The doctor and smoke test need a real engine; replaced in the clone so the install runs
+# to its closing message.
+_install_to_end() {
+  printf '#!/bin/sh\nexit 0\n' > "$CLONE/scripts/airlock-doctor.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$CLONE/scripts/image-smoke.sh"
+  gitc diff --quiet || gitc commit -qam "stub doctor + smoke"
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+    AIRLOCK_ENGINE="$ENGINE" CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
+    ${TOKEN_ENV:+CLAUDE_CODE_OAUTH_TOKEN="$TOKEN_ENV"} \
+    ${INSTALL_ROOT_ENV:+AIRLOCK_INSTALL_ROOT="$INSTALL_ROOT_ENV"} \
+    bash "$CLONE/bin/install.sh" </dev/null >"$BATS_TEST_TMPDIR/install.out" 2>"$BATS_TEST_TMPDIR/install.err"
+}
+
+@test "a fresh install prints both setup steps" {
+  mkclone
+  _install_to_end
+  grep -q 'Add this line to your ~/.zshrc' "$BATS_TEST_TMPDIR/install.out"
+  grep -q 'One-time auth' "$BATS_TEST_TMPDIR/install.out"
+}
+
+@test "steps already done are not printed again" {
+  mkclone
+  printf 'source "$HOME/.local/share/claude-airlock/current/shell/claude-airlock.zsh"\n' > "$AIRLOCK_HOME/.zshrc"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf 'x' > "$AIRLOCK_HOME/.config/claude-airlock/token"
+  _install_to_end
+  refute grep -q 'Add this line' "$BATS_TEST_TMPDIR/install.out"
+  refute grep -q 'One-time auth' "$BATS_TEST_TMPDIR/install.out"
+  grep -q 'already set up' "$BATS_TEST_TMPDIR/install.out"
+}
+
+@test "a commented-out source line, an empty token file, or a checkout path still prompt" {
+  mkclone
+  printf '# source "$HOME/.local/share/claude-airlock/current/shell/claude-airlock.zsh"\nsource "%s/shell/claude-airlock.zsh"\n' "$CLONE" > "$AIRLOCK_HOME/.zshrc"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  : > "$AIRLOCK_HOME/.config/claude-airlock/token"
+  _install_to_end
+  grep -q 'Add this line' "$BATS_TEST_TMPDIR/install.out"
+  grep -q 'One-time auth' "$BATS_TEST_TMPDIR/install.out"
+}
+
+@test "a token in CLAUDE_CODE_OAUTH_TOKEN counts as auth done" {
+  mkclone
+  TOKEN_ENV=x _install_to_end
+  refute grep -q 'One-time auth' "$BATS_TEST_TMPDIR/install.out"
+  grep -q 'Add this line' "$BATS_TEST_TMPDIR/install.out"
+}
+
+@test "a source line through a custom install root counts as done" {
+  mkclone
+  root="$AIRLOCK_HOME/opt/airlock"
+  printf 'source "%s/current/shell/claude-airlock.zsh"\n' "$root" > "$AIRLOCK_HOME/.zshrc"
+  INSTALL_ROOT_ENV="$root" _install_to_end
+  refute grep -q 'Add this line' "$BATS_TEST_TMPDIR/install.out"
+}
+
+@test "a whitespace-only token file or a directory at the token path still prompts" {
+  mkclone
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf ' \n\t\n' > "$AIRLOCK_HOME/.config/claude-airlock/token"
+  _install_to_end
+  grep -q 'One-time auth' "$BATS_TEST_TMPDIR/install.out"
+  rm "$AIRLOCK_HOME/.config/claude-airlock/token"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock/token/x"
+  _install_to_end
+  grep -q 'One-time auth' "$BATS_TEST_TMPDIR/install.out"
 }

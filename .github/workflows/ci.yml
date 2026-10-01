@@ -26,9 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - run: make lint
+      # The pinned, verified shellcheck the dev image uses, not the runner's apt (or
+      # preinstalled) one: lint findings depend on the version.
+      - name: Vendor pinned shellcheck + bats
+        run: bash scripts/bootstrap-tools.sh
+      # Explicit, because the Makefile prefers a system shellcheck and the runner image
+      # ships one.
+      - run: make lint SHELLCHECK=.tooling/bin/shellcheck
 
   unit:
     runs-on: ubuntu-latest
@@ -38,12 +42,12 @@ jobs:
         engine: [podman, docker]
     steps:
       - uses: actions/checkout@v7
-      - name: Install bats
-        run: sudo apt-get update && sudo apt-get install -y bats
+      - name: Vendor pinned shellcheck + bats
+        run: bash scripts/bootstrap-tools.sh
       # The engines are stubbed here, so neither needs to be installed — this exercises
       # the launcher's argv assembly, not a container.
       - name: bats (ENGINE=${{ matrix.engine }})
-        run: ENGINE=${{ matrix.engine }} bats test/
+        run: ENGINE=${{ matrix.engine }} .tooling/bin/bats test/
 
   containment:
     runs-on: ubuntu-latest
@@ -87,6 +91,17 @@ jobs:
       # containing nothing.
       - name: Live containment test (${{ matrix.engine }})
         run: AIRLOCK_ENGINE=${{ matrix.engine }} AIRLOCK_IMAGE=claude-airlock:base ./scripts/airlock-doctor.sh
+
+      # The dev image builds on the base's `os` stage and copies Claude Code from the base
+      # last (FROM <arg> AS <stage> + COPY --from). Built here on both engines so the
+      # Docker path of that layering is exercised, then smoke-tested at minimal egress.
+      - name: Build os stage + dev image
+        run: |
+          ${{ matrix.engine }} build --target os -t claude-airlock:os image
+          ${{ matrix.engine }} build -t claude-airlock:dev image/dev
+
+      - name: Dev image smoke test (${{ matrix.engine }})
+        run: AIRLOCK_ENGINE=${{ matrix.engine }} AIRLOCK_IMAGE=claude-airlock:dev ./scripts/image-smoke.sh
 
       # Belt and braces: assert the LAN-exposure regression stays dead. The firewall used
       # to derive a /24 from the container's default route and ACCEPT it — harmless under

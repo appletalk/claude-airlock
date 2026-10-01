@@ -3,7 +3,12 @@
 # Debian trixie-slim (current Debian stable) is the minimal base. Ubuntu / Arch
 # variants are a FROM + package-list swap away — the firewall, entrypoint, and
 # launcher are all OS-agnostic, so they carry over unchanged.
-FROM debian:trixie-slim
+#
+# Two stages. `os` is everything except Claude Code; the final stage adds Claude Code on
+# top. The dev image builds FROM `os` and copies this stage's Claude Code install in as
+# its LAST layer, so a Claude Code release (near daily) rebuilds one small layer of the
+# dev image instead of every toolchain layer above the base.
+FROM debian:trixie-slim AS os
 
 ARG TZ=UTC
 ENV TZ="$TZ"
@@ -80,6 +85,18 @@ COPY entrypoint.sh /usr/local/bin/airlock-entrypoint
 RUN chmod 0444 /etc/airlock/firewall.conf \
     && chmod 0555 /usr/local/bin/init-firewall.sh /usr/local/bin/airlock-entrypoint
 
+# On PATH before the installer runs (it warns when its target dir is not), and inherited
+# by the dev image, which copies the install into the same place.
+ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
+
+# Container starts as root so the entrypoint can raise the firewall, then drops
+# to the agent user before exec'ing Claude.
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/airlock-entrypoint"]
+CMD ["claude"]
+
+FROM os
+
 # Install Claude Code as the agent user (native, self-contained installer).
 #
 # CLAUDE_CODE_VERSION is both the installer target and this layer's ONLY cache
@@ -99,18 +116,11 @@ RUN chmod 0444 /etc/airlock/firewall.conf \
 # copy in the repo makes the build deterministic and turns an upstream change into a diff
 # you review when you choose to take it: `make claude-installer-diff` shows it. Upstream
 # sha256 of the vendored copy: 3a68d3406cf674e17bed1733a4dcf37805e2e47d87417700007d7e1aa766a944
+ARG USERNAME=dev
 ARG CLAUDE_CODE_VERSION=latest
 COPY --chown=${USERNAME}:${USERNAME} claude-install.sh /tmp/claude-install.sh
 USER ${USERNAME}
 RUN bash /tmp/claude-install.sh "${CLAUDE_CODE_VERSION}" \
     && rm -f /tmp/claude-install.sh \
-    && /home/${USERNAME}/.local/bin/claude --version
-ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
-
-# Container starts as root so the entrypoint can raise the firewall, then drops
-# to the agent user before exec'ing Claude.
+    && claude --version
 USER root
-ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
-WORKDIR /workspace
-ENTRYPOINT ["/usr/local/bin/airlock-entrypoint"]
-CMD ["claude"]
