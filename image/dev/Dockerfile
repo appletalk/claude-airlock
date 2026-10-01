@@ -131,12 +131,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends unzip \
 
 # promtool from the Prometheus release tarball. Only the promtool binary is
 # extracted; the prometheus server itself is ~half the tarball and we never run it.
-ARG PROMETHEUS_VERSION=3.14.0
+ARG PROMETHEUS_VERSION=3.15.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=amd64; sha=f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d ;; \
-      arm64) parch=arm64; sha=077f3781ab7245dc04c9a3c9b78ba120fc8e41aa0dc97489b0af67247e50ba83 ;; \
+      amd64) parch=amd64; sha=2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0 ;; \
+      arm64) parch=arm64; sha=f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     d="prometheus-${PROMETHEUS_VERSION}.linux-${parch}"; \
@@ -149,14 +149,14 @@ RUN set -eux; \
 
 # terraform: `fmt` only (see scope note above). tflint carries its terraform
 # ruleset inside the binary, so it lints with no plugin download.
-ARG TERRAFORM_VERSION=1.16.2
+ARG TERRAFORM_VERSION=1.16.4
 ARG TFLINT_VERSION=0.64.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) tfsha=0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a; \
+      amd64) tfsha=dc94af0eef1147718ad7c8daea792ed199e3e0492eec180d0adafa2a65a879df; \
              tlsha=cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537 ;; \
-      arm64) tfsha=c040bd1e3122b4290f70f74288d8c5a54ddd4254a3e52a29e7cc666653f50a0a; \
+      arm64) tfsha=8263f301cb1a24489a4adeed147bf28504053f77237b3ea97a0ef2972659de30; \
              tlsha=560da89aacf59389d4eb029730dd5b109b7288096c32f2726a0d9e783a5ea8eb ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
@@ -200,12 +200,12 @@ RUN set -eux; \
 # Note the size: this is a ~450MB binary (every component plus the embedded UI are
 # linked in, and Go binaries don't strip usefully). It is the single largest tool
 # in the image -- roughly promtool + terraform + vector combined.
-ARG ALLOY_VERSION=1.19.2
+ARG ALLOY_VERSION=1.20.1
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) sha=3694ea4e1044b367e1c21ffe28117f209c5989fa5e604d000321809f871ab701 ;; \
-      arm64) sha=fbeaf099b7c90b8b83dfa4781601c1181d8d06e89af34b846680c86ce08f725c ;; \
+      amd64) sha=451fe650e8277d22d69cb8db50bba809f581fe78decba7fce4027ef185457be9 ;; \
+      arm64) sha=396827d58158f181c98d5776c908348b38b4099f1d18a1e7554f2fda0fcb9203 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-${arch}.zip" -o /tmp/alloy.zip; \
@@ -293,18 +293,18 @@ ENV ANSIBLE_LINT_NODEPS=1
 RUN apt-get update && apt-get install -y --no-install-recommends ldnsutils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ARG KUBECTL_VERSION=1.37.0
+ARG KUBECTL_VERSION=1.37.1
 ARG HELM_VERSION=4.3.0
 ARG SOPS_VERSION=3.13.3
 ARG TEA_VERSION=0.16.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) kcsha=6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f; \
+      amd64) kcsha=65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8; \
              hmsha=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb; \
              spsha=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b; \
              tesha=9c142c8a0b31485eea2387031c1c404f12b7141075eb4ffbd7ced49441590636 ;; \
-      arm64) kcsha=922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3; \
+      arm64) kcsha=ff749f4b78d9c4f1ec87307df9b50119ed819e2094aa9810cb9acffc3286c8c7; \
              hmsha=31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08; \
              spsha=53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77; \
              tesha=0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879 ;; \
