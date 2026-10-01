@@ -114,10 +114,11 @@ expect_fail "a FAILING suite is reported as failed" bats bats/bad.bats
 hdr "image conversion (BMP -> PNG, for airlock paste)"
 # Asserting the OUTPUT's magic bytes, not just the exit status: a converter that
 # exits 0 having written garbage is the failure mode that matters here.
-# Invoked indirectly through expect_ok/expect_fail's "$@", which shellcheck cannot see.
-# pil_* return 127 when Pillow is absent so expect_fail's not-installed guard fires:
+# Invoked indirectly through expect_ok/expect_fail's "$@", which shellcheck cannot
+# see (SC2317 up to 0.10, SC2329 from 0.11). pil_* return 127 when Pillow is absent
+# so expect_fail's not-installed guard fires:
 # a bare ImportError is exit 1, indistinguishable from a correct rejection.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 {
 png_magic()     { [ "$(head -c4 "$1" | od -An -tx1 | tr -d ' \n')" = "89504e47" ]; }
 magick_to_png() { magick "$1" png:"$2" && png_magic "$2"; }
@@ -147,6 +148,42 @@ hdr "distro python modules (no PyPI needed)"
 expect_ok   "cryptography binding loads"       python3 -c 'from cryptography.hazmat.primitives.asymmetric import rsa; rsa.generate_private_key(public_exponent=65537, key_size=2048)'
 expect_ok   "requests imports"                 python3 -c 'import requests'
 expect_ok   "openpyxl builds a workbook"       python3 -c 'import lxml.etree, openpyxl; openpyxl.Workbook()'
+
+# The infra clients' offline halves (image/dev/Dockerfile, "Infra clients"). Each client
+# is otherwise only useful against an endpoint a project grants, so these are the parts
+# that must work at minimal egress - and, like the validators, must reject bad input.
+hdr "infra clients, offline halves (kubectl, helm, sops)"
+expect_ok   "kubectl kustomize builds a valid overlay"      kubectl kustomize kustomize/good
+expect_fail "kubectl kustomize rejects a missing resource"  kubectl kustomize kustomize/bad
+expect_ok   "helm lint accepts a valid chart"               helm lint helm/good
+expect_fail "helm lint rejects a broken template"           helm lint helm/bad
+expect_ok   "helm template renders a valid chart"           helm template helm/good
+expect_fail "helm template rejects a broken template"       helm template helm/bad
+# filestatus exits 0 for plaintext too; the verdict is in its JSON. Invoked through "$@".
+# shellcheck disable=SC2317,SC2329
+# 127 when sops is absent, so the negative check cannot pass for the wrong reason.
+sops_status() { command -v sops >/dev/null || return 127
+                [ "$(sops filestatus "$1")" = "{\"encrypted\":$2}" ]; }
+expect_ok   "sops filestatus reports an encrypted file"     sops_status sops/encrypted.yaml true
+expect_ok   "sops filestatus reports a plaintext file"      sops_status sops/plain.yaml false
+expect_fail "sops filestatus does not call plaintext encrypted" sops_status sops/plain.yaml true
+# No offline mode to exercise: these only prove the binaries are present and run.
+expect_ok   "tea runs"                                      tea --version
+expect_ok   "drill runs"                                    drill -v
+
+hdr "runtimes (node, pwsh)"
+expect_ok   "node runs a script"                            node node/good.js
+expect_fail "node --check rejects a syntax error"           node --check node/bad.js
+expect_ok   "npm runs"                                      npm --version
+expect_ok   "pwsh runs a script"                            pwsh -NoProfile -NonInteractive -File powershell/good.ps1
+expect_fail "pwsh rejects a parse error"                    pwsh -NoProfile -NonInteractive -File powershell/parse-error.ps1
+
+# airlock-pg-start is this repo's own script, so it gets a real round trip: start the
+# cluster over loopback (behind the raised firewall) and run a query through it.
+hdr "PostgreSQL (airlock-pg-start)"
+expect_ok   "airlock-pg-start brings a server up"           airlock-pg-start
+expect_ok   "psql runs a query over 127.0.0.1"              psql -h 127.0.0.1 -U postgres -tAc 'select 1'
+expect_fail "psql reports a failing query"                  psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -tAc 'select no_such_column'
 
 # The scope claim in image/dev/Dockerfile cuts both ways: the network-dependent
 # commands must NOT quietly appear to work. The firewall DROPs (does not reject),

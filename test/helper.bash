@@ -47,6 +47,14 @@ for _f in "\$HOME"/.config/claude-airlock/state/*/sessions/*; do
   [ -e "\$_f" ] && printf 'SESSION=%s/%s\n' "\$(basename "\$(dirname "\$(dirname "\$_f")")")" "\${_f##*/}" \
     >> "\${ENGINE_ARGS_FILE:-/dev/null}.sessions"
 done
+# install.sh's os/base consistency check: answer only that exact query, with an os image
+# whose layers start the base's (what a real build produces).
+if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ] && [[ "\$*" == *'{{range .RootFS.Layers}}'* ]]; then
+  case "\${*: -1}" in
+    claude-airlock:os-*)   echo "sha256:os " ;;
+    claude-airlock:base-*) echo "sha256:os sha256:claude " ;;
+  esac
+fi
 exit 0
 EOF
     chmod +x "$STUBBIN/$_e"

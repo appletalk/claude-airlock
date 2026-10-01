@@ -3,6 +3,11 @@
 # Prefers system-installed shellcheck/bats (e.g. `pacman -S shellcheck bats`,
 # `apt install shellcheck bats`); falls back to tools vendored by `make bootstrap`
 # into .tooling/ (no sudo, cross-distro).
+#
+# System first is deliberate: .tooling/ is gitignored and lives inside the project dir a
+# box mounts read-write, so a binary there is one a box could have replaced, invisibly to
+# `git status`, before the host's next `make check` or commit runs it. CI pins the
+# version instead by passing SHELLCHECK/BATS explicitly after bootstrapping.
 SHELL := /usr/bin/env bash
 
 SHELLCHECK ?= $(shell command -v shellcheck 2>/dev/null || echo .tooling/bin/shellcheck)

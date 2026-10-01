@@ -96,7 +96,9 @@ install tracks both:
 
 - **Claude Code.** The install resolves the current release and passes it as the base
   image's build arg, so a new release rebuilds that layer instead of silently reusing the
-  cached one. Pin or track a different channel with `CLAUDE_CODE_VERSION=stable make
+  cached one. The dev image builds on the base *minus* Claude Code and copies the base's
+  install in as its last layer, so a release replaces one small layer there rather than
+  rebuilding every toolchain. Pin or track a different channel with `CLAUDE_CODE_VERSION=stable make
   install` (or a specific `x.y.z`).
 - **Debian packages.** The build pulls the current `debian:trixie-slim` and keys the apt
   layer on the ISO week, so the first `make install` of a week refreshes every package
@@ -727,6 +729,9 @@ network.
 Layered, built by `make install`:
 
 - `claude-airlock:base` — Debian + Claude Code + git/gh + the egress firewall + core CLIs.
+- `claude-airlock:os` — the base without Claude Code (its `os` build stage). Not a box
+  image: `:dev` builds on it and copies Claude Code from `:base` as its last layer. To build
+  `:dev` by hand, build both first: `podman build --target os -t claude-airlock:os image`.
 - `claude-airlock:dev` *(default)* — base + Python, Node, PowerShell, build tools,
   PostgreSQL, yaml tooling, infra clients (kubectl, helm, sops, tea, drill; no
   credentials baked in), and the offline config validators below. Start Postgres
@@ -743,8 +748,11 @@ version + sha256 in `image/dev/Dockerfile`, and so is everything else the image
 downloads: Node by tarball checksum, the ansible-lint venv by a hash for every package
 (`image/dev/ansible-requirements.txt`), and Claude Code through a vendored copy of its
 installer (`image/claude-install.sh`, which itself checks the binary against the release
-manifest; `make claude-installer-diff` shows what upstream has changed). Only the Debian
-packages float, on the weekly refresh.
+manifest; `make claude-installer-diff` shows what upstream has changed). shellcheck and
+bats are pinned too (not apt), to the same versions `make bootstrap` vendors and CI runs,
+so lint results cannot differ between CI and a box (a host with its own system
+shellcheck uses that one: `.tooling/` sits in a directory boxes can write to). Only the Debian packages
+float, on the weekly refresh.
 
 | tool | what works offline |
 |---|---|
@@ -772,7 +780,9 @@ refreshes JSON schemas over the network, and since the firewall **drops** rather
 rejects, that stalls instead of failing. `POWERSHELL_UPDATECHECK=Off` +
 `POWERSHELL_TELEMETRY_OPTOUT=1` do the same job for pwsh's startup update check.
 
-`make image-smoke` proves the whole table: it runs each validator inside a real box at
+`make image-smoke` proves the whole table (and the offline halves of the infra clients:
+`kubectl kustomize`, `helm lint|template`, `sops filestatus`, plus node, pwsh and
+`airlock-pg-start`): it runs each validator inside a real box at
 minimal egress against a **known-bad** fixture and fails if the tool accepts it. Checking
 only that valid input passes would not catch a validator that has quietly stopped
 validating.
@@ -780,7 +790,7 @@ validating.
 ## Development
 
 ```sh
-make bootstrap   # vendor shellcheck + bats into .tooling/ (no sudo) — or install them
+make bootstrap   # vendor the pinned shellcheck (sha256) + bats (commit) into .tooling/; re-run to re-verify
 make hooks       # install the git pre-commit hook (runs lint + tests)
 make lint        # shellcheck the launcher + firewall scripts
 make test        # run the bats suite

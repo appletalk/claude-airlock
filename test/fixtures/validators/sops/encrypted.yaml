@@ -1,0 +1,11 @@
+# Shape-only fixture: sops metadata with a dummy recipient and no real key material.
+# Nothing can decrypt it; it exists so `sops filestatus` has an encrypted file to report.
+key: ENC[AES256_GCM,data:AA==,iv:AA==,tag:AA==,type:str]
+sops:
+    age:
+        - recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+          enc: |
+            not-a-real-stanza
+    mac: ENC[AES256_GCM,data:AA==,iv:AA==,tag:AA==,type:str]
+    lastmodified: "2026-01-01T00:00:00Z"
+    version: 3.13.3

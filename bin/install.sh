@@ -71,7 +71,7 @@ _cleanup() {
     rm -rf -- "$DEST"
   fi
   if [ -n "$REV" ] && [ -n "${AIRLOCK_ENGINE:-}" ]; then
-    "$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
+    "$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
   fi
 }
 trap _cleanup EXIT
@@ -225,7 +225,8 @@ fi
 # used is remembered in the config dir, and a later `make install` in the SAME week reuses
 # it: with the bare week key it would re-tag :base onto the cached, older week layer and
 # silently undo the refresh, with doctor reporting the week as if nothing had happened.
-BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}//p' "$SRC_DIR/image/Dockerfile" | head -1)"
+# The image of the first FROM, without its `AS <stage>` suffix.
+BASE_IMAGE="$(awk '$1 == "FROM" { print $2; exit }' "$SRC_DIR/image/Dockerfile")"
 REFRESH_STAMP="$CONFIG_DIR/apt-refresh"
 APT_WEEK="$(date +%G-W%V)"
 APT_REFRESH="${AIRLOCK_APT_REFRESH:-}"
@@ -278,9 +279,27 @@ echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_V
   --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
   --build-arg "APT_REFRESH=$APT_REFRESH" \
   -t "claude-airlock:base-$REV" "$SRC_DIR/image"
+# The base's `os` stage (everything but Claude Code) under its own tag: the dev image
+# builds on it and copies Claude Code from the base last. A cache hit - the build above
+# just produced every one of its layers.
+"$AIRLOCK_ENGINE" build --target os \
+  --build-arg "APT_REFRESH=$APT_REFRESH" \
+  -t "claude-airlock:os-$REV" "$SRC_DIR/image"
+# That cache hit is what makes dev's OS layers the ones the base (and doctor) has. A pull
+# of the Debian tag by a concurrent install, or cache eviction, would quietly break it,
+# so check it: the os image's layers must be exactly the base image's lowest layers.
+_layers() { "$AIRLOCK_ENGINE" image inspect --format '{{range .RootFS.Layers}}{{.}} {{end}}' "$1"; }
+_os_layers="$(_layers "claude-airlock:os-$REV")"
+_base_layers="$(_layers "claude-airlock:base-$REV")"
+if [ -z "$_os_layers" ] || [ "${_base_layers#"$_os_layers"}" = "$_base_layers" ]; then
+  echo "claude-airlock: the os image built for the dev image is not the base image's os stage" >&2
+  echo "  (another build moved its inputs in between?). Nothing went live; run make install again." >&2
+  exit 1
+fi
 echo "==> Building dev image (claude-airlock:dev) — Python, Node 24, build tools"
-echo "    (a new Claude Code version or package refresh moves the base, so this layer rebuilds too)"
+echo "    (a package refresh rebuilds it; a new Claude Code version only replaces its last layer)"
 "$AIRLOCK_ENGINE" build --build-arg "BASE_IMAGE=claude-airlock:base-$REV" \
+  --build-arg "OS_IMAGE=claude-airlock:os-$REV" \
   -t "claude-airlock:dev-$REV" "$SRC_DIR/image/dev"
 echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
 echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
@@ -290,8 +309,9 @@ echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/
 # each other), and the launcher link and every shell follow it. Touching DEST records
 # activation time, which the prune orders by.
 "$AIRLOCK_ENGINE" tag "claude-airlock:base-$REV" claude-airlock:base
+"$AIRLOCK_ENGINE" tag "claude-airlock:os-$REV" claude-airlock:os
 "$AIRLOCK_ENGINE" tag "claude-airlock:dev-$REV" claude-airlock:dev
-"$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
+"$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
 printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
 touch "$DEST"
 _cur_tmp="$INSTALL_ROOT/.current.$$"
@@ -349,8 +369,24 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:dev "$SRC_DIR
   exit 1
 fi
 
-cat <<EOF
+# The closing steps, minus the ones already done. Shell integration counts as done when an
+# rc file sources the zsh file through the install root (the same lines the rc warning
+# above accepts); auth when the launcher would find a token (CLAUDE_CODE_OAUTH_TOKEN in
+# this shell, or a token file with something other than whitespace, which the launcher
+# strips). grep -q only tests the file; the token is never printed or stored.
+_rc_done=""
+for _rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.zshenv" "$HOME/.zprofile"; do
+  [ -f "$_rc" ] || continue
+  if grep -vE '^[[:space:]]*#' "$_rc" | grep -E 'shell/claude-airlock\.zsh' \
+      | grep -qF -e "$INSTALL_ROOT/current" -e 'claude-airlock/current/'; then
+    _rc_done=1
+  fi
+done
+_token_file="${AIRLOCK_TOKEN_FILE:-$CONFIG_DIR/token}"
 
+echo
+if [ -z "$_rc_done" ]; then
+  cat <<EOF
 ==> Almost done. Add this line to your ~/.zshrc (or ~/.zshrc.local), then reload:
 
     source "$INSTALL_ROOT/current/shell/claude-airlock.zsh"
@@ -360,11 +396,25 @@ That gives you:
     claude    -> normal host Claude, warns if an airlock session is already open
     (command claude ... always bypasses the guard)
 
+EOF
+fi
+_token_done=""
+{ [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] \
+  || { [ -f "$_token_file" ] && grep -q '[^[:space:]]' "$_token_file" 2>/dev/null; }; } && _token_done=1
+if [ -z "$_token_done" ]; then
+  cat <<EOF
 ==> One-time auth: generate a long-lived (~1yr) token on the host and save it:
 
     command claude setup-token          # copy the printed sk-ant-oat... value
-    printf %s 'PASTE_TOKEN' > "$CONFIG_DIR/token" && chmod 600 "$CONFIG_DIR/token"
+    printf %s 'PASTE_TOKEN' > "$_token_file" && chmod 600 "$_token_file"
 
+EOF
+fi
+if [ -n "$_rc_done" ] && [ -n "$_token_done" ]; then
+  echo "==> Done. Shell integration and token are already set up; open a new shell to pick up this version."
+  echo
+fi
+cat <<EOF
 Then: cd into any project and run 'airlock'.
 
 Contributing? Install the git hook + test tools:  make hooks && make bootstrap
