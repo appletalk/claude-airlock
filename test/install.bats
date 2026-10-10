@@ -158,6 +158,13 @@ _stub_upstream_installer() {   # $1 = file to serve as https://claude.ai/install
 # tree. These run install.sh from a throwaway clone so the tests control its commits.
 
 IROOT() { printf '%s' "$AIRLOCK_HOME/.local/share/claude-airlock"; }
+# Push every installed version's mtime 10s into the past, keeping their order. The prune
+# orders by activation mtime; this stands in for "time passed" between installs, so the
+# next install's own touch is what makes its version the newest, without a sleep.
+_age_versions() {
+  local d
+  for d in "$(IROOT)"/versions/*/; do touch -r "$d" -d '-10 seconds' "$d"; done
+}
 
 mkclone() {
   # A git hook (the repo's pre-commit runs this suite) exports GIT_DIR, GIT_INDEX_FILE and
@@ -232,7 +239,7 @@ _install_clone() {
   mkclone
   revs=()
   for i in 1 2 3 4 5; do
-    gitc commit -q --allow-empty -m "c$i"; _install_clone; revs+=("$(rev)"); sleep 1
+    gitc commit -q --allow-empty -m "c$i"; _install_clone; revs+=("$(rev)"); _age_versions
   done
   [ "$(find "$(IROOT)/versions" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 3 ]
   for r in "${revs[2]}" "${revs[3]}" "${revs[4]}"; do [ -d "$(IROOT)/versions/$r" ]; done
@@ -242,10 +249,10 @@ _install_clone() {
 
 @test "a rollback counts as an activation: the prune does not drop the version just made live" {
   mkclone
-  gitc commit -q --allow-empty -m A; _install_clone; a="$(rev)"; sleep 1
-  gitc commit -q --allow-empty -m B; _install_clone; b="$(rev)"; sleep 1
-  gitc commit -q --allow-empty -m C; _install_clone; c="$(rev)"; sleep 1
-  gitc checkout -q "$a"; _install_clone; sleep 1              # roll back to A
+  gitc commit -q --allow-empty -m A; _install_clone; a="$(rev)"; _age_versions
+  gitc commit -q --allow-empty -m B; _install_clone; b="$(rev)"; _age_versions
+  gitc commit -q --allow-empty -m C; _install_clone; c="$(rev)"; _age_versions
+  gitc checkout -q "$a"; _install_clone; _age_versions        # roll back to A
   [ "$(readlink "$(IROOT)/current")" = "versions/$a" ]
   gitc checkout -q -; gitc commit -q --allow-empty -m D; _install_clone; d="$(rev)"
   [ -d "$(IROOT)/versions/$d" ]; [ -d "$(IROOT)/versions/$a" ]; [ -d "$(IROOT)/versions/$c" ]
@@ -320,8 +327,9 @@ if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
     claude-airlock:base-*) echo "sha256:os sha256:claude " ;;
   esac
 fi
-if [ "${STUB_MODE:-}" = faildev ] && [ "${1:-}" = build ]; then
-  [[ "${*: -1}" == */image ]] && sleep 2
+# faildev-slow: the base build also takes 2s, the window a concurrent install races in.
+if [[ "${STUB_MODE:-}" == faildev* ]] && [ "${1:-}" = build ]; then
+  [ "$STUB_MODE" = faildev-slow ] && [[ "${*: -1}" == */image ]] && sleep 2
   [[ "${*: -1}" == */image/dev ]] && exit 1
 fi
 exit 0
@@ -332,7 +340,7 @@ STUB
 @test "a failing install never deletes the version a concurrent install of that commit made live" {
   mkclone
   stub_modes
-  STUB_MODE=faildev _install_clone &
+  STUB_MODE=faildev-slow _install_clone &
   sleep 0.5
   _install_clone
   wait
