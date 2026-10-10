@@ -58,6 +58,10 @@ AIRLOCK_DNS="${AIRLOCK_DNS:-}"
 # environment value from one the config just set, which is how "env-only" silently
 # became a config knob.
 _AIRLOCK_TMP_BASE_ENV="${AIRLOCK_TMP_BASE:-}"
+# The doctor sources the config itself, on top of these; handing it the post-config
+# values would apply the config twice (an appending AIRLOCK_DNS doubles).
+_AIRLOCK_PODMAN_NETWORK_ENV="$AIRLOCK_PODMAN_NETWORK"
+_AIRLOCK_DNS_ENV="$AIRLOCK_DNS"
 
 CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
 # shellcheck disable=SC1090
@@ -1147,8 +1151,10 @@ if [ "${1:-}" = "doctor" ]; then
   if [ ! -x "$_ddoctor" ]; then
     echo "claude-airlock: doctor script not found at $_ddoctor" >&2; exit 1
   fi
-  AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE="$AIRLOCK_IMAGE" AIRLOCK_DNS="$AIRLOCK_DNS" \
-    AIRLOCK_PODMAN_NETWORK="$AIRLOCK_PODMAN_NETWORK" exec "$_ddoctor"
+  # The network keys as they were BEFORE the config: the doctor applies the config itself.
+  AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE="$AIRLOCK_IMAGE" \
+    AIRLOCK_PODMAN_NETWORK="$_AIRLOCK_PODMAN_NETWORK_ENV" AIRLOCK_DNS="$_AIRLOCK_DNS_ENV" \
+    exec "$_ddoctor"
 fi
 
 # --- Per-project config: <project>/.airlock/config -------------------------

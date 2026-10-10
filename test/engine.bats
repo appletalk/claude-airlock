@@ -148,6 +148,15 @@ _doctor() {
     bash "$BATS_TEST_DIRNAME/../scripts/airlock-doctor.sh" >/dev/null 2>&1 || true
 }
 
+# The same, keeping the doctor's output for `run`.
+_doctor_out() {
+  local e="$1"; shift
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+    ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE="$e" \
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" "$@" \
+    bash "$BATS_TEST_DIRNAME/../scripts/airlock-doctor.sh" 2>&1
+}
+
 @test "the doctor's box gets the same --network, --dns and AIRLOCK_HOST_DNS as a launched box" {
   printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
   for c in "podman pasta -" "podman pasta:--mtu,1400 -" "podman slirp4netns -" \
@@ -187,6 +196,82 @@ _doctor() {
     || { printf 'launcher:\n%s\ndoctor:\n%s\n' "$launched" "$(_doctor_net_dns)"; false; }
   engine_args | grep -qx 'claude-airlock:base'
   ! engine_args | grep -q 'config-image' || false
+}
+
+# The launcher sets every AIRLOCK_* default before it sources the config, so a config may
+# build on one. The doctor sets almost none, and must still get the same two values out.
+@test "the doctor reads a config that builds on the launcher's defaults" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf '%s\n' 'AIRLOCK_ARTIFACT_DIRS="$AIRLOCK_ARTIFACT_DIRS target"' \
+    'if [ "$AIRLOCK_ENGINE" = podman ]; then AIRLOCK_DNS="192.0.2.53"; fi' \
+    > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  p="$(mkproj engdoctorbuild)"
+  AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+    AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  launched="$(_doctor_net_dns)"
+  engine_args | grep -qx -- '--dns=192.0.2.53' || { echo "config not applied: $launched"; false; }
+  : > "$ENGINE_ARGS_FILE"
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+    ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+    bash "$BATS_TEST_DIRNAME/../scripts/airlock-doctor.sh" >/dev/null 2>&1 || true
+  [ "$(_doctor_net_dns)" = "$launched" ] \
+    || { printf 'launcher:\n%s\ndoctor:\n%s\n' "$launched" "$(_doctor_net_dns)"; false; }
+}
+
+# Through `airlock doctor`, the launcher has already sourced the config once; an
+# environment value it hands on must be the one from BEFORE that, or a config that
+# builds on it is applied twice. Leading space: the doctor must not trim what the
+# launcher passes as is.
+@test "airlock doctor applies the host config once, exactly as the launcher does" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf '%s\n' 'AIRLOCK_PODMAN_NETWORK="$AIRLOCK_PODMAN_NETWORK,--mtu,1400"' \
+    'AIRLOCK_DNS="$AIRLOCK_DNS 192.0.2.53"' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  for net in "pasta:--ipv4-only" " pasta"; do
+    p="$(mkproj "engdoctoronce-${net// /_}")"
+    : > "$ENGINE_ARGS_FILE"
+    AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS=198.51.100.1 \
+      AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+      AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+    launched="$(_doctor_net_dns)"
+    : > "$ENGINE_ARGS_FILE"
+    AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS=198.51.100.1 \
+      AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+      AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" doctor >/dev/null 2>&1 || true
+    [ -n "$launched" ] || { echo "'$net': launcher recorded nothing"; false; }
+    [ "$(_doctor_net_dns)" = "$launched" ] \
+      || { printf "'%s'\nlauncher:\n%s\ndoctor:\n%s\n" "$net" "$launched" "$(_doctor_net_dns)"; false; }
+  done
+}
+
+# A config that does not run to the end (an `exit`, say) must leave the defaults standing,
+# not blank them: an empty read is pasta with no AIRLOCK_DNS by accident, not by choice.
+@test "a config that stops early leaves the doctor's values as they were" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf '%s\n' 'AIRLOCK_PODMAN_NETWORK=bogus' 'exit 3' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  : > "$ENGINE_ARGS_FILE"
+  run env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+    ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE=podman AIRLOCK_DNS=192.0.2.9 \
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+    bash "$BATS_TEST_DIRNAME/../scripts/airlock-doctor.sh"
+  engine_args | grep -qx -- '--network=pasta:--map-guest-addr,none'
+  engine_args | grep -qx -- '--dns=192.0.2.9'
+  [[ "$output" == *"did not run to the end"* ]]
+}
+
+# A config's own EXIT trap fires when the doctor's subshell ends. It must not be able to
+# print after the sentinel and so turn a config that ran fine into "did not run".
+@test "a config with an EXIT trap that prints is still read by the doctor" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf '%s\n' 'trap "echo bye" EXIT' 'AIRLOCK_DNS=192.0.2.53' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  : > "$ENGINE_ARGS_FILE"
+  run _doctor_out podman
+  engine_args | grep -qx -- '--dns=192.0.2.53'
+  [[ "$output" != *"did not run to the end"* ]]
 }
 
 @test "an unknown engine is rejected and nothing is launched" {
