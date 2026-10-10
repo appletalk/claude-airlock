@@ -15,7 +15,7 @@ scripts=(
   bin/claude-airlock bin/install.sh
   image/init-firewall.sh image/entrypoint.sh
   config/airlock-statusline.sh
-  hooks/pre-commit scripts/bootstrap-tools.sh
+  hooks/pre-commit scripts/bootstrap-tools.sh scripts/run-tests.sh
 )
 
 rc=0
@@ -28,7 +28,7 @@ fi
 
 if command -v "$bats_bin" >/dev/null 2>&1; then
   echo "==> bats"
-  "$bats_bin" test/ || rc=1
+  BATS="$bats_bin" ENGINES=podman bash scripts/run-tests.sh || rc=1
 else
   echo "!! bats not found — skipping (run 'make bootstrap' or install it)" >&2
 fi

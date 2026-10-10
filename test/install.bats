@@ -577,7 +577,7 @@ STUB
   grep -q 'make lint SHELLCHECK=\.tooling/bin/shellcheck' "$ci"
   refute grep -q 'apt-get install -y shellcheck' "$ci"
   refute grep -q 'apt-get install -y bats' "$ci"
-  grep -q '\.tooling/bin/bats test/' "$ci"
+  grep -q 'BATS=\.tooling/bin/bats .*scripts/run-tests\.sh' "$ci"
 }
 
 # --- closing instructions: only the steps that are not done yet -------------------------

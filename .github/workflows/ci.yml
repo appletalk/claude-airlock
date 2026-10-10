@@ -47,7 +47,7 @@ jobs:
       # The engines are stubbed here, so neither needs to be installed — this exercises
       # the launcher's argv assembly, not a container.
       - name: bats (ENGINE=${{ matrix.engine }})
-        run: ENGINE=${{ matrix.engine }} .tooling/bin/bats test/
+        run: BATS=.tooling/bin/bats ENGINES=${{ matrix.engine }} bash scripts/run-tests.sh
 
   containment:
     runs-on: ubuntu-latest

@@ -19,7 +19,8 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh \
                  config/airlock-statusline.sh \
                  hooks/pre-commit scripts/bootstrap-tools.sh \
                  scripts/airlock-doctor.sh lib/host-dns.sh \
-                 scripts/image-smoke.sh scripts/validator-checks.sh
+                 scripts/image-smoke.sh scripts/validator-checks.sh \
+                 scripts/run-tests.sh
 
 .DEFAULT_GOAL := help
 
@@ -61,10 +62,8 @@ test: ## run the bats suite against BOTH engines (podman + docker)
 	  || { echo "bats not found — 'make bootstrap' or install it"; exit 1; }
 	@# Both engines are stubbed, so this needs neither installed. Run the whole suite
 	@# twice: whichever engine you stop using day to day is the one that silently rots.
-	@for e in podman docker; do \
-	  echo "==> bats (ENGINE=$$e)"; \
-	  ENGINE=$$e "$(BATS)" test/ || exit 1; \
-	done
+	@# Every (engine, file) pair runs in parallel (JOBS=n to limit); see the script.
+	@BATS="$(BATS)" bash scripts/run-tests.sh
 
 doctor: ## verify THIS host can actually contain a box (live containment test)
 	@bash scripts/airlock-doctor.sh
