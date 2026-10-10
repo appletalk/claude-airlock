@@ -380,7 +380,7 @@ EOF
   cat > "$STUBBIN/wl-copy" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-sleep 30 &          # the selection owner, holding whatever fds it inherited
+sleep 30 3>&- &    # the selection owner, holding whatever fds it inherited (bar bats' fd 3)
 exit 0
 EOF
   chmod +x "$STUBBIN/wl-copy"
