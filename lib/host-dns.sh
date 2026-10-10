@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 #
-# Which resolvers a box is told to use, and which the firewall may pin port 53 to.
-# Sourced by bin/claude-airlock and scripts/airlock-doctor.sh, so a doctor box is judged
-# by the same rule as a real one.
+# Which network and resolvers a box is given, and which the firewall may pin port 53 to.
+# Sourced by bin/claude-airlock and scripts/airlock-doctor.sh, so a doctor box gets the
+# same network, the same resolv.conf and the same pinning rule as a real one.
 #
 # The problem: when the host's only resolver is loopback (a local Unbound or dnsmasq on
 # 127.0.0.1/::1), a container cannot use it, so podman and docker both fall back to
@@ -18,6 +18,17 @@
 #     PUBLIC resolvers it may pin. Local ones (loopback, link-local, RFC1918, CGNAT, ULA)
 #     are engine forwarders or the host's own LAN and are always allowed; a public one
 #     the host is not configured with is an engine fallback, and is skipped.
+
+# The podman --network argument for PODMAN_NETWORK. Under pasta it also removes pasta's
+# 169.254.1.2 mapping to the host (why: bin/claude-airlock, engine args). Kept beside the
+# --dns forwarder choice below, which must agree with it.
+airlock_podman_network_arg() {  # PODMAN_NETWORK
+  case "$1" in
+    pasta)   echo "--network=pasta:--map-guest-addr,none" ;;
+    pasta:*) echo "--network=$1,--map-guest-addr,none" ;;
+    *)       echo "--network=$1" ;;
+  esac
+}
 
 # Resolvers to hand the engine as --dns, one per line. AIRLOCK_DNS (host config) wins on
 # either engine. Docker's default bridge has no forwarder, so it gets none and keeps its

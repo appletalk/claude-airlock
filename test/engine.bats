@@ -119,6 +119,62 @@ setup() { setup_airlock_env; }
   done
 }
 
+# The doctor's throwaway box must get the launcher's network and resolvers. Without
+# --dns, a loopback-only host resolver gets Google Public DNS appended to its
+# resolv.conf, so the doctor would be testing (and warning about) a box that never runs.
+_doctor_net_dns() { grep -E '^(--network=|--dns=|AIRLOCK_HOST_DNS=)' "$ENGINE_ARGS_FILE" | sort; }
+
+# Run the doctor for engine $1 hermetically, passing only the environment `make doctor`
+# and install.sh do (plus any VAR=value arguments).
+_doctor() {
+  local e="$1"; shift
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+    ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE="$e" \
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" "$@" \
+    bash "$BATS_TEST_DIRNAME/../scripts/airlock-doctor.sh" >/dev/null 2>&1 || true
+}
+
+@test "the doctor's box gets the same --network, --dns and AIRLOCK_HOST_DNS as a launched box" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  for c in "podman pasta -" "podman pasta:--mtu,1400 -" "podman slirp4netns -" \
+           "docker pasta -" "podman pasta 192.0.2.53 2001:db8::53" "docker pasta 192.0.2.53"; do
+    read -r e net dns <<< "$c"; [ "$dns" = - ] && dns=
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engdoctor-$e-${net%%:*}-${dns%% *}")"
+    AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns" \
+      AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+      AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
+    launched="$(_doctor_net_dns)"
+    : > "$ENGINE_ARGS_FILE"
+    _doctor "$e" AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns"
+    doctor="$(_doctor_net_dns)"
+    [ -n "$launched" ] || { echo "$c: launcher recorded nothing"; false; }
+    [ "$doctor" = "$launched" ] \
+      || { printf '%s\nlauncher:\n%s\ndoctor:\n%s\n' "$c" "$launched" "$doctor"; false; }
+  done
+}
+
+# `make doctor` and install.sh pass neither key, so the doctor must read them from the
+# host config itself, and must not let the config's AIRLOCK_IMAGE replace the image the
+# caller asked it to check.
+@test "the doctor takes the network and resolvers from the host config, and only those" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf '%s\n' 'AIRLOCK_PODMAN_NETWORK=slirp4netns' 'AIRLOCK_DNS="192.0.2.53 2001:db8::53"' \
+    'AIRLOCK_IMAGE=config-image:never' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  p="$(mkproj engdoctorcfg)"
+  AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+    AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  launched="$(_doctor_net_dns)"
+  engine_args | grep -qx -- '--network=slirp4netns' || { echo "config not applied: $launched"; false; }
+  : > "$ENGINE_ARGS_FILE"
+  _doctor podman AIRLOCK_IMAGE=claude-airlock:base
+  [ "$(_doctor_net_dns)" = "$launched" ] \
+    || { printf 'launcher:\n%s\ndoctor:\n%s\n' "$launched" "$(_doctor_net_dns)"; false; }
+  engine_args | grep -qx 'claude-airlock:base'
+  ! engine_args | grep -q 'config-image' || false
+}
+
 @test "an unknown engine is rejected and nothing is launched" {
   p="$(mkproj engbad)"
   run env AIRLOCK_ENGINE_OVERRIDE=containerd bash -c '_launch() { :; }; true'
