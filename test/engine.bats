@@ -59,6 +59,20 @@ setup() { setup_airlock_env; }
   engine_args | grep -qx -- '--dns=169.254.1.1'
 }
 
+# An empty value in the host config survives the launcher's default (the config is
+# sourced after it). As a bare --network= podman picks its own default, which keeps
+# pasta's 169.254.1.2 mapping to the host and gets no --dns, so the box gets Google
+# Public DNS as well. Empty must mean the default, in the launcher and the doctor alike.
+@test "an empty AIRLOCK_PODMAN_NETWORK in the host config still means pasta, mapping removed" {
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf 'AIRLOCK_PODMAN_NETWORK=\n' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  p="$(mkproj engnetempty)"
+  AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--network=pasta:--map-guest-addr,none' \
+    || { echo "got: $(engine_args | grep -- '^--network')"; false; }
+  engine_args | grep -qx -- '--dns=169.254.1.1'
+}
+
 @test "AIRLOCK_PODMAN_NETWORK overrides the podman network stack" {
   p="$(mkproj engnetov)"
   AIRLOCK_PODMAN_NETWORK=slirp4netns AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
