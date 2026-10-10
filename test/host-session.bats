@@ -354,7 +354,7 @@ EOF
       TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
       AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
       ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
-      bash "$AIRLOCK" ) < <(sleep 30) >/dev/null 2>&1 &
+      bash "$AIRLOCK" ) < <(exec 3>&-; exec sleep 30) >/dev/null 2>&1 &
   LPID=$!
   for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
   sleep 0.5
@@ -475,7 +475,7 @@ EOF
       TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
       AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
       ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
-      bash "$AIRLOCK" ) < <(sleep 30) >/dev/null 2>&1 &
+      bash "$AIRLOCK" ) < <(exec 3>&-; exec sleep 30) >/dev/null 2>&1 &
   LPID=$!
   set +m
   for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
@@ -513,7 +513,7 @@ EOF
       TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
       AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
       ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
-      bash "$AIRLOCK" ) < <(sleep 30) >/dev/null 2>&1 &
+      bash "$AIRLOCK" ) < <(exec 3>&-; exec sleep 30) >/dev/null 2>&1 &
   LPID=$!
   set +m
   for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
