@@ -21,9 +21,11 @@
 
 # The podman --network argument for PODMAN_NETWORK. Under pasta it also removes pasta's
 # 169.254.1.2 mapping to the host (why: bin/claude-airlock, engine args). Kept beside the
-# --dns forwarder choice below, which must agree with it.
+# --dns forwarder choice below, which must agree with it. Empty means pasta in both: an
+# `AIRLOCK_PODMAN_NETWORK=` in the host config outlives the launcher's default, and a bare
+# --network= is podman's own default, which keeps the mapping and gets no forwarder.
 airlock_podman_network_arg() {  # PODMAN_NETWORK
-  case "$1" in
+  case "${1:-pasta}" in
     pasta)   echo "--network=pasta:--map-guest-addr,none" ;;
     pasta:*) echo "--network=$1,--map-guest-addr,none" ;;
     *)       echo "--network=$1" ;;
@@ -40,7 +42,7 @@ airlock_dns_forwarders() {  # ENGINE PODMAN_NETWORK
     return 0
   fi
   [ "$1" = podman ] || return 0
-  case "${2:-}" in
+  case "${2:-pasta}" in
     pasta|pasta:*) echo 169.254.1.1 ;; # podman's default pasta --dns-forward address (options or not)
     slirp4netns) echo 10.0.2.3 ;;      # slirp4netns' built-in DNS forwarder
   esac
