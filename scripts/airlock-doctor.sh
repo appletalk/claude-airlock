@@ -11,6 +11,21 @@ set -uo pipefail
 
 ENGINE="${AIRLOCK_ENGINE:-podman}"
 IMAGE="${AIRLOCK_IMAGE:-claude-airlock:base}"
+# The two keys that shape the box's network, resolved as bin/claude-airlock does: the
+# default, then the host config on top. Read from the config here rather than trusted
+# from the caller, because `make doctor` and install.sh pass neither. Only these two:
+# the config's AIRLOCK_IMAGE must not replace the base image install.sh asks to check.
+PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
+AIRLOCK_DNS="${AIRLOCK_DNS:-}"
+CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
+if [ -f "$CONFIG_FILE" ]; then
+  { read -r PODMAN_NETWORK; read -r AIRLOCK_DNS; } < <(
+    AIRLOCK_PODMAN_NETWORK="$PODMAN_NETWORK"
+    # shellcheck disable=SC1090
+    { source "$CONFIG_FILE"; } >/dev/null 2>&1
+    printf '%s\n%s\n' "$AIRLOCK_PODMAN_NETWORK" "${AIRLOCK_DNS:-}"
+  )
+fi
 fail=0
 # shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/host-dns.sh"
@@ -124,8 +139,22 @@ fi
 # had just passed, and the true cause was an IPv6 egress leak the firewall had correctly
 # detected and reported. A diagnostic that hides the error and then guesses is worse than
 # no diagnostic: it sends you off fixing the wrong thing. Show the real message.
+#
+# The box gets the launcher's network and DNS arguments, not the engine defaults. With a
+# loopback-only host resolver, a box without --dns has Google Public DNS appended to its
+# resolv.conf, which a real box never sees: the doctor would be testing (and warning
+# about) a resolver setup that does not occur. Same helpers, so the same network and
+# resolv.conf; the rest of the box (userns, entrypoint) is not the launcher's.
 hdr "live containment test (throwaway box)"
+net_args=()
+if [ "$ENGINE" = podman ]; then
+  net_args+=( "$(airlock_podman_network_arg "$PODMAN_NETWORK")" )
+fi
+while IFS= read -r ns; do
+  if [ -n "$ns" ]; then net_args+=( "--dns=$ns" ); fi
+done < <(airlock_dns_forwarders "$ENGINE" "$PODMAN_NETWORK")
 if fw_out="$("$ENGINE" run --rm \
+  "${net_args[@]}" \
   --cap-drop=ALL \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \
   --security-opt=no-new-privileges \

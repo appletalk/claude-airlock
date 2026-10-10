@@ -1147,7 +1147,8 @@ if [ "${1:-}" = "doctor" ]; then
   if [ ! -x "$_ddoctor" ]; then
     echo "claude-airlock: doctor script not found at $_ddoctor" >&2; exit 1
   fi
-  AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE="$AIRLOCK_IMAGE" AIRLOCK_DNS="$AIRLOCK_DNS" exec "$_ddoctor"
+  AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE="$AIRLOCK_IMAGE" AIRLOCK_DNS="$AIRLOCK_DNS" \
+    AIRLOCK_PODMAN_NETWORK="$AIRLOCK_PODMAN_NETWORK" exec "$_ddoctor"
 fi
 
 # --- Per-project config: <project>/.airlock/config -------------------------
@@ -1809,6 +1810,10 @@ case "$AIRLOCK_PIDS_LIMIT" in
 esac
 [ -n "$AIRLOCK_MEMORY" ] && args+=( --memory "$AIRLOCK_MEMORY" )
 
+# The box's network and DNS arguments, shared with the doctor's box.
+# shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
+source "$_repo/lib/host-dns.sh"
+
 if [ "$AIRLOCK_ENGINE" = podman ]; then
   # Rootless podman puts the box in a user namespace. By DEFAULT it maps the host user
   # to container root, and container uid 1000 (`dev`) to a subuid — so every bind-mounted
@@ -1830,18 +1835,12 @@ if [ "$AIRLOCK_ENGINE" = podman ]; then
   # host.containers.internal, which nothing in airlock uses. podman already passes
   # --no-map-gw (the gateway address never reached the host) and forwards no ports.
   # slirp4netns needs nothing here: podman's allow_host_loopback defaults to false.
-  case "$AIRLOCK_PODMAN_NETWORK" in
-    pasta)   args+=( "--network=pasta:--map-guest-addr,none" ) ;;
-    pasta:*) args+=( "--network=$AIRLOCK_PODMAN_NETWORK,--map-guest-addr,none" ) ;;
-    *)       args+=( "--network=$AIRLOCK_PODMAN_NETWORK" ) ;;
-  esac
+  args+=( "$(airlock_podman_network_arg "$AIRLOCK_PODMAN_NETWORK")" )
 fi
 
 # DNS: point the box at the network stack's forwarder to the host resolver, and tell the
 # firewall which public resolvers the host actually chose. Without both, a loopback-only
 # host resolver makes the engine fall back to Google Public DNS (see lib/host-dns.sh).
-# shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
-source "$_repo/lib/host-dns.sh"
 while IFS= read -r _ns; do
   if [ -n "$_ns" ]; then args+=( "--dns=$_ns" ); fi
 done < <(airlock_dns_forwarders "$AIRLOCK_ENGINE" "$AIRLOCK_PODMAN_NETWORK")
