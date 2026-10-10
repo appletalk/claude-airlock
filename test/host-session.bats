@@ -186,8 +186,7 @@ EOF
 
 @test "a STALE owner does not lock every later session out" {
   proj="$(mkproj storestale)"
-  sleep 60 & dead=$!
-  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  dead="$(dead_pid)"
   mkdir -p "$(state_dir "$proj")/artifacts"
   printf '%s 999999\n' "$dead" > "$(state_dir "$proj")/artifacts/.venv.owner"
   _launch "$proj"
@@ -225,8 +224,7 @@ EOF
 
 @test "a legacy owner file whose pid is DEAD does not hold the store forever" {
   proj="$(mkproj storelegacydead)"
-  sleep 60 & dead=$!
-  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  dead="$(dead_pid)"
   mkdir -p "$(state_dir "$proj")/artifacts"
   # No start time to compare, so bare liveness is the ONLY thing standing between this
   # and a store that is read-only for every future session.
@@ -453,8 +451,7 @@ EOF
 
 @test "a dead peer does not trigger the warning" {
   proj="$(mkproj warndead)"
-  sleep 60 & dead=$!
-  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  dead="$(dead_pid)"
   _launch "$proj" session register "$dead" host
   run _launch "$proj"
   [ "$status" -eq 0 ]
@@ -636,8 +633,7 @@ EOF
 
 @test "a lock-only peer that is DEAD does not warn" {
   proj="$(mkproj lockonlydead)"
-  sleep 60 & dead=$!
-  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  dead="$(dead_pid)"
   mkdir -p "$(state_dir "$proj")"
   printf '%s host 0\n' "$dead" > "$(state_dir "$proj")/session.lock"
   run _launch "$proj"

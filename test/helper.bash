@@ -135,6 +135,12 @@ _launch_default_engine() {
 # Just the "active groups" value from `egress show` for project $1.
 active_groups() { _launch "$1" egress show | sed -n 's/^  active groups: //p'; }
 
+# A pid that existed and has exited, for "a session that died" fixtures. NOT
+# `sleep N & kill $!`: a signal that lands between fork and exec hits a subshell that has
+# bats' traps and survives it, the child then becomes `sleep N`, and the `wait` blocks
+# for N seconds (seen under a parallel run). A job that just exits has no such window.
+dead_pid() { local p; : & p=$!; wait "$p" 2>/dev/null || true; printf '%s' "$p"; }
+
 # The recorded engine argv (one token per line) from the last full launch.
 engine_args() { cat "$ENGINE_ARGS_FILE" 2>/dev/null; }
 

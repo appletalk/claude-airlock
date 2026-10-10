@@ -63,10 +63,7 @@ register_history_peer() {
 register_dead_peer() {
   local sdir dead; sdir="$(sessions_dir "$1")"
   mkdir -p "$sdir"
-  sleep 300 &
-  dead=$!
-  kill "$dead" 2>/dev/null
-  wait "$dead" 2>/dev/null || true
+  dead="$(dead_pid)"
   printf '999999 shell\n' > "$sdir/$dead"
   printf '%s' "$dead"
 }
@@ -212,8 +209,7 @@ EOF
   sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
   sleep 300 & PEER_PID=$!
   echo live > "$sdir/engine-env.$PEER_PID.$(proc_start "$PEER_PID")"
-  sleep 300 & dead=$!
-  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  dead="$(dead_pid)"
   echo stale > "$sdir/engine-env.$dead.999999"
   _launch "$proj"
   # A SIGKILLed session leaves a token file behind; a live one must keep its own.
@@ -257,8 +253,7 @@ EOF
 @test "a legacy env-file whose owner is gone is still swept" {
   proj="$(mkproj envlegacydead)"
   sdir="$(state_dir "$proj")"; mkdir -p "$sdir"
-  sleep 300 & dead=$!
-  kill "$dead" 2>/dev/null; wait "$dead" 2>/dev/null || true
+  dead="$(dead_pid)"
   echo 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-SECRET' > "$sdir/engine-env.$dead"
   _launch "$proj"
   [ ! -e "$sdir/engine-env.$dead" ]
