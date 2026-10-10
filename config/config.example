@@ -24,8 +24,9 @@
 # AIRLOCK_PODMAN_NETWORK=pasta
 
 # Resolver(s) for the box, space-separated. Empty = automatic: under podman the box uses
-# the network stack's forwarder to YOUR host resolver (pasta 169.254.1.1, slirp4netns
-# 10.0.2.3); under docker it keeps docker's list. Either way the firewall pins port 53
+# the network stack's forwarder to YOUR host resolver (pasta 169.254.1.1, or 169.254.0.1
+# on podman 5.0.1-5.2; slirp4netns 10.0.2.3), or podman's copy of your resolvers on a
+# podman too old for pasta's; under docker it keeps docker's list. Either way the firewall pins port 53
 # only to local resolvers and public ones this host is configured with, never an engine
 # fallback like 8.8.8.8. Set this if a box has no usable resolver, e.g. docker on a host
 # whose only resolver is loopback (127.0.0.1 / ::1), which docker cannot reach.

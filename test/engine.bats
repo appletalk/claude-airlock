@@ -73,6 +73,101 @@ setup() { setup_airlock_env; }
   engine_args | grep -qx -- '--dns=169.254.1.1'
 }
 
+# Ubuntu 24.04: podman 4.9.3 and passt 2024-02-20. That pasta rejects --map-guest-addr
+# (no box started at all) and has no host mapping to remove; that podman runs no DNS
+# forwarder (--dns=169.254.1.1 resolved nothing). Both measured on the runner.
+@test "a pasta without --map-guest-addr is not given it, and options are kept" {
+  for net in pasta "pasta:--mtu,1400"; do
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engoldpasta-${net//[:,]/_}")"
+    STUB_PASTA_OLD=1 AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_ENGINE_OVERRIDE=podman \
+      _launch "$p" >/dev/null 2>&1 || true
+    engine_args | grep -qx -- "--network=$net" || { echo "$net: got $(engine_args | grep -- '^--network')"; false; }
+  done
+}
+
+# Fail closed: the flag is dropped only when podman is local and the very pasta it runs
+# visibly lacks it. Anything that cannot be asked keeps the flag; if that pasta is too
+# old, podman refuses to start the box, loudly.
+@test "the flag stays unless the pasta podman runs can be asked and lacks it" {
+  check() {  # DESCRIPTION, then VAR=value settings for the stubs
+    local what="$1"; shift
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engkeep-${what// /_}")"
+    ( export "$@"; AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 ) || true
+    engine_args | grep -qx -- '--network=pasta:--map-guest-addr,none' \
+      || { echo "$what: got $(engine_args | grep -- '^--network')"; return 1; }
+  }
+  # Help on stderr with a non-zero exit, under the launcher's pipefail: still read.
+  check "help on stderr" STUB_PASTA_STDERR=1
+  check "remote podman" STUB_PASTA_OLD=1 STUB_PODMAN_REMOTE=true
+  check "no pasta reported" STUB_PASTA_OLD=1 STUB_PASTA_EXE=
+  check "pasta not here" STUB_PASTA_OLD=1 STUB_PASTA_EXE=/nonexistent/pasta
+  check "relative pasta" STUB_PASTA_OLD=1 STUB_PASTA_EXE=pasta
+  check "podman info fails" STUB_PASTA_OLD=1 STUB_PODMAN_INFO_FAIL=1
+  # A wrapped podman (toolbox, distrobox) reports the outer host's pasta; the binary at
+  # that path here is another one, so its answer is not podman's.
+  check "pasta version differs" STUB_PASTA_OLD=1 STUB_PODMAN_PASTA_VER="pasta 2024_02_20.1e6f92b"
+  check "pasta version unknown" STUB_PASTA_OLD=1 STUB_PODMAN_PASTA_VER=
+}
+
+# The pasta podman runs is the one asked - not the first `pasta` on PATH, which a
+# workspace could plant - and only for a pasta network.
+@test "pasta is asked only for a pasta network, at the path podman reports" {
+  p="$(mkproj engpastaask)"
+  AIRLOCK_PODMAN_NETWORK=slirp4netns AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  [ ! -s "$ENGINE_ARGS_FILE.pasta" ]
+  [ ! -e "$ENGINE_ARGS_FILE.probed" ]                  # nor podman info: ~0.4s for nothing
+  mkdir -p "$BATS_TEST_TMPDIR/helpers"
+  cp "$STUBBIN/pasta" "$BATS_TEST_TMPDIR/helpers/pasta"
+  printf '#!/bin/sh\necho "--map-guest-addr"; echo planted >> "%s"\n' "$BATS_TEST_TMPDIR/planted" > "$STUBBIN/pasta"
+  STUB_PASTA_OLD=1 STUB_PASTA_EXE="$BATS_TEST_TMPDIR/helpers/pasta" AIRLOCK_ENGINE_OVERRIDE=podman \
+    _launch "$p" >/dev/null 2>&1 || true
+  [ ! -e "$BATS_TEST_TMPDIR/planted" ]
+  engine_args | grep -qx -- '--network=pasta'
+}
+
+# containers/common's dnsForwardIpv4 at the version each podman release pins.
+@test "the pasta forwarder follows the podman version: none, 169.254.0.1, 169.254.1.1" {
+  for c in "4.9.3 -" "5.0.0 -" "5.0.1 169.254.0.1" "5.2.2 169.254.0.1" "5.3.0 169.254.1.1" \
+           "6.1.3 169.254.1.1" "garbage 169.254.1.1"; do
+    read -r v want <<< "$c"; [ "$want" = - ] && want=
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engfwd-$v")"
+    STUB_PODMAN_VERSION="$v" AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+    got="$(engine_args | sed -n 's/^--dns=//p' | tr '\n' ' ')"; got="${got% }"
+    [ "$got" = "$want" ] || { echo "podman $v: want '${want}' got '$got'"; false; }
+  done
+  : > "$ENGINE_ARGS_FILE"
+  STUB_PODMAN_INFO_FAIL=1 AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--dns=169.254.1.1'
+}
+
+# The cache is shell variables; one inherited from the host environment must not stand
+# in for the probe.
+@test "an inherited probe cache is ignored" {
+  p="$(mkproj engcache)"
+  ( cd "$p" && env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" TERM=xterm \
+      AIRLOCK_ENGINE=podman AIRLOCK_IMAGE=claude-airlock:dev AIRLOCK_SHARE_BASE="$SHARE_BASE" \
+      AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN=t ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
+      AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" _AIRLOCK_PODMAN_PROBED=1 _AIRLOCK_PODMAN_REMOTE=false \
+      _AIRLOCK_PASTA_EXE=/usr/bin/true _AIRLOCK_PODMAN_VER=4.0 _AIRLOCK_PASTA_VER=x \
+      bash "$AIRLOCK" </dev/null >/dev/null 2>&1 ) || true
+  engine_args | grep -qx -- '--network=pasta:--map-guest-addr,none'
+  engine_args | grep -qx -- '--dns=169.254.1.1'
+}
+
+@test "an old podman leaves slirp4netns and AIRLOCK_DNS as they were" {
+  p="$(mkproj engoldpodman)"
+  STUB_PODMAN_VERSION=4.9.3 AIRLOCK_PODMAN_NETWORK=slirp4netns AIRLOCK_ENGINE_OVERRIDE=podman \
+    _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--dns=10.0.2.3'
+  : > "$ENGINE_ARGS_FILE"
+  STUB_PODMAN_VERSION=4.9.3 AIRLOCK_DNS=192.0.2.53 AIRLOCK_ENGINE_OVERRIDE=podman \
+    _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--dns=192.0.2.53'
+}
+
 @test "AIRLOCK_PODMAN_NETWORK overrides the podman network stack" {
   p="$(mkproj engnetov)"
   AIRLOCK_PODMAN_NETWORK=slirp4netns AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
@@ -144,7 +239,9 @@ _doctor() {
   local e="$1"; shift
   env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
     ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE="$e" \
-    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" "$@" \
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+    ${STUB_PASTA_OLD:+STUB_PASTA_OLD="$STUB_PASTA_OLD"} \
+    ${STUB_PODMAN_VERSION:+STUB_PODMAN_VERSION="$STUB_PODMAN_VERSION"} "$@" \
     bash "$BATS_TEST_DIRNAME/../scripts/airlock-doctor.sh" >/dev/null 2>&1 || true
 }
 
@@ -160,16 +257,20 @@ _doctor_out() {
 @test "the doctor's box gets the same --network, --dns and AIRLOCK_HOST_DNS as a launched box" {
   printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
   for c in "podman pasta -" "podman pasta:--mtu,1400 -" "podman slirp4netns -" \
-           "docker pasta -" "podman pasta 192.0.2.53 2001:db8::53" "docker pasta 192.0.2.53"; do
+           "docker pasta -" "podman pasta 192.0.2.53 2001:db8::53" "docker pasta 192.0.2.53" \
+           "old podman pasta -" "old podman pasta:--mtu,1400 -"; do
+    old=; [[ "$c" == old\ * ]] && { old=1; c="${c#old }"; }
     read -r e net dns <<< "$c"; [ "$dns" = - ] && dns=
     : > "$ENGINE_ARGS_FILE"
-    p="$(mkproj "engdoctor-$e-${net%%:*}-${dns%% *}")"
-    AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns" \
+    p="$(mkproj "engdoctor-$e-${net%%:*}-${dns%% *}${old:+-old}")"
+    STUB_PASTA_OLD="$old" STUB_PODMAN_VERSION="${old:+4.9.3}" \
+      AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns" \
       AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
       AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
     launched="$(_doctor_net_dns)"
     : > "$ENGINE_ARGS_FILE"
-    _doctor "$e" AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns"
+    STUB_PASTA_OLD="$old" STUB_PODMAN_VERSION="${old:+4.9.3}" \
+      _doctor "$e" AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns"
     doctor="$(_doctor_net_dns)"
     [ -n "$launched" ] || { echo "$c: launcher recorded nothing"; false; }
     [ "$doctor" = "$launched" ] \

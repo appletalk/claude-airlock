@@ -40,7 +40,8 @@ die() { log "ERROR: $*"; exit 1; }
 # An address that IS this host, or the engine's stand-in for it, never goes into an
 # allow set: loopback (already open on lo, and a grant for it is meaningless), pasta's
 # 169.254.0.0/16 (169.254.1.2 was the host until the launcher removed the mapping;
-# 169.254.1.1 is the resolver, pinned on port 53 separately), slirp4netns' 10.0.2.0/24
+# 169.254.1.1 is the resolver, 169.254.0.1 on podman 5.0.1-5.2, pinned on port 53
+# separately), slirp4netns' 10.0.2.0/24
 # (10.0.2.2 host, 10.0.2.3 resolver), and any address on the box's own interfaces (under
 # pasta those are the host's). The launcher refuses such literals from the box-writable
 # config; this is the layer under it, and it also catches a NAME that resolves there,
@@ -217,7 +218,7 @@ done
 # box's resolv.conf as a fallback, and pinning that would let the box send plaintext
 # queries to a third party around the host resolver. So a public nameserver is pinned
 # only if the launcher lists it in AIRLOCK_HOST_DNS (the host's own resolvers); local
-# ones - loopback (docker's 127.0.0.11), link-local (pasta's 169.254.1.1), RFC1918
+# ones - loopback (docker's 127.0.0.11), link-local (pasta's 169.254.1.1/.0.1), RFC1918
 # (slirp4netns' 10.0.2.3, the LAN), CGNAT (tailscale), ULA - are always pinned.
 # AIRLOCK_HOST_DNS unset (not merely empty) means an older launcher or a direct
 # firewall run: keep the old pin-everything behaviour rather than break DNS.
