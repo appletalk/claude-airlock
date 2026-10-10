@@ -17,15 +17,6 @@ IMAGE="${AIRLOCK_IMAGE:-claude-airlock:base}"
 # the config's AIRLOCK_IMAGE must not replace the base image install.sh asks to check.
 PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
 AIRLOCK_DNS="${AIRLOCK_DNS:-}"
-CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
-if [ -f "$CONFIG_FILE" ]; then
-  { read -r PODMAN_NETWORK; read -r AIRLOCK_DNS; } < <(
-    AIRLOCK_PODMAN_NETWORK="$PODMAN_NETWORK"
-    # shellcheck disable=SC1090
-    { source "$CONFIG_FILE"; } >/dev/null 2>&1
-    printf '%s\n%s\n' "$AIRLOCK_PODMAN_NETWORK" "${AIRLOCK_DNS:-}"
-  )
-fi
 fail=0
 # shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/host-dns.sh"
@@ -34,6 +25,30 @@ ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=1; }
 warn() { printf '  \033[33mwarn\033[0m  %s\n' "$1"; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# Sourced in a subshell without -u. The launcher sets every AIRLOCK_* default before it
+# sources the config, so a config may build on one ("$AIRLOCK_ARTIFACT_DIRS target");
+# here almost none are set, and under -u that line would abort the subshell and blank
+# both values. AIRLOCK_ENGINE is the one a config is likely to test, so it is set to the
+# engine under test. The values are taken only if the config ran to the end (its own EXIT
+# trap cleared, so it cannot print after the sentinel), else the defaults stand. No IFS
+# trimming: the launcher passes " pasta" as is, and podman refuses it.
+CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
+if [ -f "$CONFIG_FILE" ]; then
+  _cfg="$(
+    set +u
+    AIRLOCK_PODMAN_NETWORK="$PODMAN_NETWORK" AIRLOCK_ENGINE="$ENGINE"
+    # shellcheck disable=SC1090
+    { source "$CONFIG_FILE"; } >/dev/null 2>&1
+    trap - EXIT
+    printf '%s\n%s\nend\n' "$AIRLOCK_PODMAN_NETWORK" "$AIRLOCK_DNS"
+  )"
+  if [ "${_cfg##*$'\n'}" = end ]; then
+    { IFS= read -r PODMAN_NETWORK; IFS= read -r AIRLOCK_DNS; } <<< "$_cfg"
+  else
+    warn "$CONFIG_FILE did not run to the end; testing the default network and resolvers"
+  fi
+fi
 
 hdr "engine"
 if ! command -v "$ENGINE" >/dev/null 2>&1; then
@@ -56,6 +71,7 @@ if [ "$ENGINE" = "podman" ]; then
     bad "podman is NOT rootless — the main reason to use it is lost"
   fi
 
+  USER="${USER:-$(id -un)}"   # unset under `env -i`, which the test suite uses
   if grep -q "^${USER}:" /etc/subuid 2>/dev/null && grep -q "^${USER}:" /etc/subgid 2>/dev/null; then
     ok "subuid/subgid ranges present for $USER"
   else
