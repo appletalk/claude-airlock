@@ -13,6 +13,10 @@ setup() {
   # The env-file dies with the launch, so the stub copies it while it exists.
   cat > "$STUBBIN/$ENGINE" <<'EOF'
 #!/usr/bin/env bash
+# lib/host-dns.sh's probe is answered, not recorded, as in helper.bash's stub.
+if [ "${1:-}" = info ] && [[ "$*" == *Host.Pasta.Executable* ]]; then
+  echo "6.1.3|false|$(command -v pasta)|pasta 2026_10_02.stub"; exit 0
+fi
 printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
 a=("$@")
 for ((i=0; i<${#a[@]}; i++)); do

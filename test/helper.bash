@@ -36,6 +36,15 @@ setup_airlock_env() {
   for _e in docker podman; do
     cat > "$STUBBIN/$_e" <<EOF
 #!/usr/bin/env bash
+# lib/host-dns.sh's probe (version | remote? | the pasta podman runs). Answered, not
+# recorded: it is a query, not part of any box's argv.
+if [ "\${1:-}" = info ] && [[ "\$*" == *Host.Pasta.Executable* ]]; then
+  [ -z "\${ENGINE_ARGS_FILE:-}" ] || : > "\$ENGINE_ARGS_FILE.probed"
+  [ -z "\${STUB_PODMAN_INFO_FAIL:-}" ] || exit 125
+  echo "\${STUB_PODMAN_VERSION:-6.1.3}|\${STUB_PODMAN_REMOTE:-false}|\${STUB_PASTA_EXE-$STUBBIN/pasta}|\${STUB_PODMAN_PASTA_VER-pasta 2026_10_02.stub}"
+  echo "Copyright Red Hat"
+  exit 0
+fi
 printf '%s\n' "\$@" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 printf '%s\n' "ENGINE_INVOKED=$_e" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 # Snapshot the session pidfiles that exist WHILE this session is live. Cleanup unlinks
@@ -59,6 +68,24 @@ exit 0
 EOF
     chmod +x "$STUBBIN/$_e"
   done
+
+  # Stub pasta, the one the podman stub's probe names: lib/host-dns.sh reads its --help
+  # to see whether it has --map-guest-addr, so the host's own pasta must not decide the
+  # argv. STUB_PASTA_OLD=1 is the pre-2024-08 pasta that lacks it (Ubuntu 24.04's);
+  # STUB_PASTA_STDERR=1 prints the help to stderr and exits 1. Each run is logged. The
+# podman stub reports this pasta's version line unless STUB_PODMAN_PASTA_VER says other.
+  cat > "$STUBBIN/pasta" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${ENGINE_ARGS_FILE:-/dev/null}.pasta"
+help="  --no-map-gw		Don't map gateway address to host"
+[ -n "${STUB_PASTA_OLD:-}" ] || help="$help
+  --map-guest-addr ADDR	Translate ADDR to refer to host"
+[ "${1:-}" = --version ] && { printf 'pasta 2026_10_02.stub\nCopyright Red Hat\n'; exit 0; }
+if [ -n "${STUB_PASTA_STDERR:-}" ]; then echo "$help" >&2; exit 1; fi
+echo "$help"
+exit 0
+EOF
+  chmod +x "$STUBBIN/pasta"
 
   # Stub pass: return a deterministic fake secret for any `pass show PATH`.
   cat > "$STUBBIN/pass" <<'EOF'
@@ -104,6 +131,13 @@ _launch() {
     ${AIRLOCK_PODMAN_NETWORK:+AIRLOCK_PODMAN_NETWORK="$AIRLOCK_PODMAN_NETWORK"} \
     ${AIRLOCK_DNS:+AIRLOCK_DNS="$AIRLOCK_DNS"} \
     ${AIRLOCK_HOST_RESOLV_FILES:+AIRLOCK_HOST_RESOLV_FILES="$AIRLOCK_HOST_RESOLV_FILES"} \
+    ${STUB_PASTA_OLD:+STUB_PASTA_OLD="$STUB_PASTA_OLD"} \
+    ${STUB_PASTA_STDERR:+STUB_PASTA_STDERR="$STUB_PASTA_STDERR"} \
+    ${STUB_PASTA_EXE+STUB_PASTA_EXE="$STUB_PASTA_EXE"} \
+    ${STUB_PODMAN_VERSION:+STUB_PODMAN_VERSION="$STUB_PODMAN_VERSION"} \
+    ${STUB_PODMAN_REMOTE:+STUB_PODMAN_REMOTE="$STUB_PODMAN_REMOTE"} \
+    ${STUB_PODMAN_INFO_FAIL:+STUB_PODMAN_INFO_FAIL="$STUB_PODMAN_INFO_FAIL"} \
+    ${STUB_PODMAN_PASTA_VER+STUB_PODMAN_PASTA_VER="$STUB_PODMAN_PASTA_VER"} \
     ${AIRLOCK_TMP_BASE:+AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE"} \
     ${AIRLOCK_SHARE_MEMORY:+AIRLOCK_SHARE_MEMORY="$AIRLOCK_SHARE_MEMORY"} \
     ${AIRLOCK_PERSIST_LOGIN:+AIRLOCK_PERSIST_LOGIN="$AIRLOCK_PERSIST_LOGIN"} \

@@ -164,7 +164,16 @@ fi
 hdr "live containment test (throwaway box)"
 net_args=()
 if [ "$ENGINE" = podman ]; then
+  case "$PODMAN_NETWORK" in pasta|pasta:*|'') airlock_podman_probe ;; esac
   net_args+=( "$(airlock_podman_network_arg "$PODMAN_NETWORK")" )
+  # Not failures: what an older pasta/podman box runs without, and why that is safe.
+  case "${PODMAN_NETWORK:-pasta}" in
+    pasta|pasta:*)
+      airlock_pasta_maps_guest_addr \
+        || warn "the pasta podman runs ($_AIRLOCK_PASTA_EXE) predates --map-guest-addr; such a pasta maps no address to the host (measured: Ubuntu 24.04's), so there is none to remove, and the firewall still blocks the host"
+      [ -n "${AIRLOCK_DNS:-}" ] || [ -n "$(airlock_podman_pasta_dns_forward)" ] \
+        || warn "podman $_AIRLOCK_PODMAN_VER runs no pasta DNS forwarder (that came in 5.0.1): the box uses podman's copy of the host's resolvers" ;;
+  esac
 fi
 while IFS= read -r ns; do
   if [ -n "$ns" ]; then net_args+=( "--dns=$ns" ); fi
