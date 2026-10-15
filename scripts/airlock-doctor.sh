@@ -174,6 +174,16 @@ fi
 # resolv.conf, which a real box never sees: the doctor would be testing (and warning
 # about) a resolver setup that does not occur. Same helpers, so the same network and
 # resolv.conf; the rest of the box (userns, entrypoint) is not the launcher's.
+# The launcher refuses a default posture it does not recognise (a typo of proxy must not
+# quietly mean a network), so every launch would fail: say so here.
+read -ra _ew <<< "$EGRESS_MODE"
+case "${_ew[0]:-}" in
+  ""|proxy) ;;
+  minimal|dev) [ "${#_ew[@]}" = 1 ] || bad "AIRLOCK_EGRESS_MODE='$EGRESS_MODE' is not a posture; every launch is refused" ;;
+  *) for _g in "${_ew[@]}"; do
+       case "$_g" in github|npm|pypi) ;; *) bad "AIRLOCK_EGRESS_MODE='$EGRESS_MODE' is not minimal, dev, proxy or a group list; every launch is refused"; break ;; esac
+     done ;;
+esac
 case "$EGRESS_MODE" in
   proxy|"proxy "*)
     hdr "egress proxy (the default posture here)"

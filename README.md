@@ -453,7 +453,9 @@ The guarantees:
   launch, as it does in every posture. To widen what a box can reach, widen the proxy's
   allowlist, or give the project a socket for a different listener.
 - **Secrets cannot steer it.** `airlock secret` refuses `AIRLOCK_*` and `*_PROXY` keys,
-  and a launch skips any already stored.
+  and a launch skips any already stored. That includes a corporate `HTTPS_PROXY` for a
+  networked project: set such a proxy in the host config's `AIRLOCK_EXTRA_EGRESS` and the
+  tool's own config instead, or use this posture with that proxy behind the socket.
 - **No firewall capabilities.** With no network to filter, the box drops `NET_ADMIN` and
   `NET_RAW` too.
 
