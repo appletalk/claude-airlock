@@ -28,6 +28,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # its packages are current as of that build, it just has no refresh schedule.
 ARG APT_REFRESH=unkeyed
 LABEL org.claude-airlock.apt-refresh="$APT_REFRESH"
+# socat (in the list below) bridges a loopback port to a host proxy's Unix socket: Claude
+# Code's HTTPS_PROXY must be an http:// URL, so a box with no network reaches the proxy
+# through it. It is a general relay, but curl and bash already give a box as much.
 RUN echo "apt refresh key: ${APT_REFRESH}" \
     && apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
@@ -47,6 +50,7 @@ RUN echo "apt refresh key: ${APT_REFRESH}" \
       less \
       vim \
       zsh \
+      socat \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Optional internal/corporate CA chain. Drop your org's CA certs (public certs
