@@ -272,6 +272,17 @@ _resolve_egress_groups() {
 # apply. Stored as "proxy <socket>"; a bare "proxy" (AIRLOCK_EGRESS_MODE=proxy in the host
 # config) takes AIRLOCK_EGRESS_PROXY.
 _egress_is_proxy() { local w; read -r w _ <<< "$1"; [ "$w" = proxy ]; }
+# True when $1 is a posture this launcher knows: empty, minimal, dev, proxy [SOCKET], or a
+# list of known groups. Anything else is refused rather than read as minimal: a typo in a
+# default meant to be 'proxy' must not quietly hand every box a network.
+_egress_posture_valid() {
+  local g
+  case "$1" in ""|minimal|dev) return 0 ;; esac
+  _egress_is_proxy "$1" && return 0
+  for g in $1; do
+    case " $AIRLOCK_EGRESS_ALL_GROUPS " in *" $g "*) ;; *) return 1 ;; esac
+  done
+}
 # The socket for posture $1, or nothing when it is not 'proxy' or names no socket.
 _egress_proxy_socket() {
   local w sock
@@ -488,6 +499,13 @@ if [ "${1:-}" = "shell" ]; then AIRLOCK_SHELL=1; shift; fi
 # launch. Values are literal or `pass:PATH` (resolved via `pass show` at launch,
 # so they stay encrypted at rest). The store lives in STATE_DIR, never mounted
 # into the box, so the sandbox can neither read it nor choose its own secrets.
+# Keys a secret may not set: the launcher's own AIRLOCK_* variables (AIRLOCK_EGRESS_PROXY
+# picks the entrypoint's no-firewall branch) and the proxy variables the proxy posture owns.
+_airlock_secret_reserved() {
+  case "$1" in AIRLOCK_*|*_PROXY|*_proxy) return 0 ;; esac
+  return 1
+}
+
 if [ "${1:-}" = "secret" ]; then
   _sslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
   _sstore="$HOME/.config/claude-airlock/state/$_sslug/secrets"
@@ -496,6 +514,9 @@ if [ "${1:-}" = "secret" ]; then
     set)
       _sk="${3:?usage: airlock secret set KEY VALUE|pass:PATH}"
       case "$_sk" in ''|*[!A-Za-z0-9_]*) echo "airlock: invalid key '$_sk' (A-Z 0-9 _ only)" >&2; exit 1 ;; esac
+      if _airlock_secret_reserved "$_sk"; then
+        echo "airlock: '$_sk' is reserved: AIRLOCK_* and *_PROXY variables are set by the launcher, never by a secret" >&2; exit 1
+      fi
       shift 3; _sv="$*"
       [ -n "$_sv" ] || { echo "airlock: no value given for $_sk" >&2; exit 1; }
       case "$_sv" in
@@ -824,7 +845,10 @@ if [ "${1:-}" = "egress" ]; then
   case "${2:-show}" in
     show|list)
       echo "egress for $_egname:"
-      if _egress_is_proxy "$_egmode"; then
+      if ! _egress_posture_valid "$_egmode"; then
+        echo "  posture: '$_egmode' is not minimal, dev, proxy or a group list; launches are REFUSED"
+        echo "  (fix AIRLOCK_EGRESS_MODE in $CONFIG_FILE, or set one: airlock egress minimal | dev | proxy SOCKET)"
+      elif _egress_is_proxy "$_egmode"; then
         _egp="$(_egress_proxy_socket "$_egmode")"
         echo "  posture: proxy"
         if [ -z "$_egp" ]; then
@@ -834,7 +858,11 @@ if [ "${1:-}" = "egress" ]; then
         else
           echo "  proxy socket: $_egp  (launches are REFUSED: $_egwhy)"
         fi
-        echo "  network: none; only the proxy is reachable, and its allowlist decides"
+        echo "  network: none; the proxy's allowlist decides what is reachable"
+        if [ -s "$_egdir/sockets" ] && grep -qvxF "$_egp" "$_egdir/sockets"; then
+          echo "  also reachable, outside the proxy (granted with 'airlock socket add'):"
+          grep -vxF "$_egp" "$_egdir/sockets" | sed 's/^/    /'
+        fi
         echo "  ignored while proxy is set: egress groups, host-approved 'egress =' domains (${_egapproved:-0})${AIRLOCK_EXTRA_EGRESS:+, AIRLOCK_EXTRA_EGRESS}"
       else
         _egnow="$(_resolve_egress_groups "$_egmode")"
@@ -1578,6 +1606,11 @@ AIRLOCK_EGRESS_GROUPS="$(_resolve_egress_groups "$EGRESS_MODE")"
 # Proxy posture: fail closed. A missing or refused socket stops the launch; falling back to
 # a network would hand the box the very route this posture exists to remove, silently.
 EGRESS_PROXY=""
+if ! _egress_posture_valid "$EGRESS_MODE"; then
+  echo "claude-airlock: egress posture '$EGRESS_MODE' is not minimal, dev, proxy or a group list; not launching." >&2
+  echo "  Fix AIRLOCK_EGRESS_MODE in $CONFIG_FILE, or set one: airlock egress minimal | dev | proxy SOCKET" >&2
+  exit 1
+fi
 if _egress_is_proxy "$EGRESS_MODE"; then
   EGRESS_PROXY="$(_egress_proxy_socket "$EGRESS_MODE")"
   if [ -z "$EGRESS_PROXY" ]; then
@@ -1585,6 +1618,9 @@ if _egress_is_proxy "$EGRESS_MODE"; then
     echo "  Run: airlock egress proxy SOCKET   (or set AIRLOCK_EGRESS_PROXY in $CONFIG_FILE)" >&2
     exit 1
   fi
+  case "$EGRESS_PROXY" in
+    *[[:space:]]*) echo "claude-airlock: egress proxy '$EGRESS_PROXY' contains whitespace; not launching." >&2; exit 1 ;;
+  esac
   if ! _egc="$(_airlock_socket_check "$EGRESS_PROXY" 2>&1)"; then
     echo "claude-airlock: egress proxy: $_egc" >&2
     echo "  Not launching: in proxy mode the box has no other way out. Start the proxy, or pick" >&2
@@ -1599,6 +1635,12 @@ if _egress_is_proxy "$EGRESS_MODE"; then
   if [ -n "${AIRLOCK_EXTRA_EGRESS:-}" ]; then
     echo "claude-airlock: ignoring AIRLOCK_EXTRA_EGRESS: in proxy mode the proxy decides." >&2
     AIRLOCK_EXTRA_EGRESS=""
+  fi
+  # Granted sockets are host-approved exits that bypass the proxy's allowlist and log. They
+  # stay, but are named every launch so "only the proxy" is never assumed.
+  if [ -s "$STATE_DIR/sockets" ] && grep -qvxF "$EGRESS_PROXY" "$STATE_DIR/sockets"; then
+    echo "claude-airlock: proxy mode, but these granted sockets are also reachable, outside the proxy:" >&2
+    grep -vxF "$EGRESS_PROXY" "$STATE_DIR/sockets" | sed 's/^/  /' >&2
   fi
 elif _egress_is_proxy "${AIRLOCK_EGRESS_MODE:-}"; then
   echo "claude-airlock: egress for this project is '$EGRESS_MODE', not the proxy (host default); 'airlock egress proxy' to switch." >&2
@@ -2179,6 +2221,10 @@ if [ -f "$SECRETS_FILE" ]; then
     case "$_sline" in *=*) ;; *) continue ;; esac
     _skey="$(printf '%s' "${_sline%%=*}" | tr -d '[:space:]')"
     case "$_skey" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    if _airlock_secret_reserved "$_skey"; then
+      echo "claude-airlock: ignoring secret $_skey: AIRLOCK_* and *_PROXY are reserved (airlock secret rm $_skey)" >&2
+      continue
+    fi
     _sval="$(printf '%s' "${_sline#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     case "$_sval" in
       pass:*)

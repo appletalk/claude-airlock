@@ -18,22 +18,24 @@ if [ -n "${AIRLOCK_EGRESS_PROXY:-}" ]; then
   # Proxy posture: no firewall, because there is no network to filter. That only holds
   # while it is true, so prove it: any interface besides loopback means this box was
   # started some other way, and Claude does not start in it.
-  for n in /sys/class/net/*; do
-    if [ "${n##*/}" != lo ]; then
-      echo "[airlock] ERROR: proxy mode, but the box has a network interface (${n##*/}); not starting" >&2
-      exit 1
-    fi
-  done
+  # /proc/net/dev lists every interface in this namespace (a glob would miss dot-names).
+  ifaces="$(awk -F: 'NR > 2 { gsub(/ /, "", $1); print $1 }' /proc/net/dev)"
+  if [ "$ifaces" != lo ]; then
+    echo "[airlock] ERROR: proxy mode, but the box has network interfaces ($(printf %s "$ifaces" | tr "\n" " ")); not starting" >&2
+    exit 1
+  fi
   [ -S "$AIRLOCK_EGRESS_PROXY" ] || { echo "[airlock] ERROR: proxy socket $AIRLOCK_EGRESS_PROXY is missing" >&2; exit 1; }
   # Run as dev, the uid the host granted on the socket (root here is a subuid there). It
   # needs no protecting from dev: killing it only cuts this box off. Its messages go to a
-  # file, not the terminal Claude draws on.
-  gosu dev socat -lf /tmp/airlock-proxy.log \
-    TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork "UNIX-CONNECT:$AIRLOCK_EGRESS_PROXY" &
+  # file, not the terminal Claude draws on, and its own session keeps the terminal's
+  # signals off it (one Ctrl-C at a shell prompt killed it otherwise).
+  setsid gosu dev socat -lf /tmp/airlock-proxy.log \
+    TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork "UNIX-CONNECT:$AIRLOCK_EGRESS_PROXY" </dev/null &
   # Wait for the listener in /proc rather than by connecting: a test connection would be
-  # relayed to the proxy and land in its audit log.
+  # relayed to the proxy and land in its audit log. Port 3128 (0C38) listening (0A); the
+  # address field is byte-order dependent, so it is not matched.
   i=0
-  until grep -q '^ *[0-9]*: 0100007F:0C38 00000000:0000 0A' /proc/net/tcp; do
+  until grep -q ':0C38 00000000:0000 0A' /proc/net/tcp; do
     i=$((i + 1))
     [ "$i" -lt 100 ] || { echo "[airlock] ERROR: the proxy bridge did not start (see /tmp/airlock-proxy.log)" >&2; exit 1; }
     sleep 0.05

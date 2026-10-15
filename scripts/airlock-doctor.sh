@@ -17,6 +17,9 @@ IMAGE="${AIRLOCK_IMAGE:-claude-airlock:base}"
 # the config's AIRLOCK_IMAGE must not replace the base image install.sh asks to check.
 PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
 AIRLOCK_DNS="${AIRLOCK_DNS:-}"
+# The default egress posture and its proxy socket, only to check a proxy default can launch.
+EGRESS_MODE="${AIRLOCK_EGRESS_MODE:-}"
+EGRESS_PROXY="${AIRLOCK_EGRESS_PROXY:-}"
 fail=0
 # shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/host-dns.sh"
@@ -38,13 +41,14 @@ if [ -f "$CONFIG_FILE" ]; then
   _cfg="$(
     set +u
     AIRLOCK_PODMAN_NETWORK="$PODMAN_NETWORK" AIRLOCK_ENGINE="$ENGINE"
+    AIRLOCK_EGRESS_MODE="$EGRESS_MODE" AIRLOCK_EGRESS_PROXY="$EGRESS_PROXY"
     # shellcheck disable=SC1090
     { source "$CONFIG_FILE"; } >/dev/null 2>&1
     trap - EXIT
-    printf '%s\n%s\nend\n' "$AIRLOCK_PODMAN_NETWORK" "$AIRLOCK_DNS"
+    printf '%s\n%s\n%s\n%s\nend\n' "$AIRLOCK_PODMAN_NETWORK" "$AIRLOCK_DNS" "$AIRLOCK_EGRESS_MODE" "$AIRLOCK_EGRESS_PROXY"
   )"
   if [ "${_cfg##*$'\n'}" = end ]; then
-    { IFS= read -r PODMAN_NETWORK; IFS= read -r AIRLOCK_DNS; } <<< "$_cfg"
+    { IFS= read -r PODMAN_NETWORK; IFS= read -r AIRLOCK_DNS; IFS= read -r EGRESS_MODE; IFS= read -r EGRESS_PROXY; } <<< "$_cfg"
   else
     warn "$CONFIG_FILE did not run to the end; testing the default network and resolvers"
   fi
@@ -138,6 +142,15 @@ if "$ENGINE" image exists "$IMAGE" 2>/dev/null || "$ENGINE" image inspect "$IMAG
     unkeyed) warn "packages: built directly, not via 'make install' — current as of that build, but not on the weekly refresh" ;;
     *)       ok "packages refreshed: $refresh (weekly on 'make install'; 'make refresh' forces it)" ;;
   esac
+  # A proxy default refuses every launch on an image without the socket bridge.
+  case "$EGRESS_MODE" in
+    proxy|"proxy "*)
+      if [ "$("$ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}' "$IMAGE" 2>/dev/null)" = 1 ]; then
+        ok "image supports the proxy egress posture (the default here)"
+      else
+        bad "the default egress posture is proxy, but $IMAGE predates it — run: make install"
+      fi ;;
+  esac
 else
   bad "$IMAGE not built — run: make install"
   echo; exit 1
@@ -161,6 +174,20 @@ fi
 # resolv.conf, which a real box never sees: the doctor would be testing (and warning
 # about) a resolver setup that does not occur. Same helpers, so the same network and
 # resolv.conf; the rest of the box (userns, entrypoint) is not the launcher's.
+case "$EGRESS_MODE" in
+  proxy|"proxy "*)
+    hdr "egress proxy (the default posture here)"
+    _p="${EGRESS_MODE#proxy}"; _p="${_p# }"; _p="${_p:-$EGRESS_PROXY}"
+    if [ -z "$_p" ]; then
+      bad "AIRLOCK_EGRESS_MODE=proxy names no socket — set AIRLOCK_EGRESS_PROXY"
+    elif [ -S "$_p" ]; then
+      ok "$_p is a socket (the launch re-checks the full socket rule: airlock egress show)"
+    else
+      bad "$_p is not a socket — is the proxy running? Every launch is refused until it is"
+    fi
+    warn "the containment test below checks the firewall postures, not the proxy's allowlist" ;;
+esac
+
 hdr "live containment test (throwaway box)"
 net_args=()
 if [ "$ENGINE" = podman ]; then
