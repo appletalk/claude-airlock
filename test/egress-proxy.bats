@@ -243,3 +243,67 @@ assert_proxy_box() {
   run _launch "$p" mount add "$AIRLOCK_HOME/.config/claude-airlock"
   [ "$status" -ne 0 ]
 }
+
+@test "a posture the launcher does not know is refused, not read as minimal" {
+  for m in Proxy proxi "proxy:$S" "github bogus"; do
+    p="$(mkproj "pu-${m//[^a-z]/}")"
+    : > "$ENGINE_ARGS_FILE"
+    TEST_EGRESS_MODE="$m" run _launch "$p"
+    [ "$status" -ne 0 ] || { echo "$m launched"; false; }
+    [[ "$output" == *"is not minimal, dev, proxy or a group list"* ]]
+    refute launched
+    TEST_EGRESS_MODE="$m" run _launch "$p" egress show
+    [[ "$output" == *"launches are REFUSED"* ]] || { echo "$m: $output"; false; }
+  done
+}
+
+@test "a hand-edited stored posture that is unknown is refused too" {
+  p="$(mkproj ph)"
+  _launch "$p" egress minimal
+  printf 'proxi %s\n' "$S" > "$(state_dir "$p")/egress-mode"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  refute launched
+}
+
+@test "granted sockets that bypass the proxy are named at launch and in show" {
+  p="$(mkproj pgs)"
+  svcsock "$SD/other.sock"
+  _launch "$p" socket add "$SD/other.sock"
+  _launch "$p" egress proxy "$S"
+  run _launch "$p"
+  [[ "$output" == *"also reachable, outside the proxy"*"$SD/other.sock"* ]]
+  run _launch "$p" egress show
+  [[ "$output" == *"also reachable, outside the proxy"* ]]
+  [[ "$output" == *"    $SD/other.sock"* ]]
+}
+
+@test "the proxy socket itself in the socket list is not named as a bypass" {
+  p="$(mkproj pgs2)"
+  _launch "$p" socket add "$S"
+  _launch "$p" egress proxy "$S"
+  run _launch "$p"
+  [[ "$output" != *"also reachable"* ]]
+}
+
+@test "a default socket path with whitespace is refused at launch" {
+  p="$(mkproj pws2)"
+  TEST_EGRESS_MODE=proxy TEST_EGRESS_PROXY="$SD/a b.sock" run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"contains whitespace"* ]]
+  refute launched
+}
+
+@test "secrets cannot set AIRLOCK_* or *_PROXY variables, and stored ones are skipped" {
+  p="$(mkproj psec)"
+  for k in AIRLOCK_EGRESS_PROXY HTTPS_PROXY https_proxy NO_PROXY AIRLOCK_EXTRA_EGRESS; do
+    run _launch "$p" secret set "$k" x
+    [ "$status" -ne 0 ] || { echo "$k accepted"; false; }
+    [[ "$output" == *"is reserved"* ]]
+  done
+  _launch "$p" secret set OK_KEY fine
+  printf 'AIRLOCK_EGRESS_PROXY=/x.sock\nHTTPS_PROXY=http://evil:1\n' >> "$(state_dir "$p")/secrets"
+  run _launch "$p"
+  [[ "$output" == *"ignoring secret AIRLOCK_EGRESS_PROXY"* ]]
+  [[ "$output" == *"ignoring secret HTTPS_PROXY"* ]]
+}

@@ -413,9 +413,11 @@ only the service does not), relaunch the box to pick up the new one.
 
 The third egress posture, beside `minimal` and `dev`. The box gets **no network at all**:
 it starts with `--network none`, so it has loopback and nothing else, no route and no
-resolver. Its only way out is one host proxy's Unix socket, mounted at its real path and
+resolver. Its way out is one host proxy's Unix socket, mounted at its real path and
 bridged by the entrypoint to `127.0.0.1:3128`, with `HTTPS_PROXY` and `HTTP_PROXY` pointing
-there. The proxy decides what is reachable, and can log every connection.
+there. The proxy decides what is reachable, and can log every connection. Sockets you
+granted with `airlock socket add` stay mounted too; they bypass the proxy, so each launch
+and `airlock egress show` name them.
 
 ```
 airlock egress proxy /run/airlock-envoy/anthropic.sock   # this project
@@ -436,22 +438,27 @@ outside the proxy is never silent.
 The guarantees:
 
 - **The network namespace enforces it, not the proxy variables.** A box that unsets
-  `HTTPS_PROXY`, kills the bridge or starts its own relay gains nothing: the socket is still
-  the only thing it can reach. The entrypoint also refuses to start Claude if it finds any
-  interface besides loopback.
+  `HTTPS_PROXY`, kills the bridge or starts its own relay gains nothing: there is still no
+  route out except the sockets mounted into it. The entrypoint also refuses to start Claude
+  if it finds any interface besides loopback.
 - **It fails closed.** If the socket is missing, or fails the [socket rule](#host-sockets--airlock-socket)
-  at launch, the box does not start. It never falls back to a network.
+  at launch, the box does not start. It never falls back to a network. A posture the
+  launcher does not recognise (`AIRLOCK_EGRESS_MODE=Proxy`, say) refuses the launch too,
+  rather than being read as `minimal`.
 - **The box cannot change it.** The posture lives in the host state dir like the rest, and
   there is no `.airlock/config` key for it.
 - **One policy, the proxy's.** Egress groups, `egress =` lines and `AIRLOCK_EXTRA_EGRESS`
   do not apply while it is set; a launch says so if any are present, and `add`/`rm` are
-  refused. To widen what a box can reach, widen the proxy's allowlist, or give the project
-  a socket for a different listener.
+  refused. An `egress =` entry that is malformed or points at the host still stops the
+  launch, as it does in every posture. To widen what a box can reach, widen the proxy's
+  allowlist, or give the project a socket for a different listener.
+- **Secrets cannot steer it.** `airlock secret` refuses `AIRLOCK_*` and `*_PROXY` keys,
+  and a launch skips any already stored.
 - **No firewall capabilities.** With no network to filter, the box drops `NET_ADMIN` and
   `NET_RAW` too.
 
-The socket must pass the same rule as `airlock socket add`, and the box connects as you,
-so grant your uid on it. [airlock-envoy](https://github.com/appletalk/airlock-envoy) is
+The socket must pass the same rule as `airlock socket add`, and the box connects as you
+(under Docker, as uid 1000), so grant that uid on it. [airlock-envoy](https://github.com/appletalk/airlock-envoy) is
 one such proxy: Envoy behind a systemd socket unit, an allowlist per listener, and an
 audit log of every connection. Anything that speaks HTTP `CONNECT` on a socket that
 passes the rule works too.
