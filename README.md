@@ -169,25 +169,6 @@ orchestrator session): there a one-time login costs nothing amortised, and it yi
 credential Claude renews itself, which is what Remote Control — steering the session from
 mobile — needs.
 
-Telemetry and error reporting are **off in every box** by default — a sandbox has no need
-to phone home. Remote Control, though, refuses to start without feature-flag evaluation,
-which telemetry gates, so a box you intend to steer from mobile has to opt back in:
-
-```sh
-airlock telemetry on      # this project only; default is off
-airlock telemetry show
-```
-
-This toggles **telemetry only**. Error reporting (crash/stack data) stays off in both
-states — Remote Control does not need it, so there is no reason to ship it just to enable
-RC.
-
-> Claude checks whether `DISABLE_TELEMETRY` is **set**, not what it equals — `=0` still
-> disables it. So "on" means the variable is **absent**, which `settings.json` cannot
-> express on its own (it adds keys, never removes them). The launcher manages the box's
-> `settings.json` directly each launch — deleting the key when on, asserting it when off —
-> which also self-heals a box provisioned before this logic existed.
-
 Switch **that one project** — the setting is per-project, so everything else keeps using
 the shared token:
 
@@ -209,6 +190,32 @@ so it survives restarts with no extra plumbing.
 > one. The mode lives in the never-mounted state dir, so a box can neither read nor change
 > its own auth mode. `airlock login token` switches back but deliberately leaves the stored
 > credential in place; it tells you where, so delete it to revoke locally.
+
+**Telemetry** and error reporting are **always off in every box**, and there is no way to
+turn them on: a sandbox has no need to phone home. What holds against the box is Claude
+Code's managed settings, `/etc/claude-code/managed-settings.json`, which also keep the
+auto-updater and claude.ai connectors off. The launcher mounts the file read-only from the
+install into every box (the image carries a copy too), and Claude applies it after every
+settings file the box can write (its `~/.claude`, or the workspace's `.claude/`). An empty
+read-only directory covers `managed-settings.d`, so no drop-in shipped in an image can
+override it either. Two fallbacks back it up, but a box can override them:
+`DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` on the container command line, and the
+same keys asserted in the box's `settings.json` each launch.
+
+Steering a session you started on this machine with Remote Control works with telemetry off,
+on Claude Code 2.1.283 or later. Versions 2.1.154 to 2.1.282 refused it, which is why
+airlock once had an `airlock telemetry on` switch. The switch is retired: a project still
+switched on is turned off at its next launch, with a notice, and `make install` clears the
+leftover switch for every project and lists them. Two Remote Control uses still need
+telemetry and are not supported in a box: starting a new session onto this machine from
+another device, and Remote Control under Trusted Devices.
+
+```sh
+airlock telemetry show    # always off
+```
+
+Never set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` or `DISABLE_GROWTHBOOK` in a box you
+want to steer remotely: they turn off feature-flag evaluation, which Remote Control needs.
 
 ### 5. Use it
 

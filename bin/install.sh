@@ -133,6 +133,22 @@ done
 SRC_DIR="$DEST"
 
 mkdir -p "$BIN_TARGET" "$CONFIG_DIR"
+
+# Box telemetry is always off; the `airlock telemetry on` switch is retired. Clear every
+# project's leftover marker now and name the projects, so none keeps telemetry on unseen.
+# Their settings are corrected at each project's next launch; a running box keeps
+# telemetry until it restarts. Removing a marker is safe even if this install fails later:
+# every launcher treats a missing marker as off.
+_tel=0
+for _m in "$CONFIG_DIR"/state/*/telemetry-on; do
+  [ -f "$_m" ] || continue
+  rm -f -- "$_m"
+  [ "$_tel" -eq 1 ] || echo "==> Telemetry is now always off in boxes. Turned it off for:" >&2
+  _tel=1
+  echo "    $(basename "$(dirname "$_m")")" >&2
+done
+[ "$_tel" -eq 0 ] || echo "    (running boxes keep it until they restart)" >&2
+
 if [ ! -f "$CONFIG_DIR/config" ]; then
   cp "$SRC_DIR/config/config.example" "$CONFIG_DIR/config"
   echo "    wrote default config -> $CONFIG_DIR/config"

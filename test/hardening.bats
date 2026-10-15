@@ -6,6 +6,7 @@
 # a real container separately; here we pin the flags so they can't silently regress.)
 
 load helper
+bats_require_minimum_version 1.5.0
 setup() { setup_airlock_env; }
 
 @test "drops all caps, re-adds only firewall + gosu caps" {
@@ -163,16 +164,14 @@ EOF
   [ -s "$sd/dot-claude/.credentials.json" ]
 }
 
-# --- telemetry posture (`airlock telemetry`) ----------------------------------------
-# Telemetry is controlled in the BOX'S settings.json, because that is what Claude reads
-# for it. Two facts pin the exact shape and are the regressions these tests guard:
-#   - Claude checks whether DISABLE_TELEMETRY is SET, not its value — "0" still disables.
-#     So "on" must mean the key is ABSENT, never "=0".
-#   - The baseline merge only ADDS keys, so a stale DISABLE_TELEMETRY from an old launch
-#     is never removed by omission alone; the launcher has to delete it explicitly.
+# --- telemetry posture: always off ---------------------------------------------------
+# Telemetry and error reporting are asserted in the BOX'S settings.json every launch (that
+# is what Claude reads). There is no way to turn telemetry on: the old `airlock telemetry on`
+# switch is retired, and a project it left switched on is turned off at its next launch,
+# with a notice, so nobody has to audit projects by hand.
 _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; }
 
-@test "telemetry is disabled by default, in the box settings.json" {
+@test "telemetry and error reporting are off in the box settings.json" {
   p="$(mkproj)"; _launch "$p"
   run jq -r '.env.DISABLE_TELEMETRY' <<<"$(_box_settings "$p")"
   [ "$output" = "1" ]
@@ -180,48 +179,108 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
   [ "$output" = "1" ]
 }
 
-@test "telemetry on deletes the telemetry key, never sets it to 0" {
+@test "telemetry on is refused and changes nothing" {
   p="$(mkproj)"
-  _launch "$p" telemetry on
-  _launch "$p"
-  run jq -e '.env | has("DISABLE_TELEMETRY")' <<<"$(_box_settings "$p")"
-  [ "$status" -ne 0 ]                                     # absent, not present-as-"0"
-}
-
-# Least-privilege split: RC needs telemetry, not error reporting, so turning telemetry ON
-# must NOT re-enable crash reporting. Error reporting stays off in both states.
-@test "telemetry on leaves error reporting disabled" {
-  p="$(mkproj)"
-  _launch "$p" telemetry on
-  _launch "$p"
-  run jq -r '.env.DISABLE_ERROR_REPORTING' <<<"$(_box_settings "$p")"
-  [ "$output" = "1" ]
-}
-
-# The exact bug that shipped: a box provisioned while telemetry was baked into the baseline
-# keeps the stale key, and merge-by-omission never clears it. `telemetry on` must actively
-# delete it, so an already-provisioned box self-heals on its next launch.
-@test "telemetry on clears a stale telemetry key left by an earlier launch" {
-  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
-  printf '{"env":{"DISABLE_TELEMETRY":"1","DISABLE_ERROR_REPORTING":"1"}}\n' > "$sd/dot-claude/settings.json"
-  _launch "$p" telemetry on
-  _launch "$p"
-  run jq -e '.env | has("DISABLE_TELEMETRY")' <<<"$(_box_settings "$p")"
+  run _launch "$p" telemetry on
   [ "$status" -ne 0 ]
+  [[ "$output" == *"stays off"* ]]
+  [ ! -e "$(state_dir "$p")/telemetry-on" ]
+  _launch "$p"
+  run jq -r '.env.DISABLE_TELEMETRY' <<<"$(_box_settings "$p")"
+  [ "$output" = "1" ]
 }
 
-@test "telemetry is per-project and round-trips through show/off" {
-  otto="$(mkproj otto)"; worker="$(mkproj worker)"
-  _launch "$otto" telemetry on
-  run _launch "$otto" telemetry show
-  [[ "$output" == *"ON"* ]]
-  _launch "$worker"                                       # untouched project stays off
-  run jq -r '.env.DISABLE_TELEMETRY' <<<"$(_box_settings "$worker")"
+@test "telemetry show reports off" {
+  p="$(mkproj)"
+  run _launch "$p" telemetry show
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"off (always"* ]]
+}
+
+@test "telemetry show mentions a leftover marker; telemetry off is accepted" {
+  p="$(mkproj)"; mkdir -p "$(state_dir "$p")"; touch "$(state_dir "$p")/telemetry-on"
+  run _launch "$p" telemetry show
+  [[ "$output" == *"leftover marker"* ]]
+  run _launch "$p" telemetry off
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already off"* ]]
+}
+
+# The layer that holds against the box: managed settings mounted from the install, so an
+# image picked by the box's .airlock/config (perhaps one built before the image carried the
+# file) still gets them.
+@test "the launcher mounts the install's managed settings read-only into the box" {
+  p="$(mkproj)"; _launch "$p"
+  m="$(readlink -f "$BATS_TEST_DIRNAME/../image/managed-settings.json")"
+  engine_args | grep -qx -- "$m:/etc/claude-code/managed-settings.json:ro" \
+    || { echo "mount missing: $(engine_args | grep -n managed || true)"; false; }
+}
+
+# Drop-ins in managed-settings.d outrank the file; an empty read-only directory covers them.
+@test "the launcher covers managed-settings.d with an empty read-only directory" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/managed-settings.d"
+  touch "$sd/managed-settings.d/stale.json"              # emptied at launch
+  _launch "$p"
+  engine_args | grep -qx -- "$sd/managed-settings.d:/etc/claude-code/managed-settings.d:ro" \
+    || { echo "mount missing: $(engine_args | grep -n managed || true)"; false; }
+  [ -d "$sd/managed-settings.d" ]
+  [ -z "$(ls -A "$sd/managed-settings.d")" ]
+}
+
+# Fallback: the engine command line (a box-written settings file can override it).
+@test "the engine gets DISABLE_TELEMETRY and DISABLE_ERROR_REPORTING" {
+  p="$(mkproj)"; _launch "$p"
+  engine_args | grep -qx 'DISABLE_TELEMETRY=1'
+  engine_args | grep -qx 'DISABLE_ERROR_REPORTING=1'
+}
+
+# First layer: managed (policy) settings in the image, applied after anything the box can
+# write. Checked statically here; the built image is checked by hand (see the commit).
+@test "the image ships managed settings that keep telemetry, error reporting, updates and connectors off" {
+  m="$BATS_TEST_DIRNAME/../image/managed-settings.json"
+  run jq -r '.env | [.DISABLE_TELEMETRY, .DISABLE_ERROR_REPORTING, .DISABLE_AUTOUPDATER, .ENABLE_CLAUDEAI_MCP_SERVERS] | join(",")' "$m"
+  [ "$output" = "1,1,1,false" ]
+  grep -q '^COPY managed-settings.json /etc/claude-code/managed-settings.json$' "$BATS_TEST_DIRNAME/../image/Dockerfile"
+}
+
+# The box can write its settings.json. Valid JSON that is not an object used to make every
+# filter fail silently, leaving the baseline and the telemetry keys out.
+@test "a non-object settings.json is reset and telemetry asserted" {
+  for junk in '"str"' '1' '[]'; do
+    p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
+    printf '%s\n' "$junk" > "$sd/dot-claude/settings.json"
+    _launch "$p"
+    run jq -r '.env.DISABLE_TELEMETRY' <<<"$(_box_settings "$p")"
+    [ "$output" = "1" ] || { echo "settings $junk -> $(_box_settings "$p")"; false; }
+  done
+}
+
+# If the assertion cannot run, the marker must stay and no "now off" notice may be printed;
+# a warning is printed instead.
+@test "when settings cannot be asserted the marker is kept and the launch warns" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd"; touch "$sd/telemetry-on"
+  printf '#!/bin/sh\nexit 1\n' > "$STUBBIN/jq"; chmod +x "$STUBBIN/jq"
+  run _launch "$p"
+  rm -f "$STUBBIN/jq"
+  [[ "$output" != *"telemetry was on"* ]]
+  [[ "$output" == *"could not assert telemetry off"* ]]
+  [ -e "$sd/telemetry-on" ]
+}
+
+# The migration: a project switched on by the old launcher has the marker and a settings.json
+# with DISABLE_TELEMETRY deleted. One launch must clear the marker, say so, and re-assert the key.
+@test "a project left with telemetry on is turned off at launch, with a notice" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
+  touch "$sd/telemetry-on"
+  printf '{"env":{"DISABLE_ERROR_REPORTING":"1"}}\n' > "$sd/dot-claude/settings.json"
+  run --separate-stderr _launch "$p"
+  [[ "$stderr" == *"telemetry was on"* ]]                 # on stderr, not stdout
+  [[ "$output" != *"telemetry was on"* ]]
+  [ ! -e "$sd/telemetry-on" ]
+  run jq -r '.env.DISABLE_TELEMETRY' <<<"$(_box_settings "$p")"
   [ "$output" = "1" ]
-  _launch "$otto" telemetry off                           # back to default
-  _launch "$otto"
-  run jq -r '.env.DISABLE_TELEMETRY' <<<"$(_box_settings "$otto")"
-  [ "$output" = "1" ]
+  run _launch "$p"                                        # the notice is one-time
+  [[ "$output" != *"telemetry was on"* ]]
 }
 
 # The session-quality survey ("How is Claude doing this session?") prompts on a
@@ -240,8 +299,8 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
   [ "$output" = "0" ]
 }
 
-# The baseline must not hardcode these keys — a key here would be re-added by the merge on
-# every launch and no per-project `telemetry on` could keep it out.
+# The launcher owns these keys (asserted after the merge); keep them out of the baseline so
+# there is one place that sets them.
 @test "box-settings.json does not hardcode the telemetry vars" {
   run jq -e '.env | has("DISABLE_TELEMETRY") or has("DISABLE_ERROR_REPORTING")' \
     "$BATS_TEST_DIRNAME/../config/box-settings.json"

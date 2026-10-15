@@ -870,33 +870,34 @@ if [ "${1:-}" = "login" ]; then
   exit 0
 fi
 
-# `airlock telemetry [show|on|off]` controls this project's box telemetry. OFF by default —
-# a sandbox has no need to phone home. Stored per-project in STATE_DIR; the launcher
-# enforces it in the box's settings.json each launch (see the merge block below for why it
-# lives there and must be actively managed).
+# `airlock telemetry` reports this project's box telemetry, which is always OFF: a sandbox
+# has no need to phone home. Managed settings (/etc/claude-code/managed-settings.json, applied
+# after every settings file, mounted read-only from this install) keep it off against the
+# box; the engine's -e flags and the box's asserted settings.json are fallbacks.
 #
-# `on` exists because Remote Control refuses to run without feature-flag evaluation, which
-# telemetry gates. A long-lived box steered from mobile therefore has to opt back in.
-# Scope note: this toggles TELEMETRY only. Error reporting (crash/stack data) stays off in
-# both states — RC does not need it, so there is no reason to ship it.
+# There used to be an `on` switch, because Remote Control refused to run with telemetry off
+# on Claude Code 2.1.154-2.1.282. From 2.1.283, steering a session started on this machine
+# works with telemetry off. Still refused with it off: starting a session onto this machine
+# from another device, and any Remote Control under Trusted Devices; neither is supported
+# here. The switch is retired: a launch clears a leftover `telemetry-on` marker and says so,
+# so no project keeps telemetry on without anyone knowing.
+# Error reporting (crash/stack data) is always off too.
 if [ "${1:-}" = "telemetry" ]; then
-  _tslug2="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
-  _tdir2="$HOME/.config/claude-airlock/state/$_tslug2"; mkdir -p "$_tdir2"
   case "${2:-show}" in
     show)
-      if [ -f "$_tdir2/telemetry-on" ]; then
-        echo "telemetry for $(basename "$WORKSPACE"): ON (Remote Control usable; error reporting still off)"
-      else
-        echo "telemetry for $(basename "$WORKSPACE"): off (default; Remote Control unavailable)"
+      echo "telemetry for $(basename "$WORKSPACE"): off (always; error reporting off too)"
+      _tslug3="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+      if [ -f "$HOME/.config/claude-airlock/state/$_tslug3/telemetry-on" ]; then
+        echo "  a leftover marker from the retired 'on' switch is cleared at the next launch"
       fi ;;
-    on)
-      touch "$_tdir2/telemetry-on"
-      echo "airlock: telemetry for $(basename "$WORKSPACE") -> ON"
-      echo "  DISABLE_TELEMETRY removed from the box on next launch; error reporting stays off." ;;
     off)
-      rm -f "$_tdir2/telemetry-on"
-      echo "airlock: telemetry for $(basename "$WORKSPACE") -> off (default)" ;;
-    *) echo "usage: airlock telemetry [show] | on | off" >&2; exit 1 ;;
+      echo "telemetry for $(basename "$WORKSPACE"): already off (always)" ;;
+    on)
+      echo "airlock: telemetry stays off. Remote Control works without it on Claude Code 2.1.283+;" >&2
+      echo "  the 'on' switch was retired (only uses airlock does not support need it: starting a" >&2
+      echo "  session here from another device, or Trusted Devices)." >&2
+      exit 1 ;;
+    *) echo "usage: airlock telemetry [show]" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -1666,7 +1667,11 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   # empty file, its jq fails, and that box silently runs without the airlock settings
   # baseline. No error, no signal - which is what makes it worth fixing over a window
   # only a few syscalls wide.
-  if ! { [ -s "$_bs" ] && jq -e . "$_bs" >/dev/null 2>&1; }; then
+  # The box can write this file, so anything but a JSON object is reset too: a string or a
+  # number is valid JSON that every filter below would fail on. (An object with odd nested
+  # shapes can still fail the baseline merge; that warns, and the telemetry filter below
+  # still applies.)
+  if ! { [ -s "$_bs" ] && jq -e 'type == "object"' "$_bs" >/dev/null 2>&1; }; then
     echo '{}' > "$_bs.tmp.$$" && mv -f "$_bs.tmp.$$" "$_bs"
   fi
   if jq -s '
@@ -1678,34 +1683,29 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
     mv "$_bs.tmp.$$" "$_bs"
   else
     rm -f "$_bs.tmp.$$"
+    echo "airlock: WARNING: could not merge the settings baseline into $_bs (malformed?); the box runs without it" >&2
   fi
 
-  # Telemetry posture (`airlock telemetry`), enforced HERE because settings.json is what
-  # Claude actually reads for it — and because the merge above ($e * $d) only ADDS keys,
-  # it can never REMOVE a stale DISABLE_TELEMETRY that an earlier launch wrote. So we must
-  # delete or add these keys explicitly every launch, not merely omit them from the
-  # baseline. Two facts force this exact shape:
-  #   - Claude checks whether DISABLE_TELEMETRY is SET, not its value: "0" still disables.
-  #     So "on" means the key is ABSENT; a settings.json env block can never express that
-  #     on its own (it adds keys, never removes), which is why the launcher owns it.
-  #   - Remote Control refuses to run without feature-flag evaluation, which telemetry
-  #     gates — the whole reason a long-lived box opts back in.
-  # Only TELEMETRY toggles. DISABLE_ERROR_REPORTING is asserted present in BOTH states: a
-  # sandbox has no business shipping crash/stack data to Anthropic, and RC does not need it
-  # — only feature-flag evaluation, which is gated on telemetry alone. Coupling the two
-  # would silently re-enable crash reporting the moment you turned RC on, for no benefit.
-  # Off (default): telemetry key present. On: telemetry key DELETED (RC needs it absent,
-  # not "0"). Idempotent either way, so a box provisioned before this logic self-heals.
-  if [ -f "$STATE_DIR/telemetry-on" ]; then
-    _tfilter='.env |= ((. // {}) + {DISABLE_ERROR_REPORTING:"1"} | del(.DISABLE_TELEMETRY))'
-  else
-    _tfilter='.env |= ((. // {}) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
-  fi
+  # Telemetry and error reporting are asserted OFF here every launch, after the baseline
+  # merge, so a box whose settings.json lost the keys (or came from the retired `telemetry
+  # on`, which deleted DISABLE_TELEMETRY) is corrected on its next launch. The mounted
+  # managed settings keep them off regardless; this keeps the file honest.
+  _tfilter='.env |= ((if type == "object" then . else {} end) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
   if jq "$_tfilter" "$_bs" > "$_bs.tmp.$$" 2>/dev/null; then
     mv "$_bs.tmp.$$" "$_bs"
+    # A project switched on with the retired `airlock telemetry on` still has its marker.
+    # Clear it and say so once, only now that the box's settings say off.
+    if [ -f "$STATE_DIR/telemetry-on" ]; then
+      rm -f "$STATE_DIR/telemetry-on"
+      echo "airlock: telemetry was on for $(basename "$WORKSPACE"); it is now always off (Remote Control" >&2
+      echo "  works without it on Claude Code 2.1.283+). Boxes still running keep it until they restart." >&2
+    fi
   else
     rm -f "$_bs.tmp.$$"
+    echo "airlock: WARNING: could not assert telemetry off in $_bs; the mounted managed settings still apply" >&2
   fi
+elif ! command -v jq >/dev/null 2>&1; then
+  echo "airlock: WARNING: jq not found; the box's settings.json was not checked (the mounted managed settings still apply)" >&2
 fi
 
 # --- Concurrent-session guard: warn if this project is already open ---
@@ -1776,6 +1776,11 @@ fi
 # Under rootless podman these caps are namespaced: "root" in the box is root only within
 # ITS OWN user namespace, so NET_ADMIN grants control of the box's own network namespace
 # and nothing on the host. Under Docker the same caps are backed by real host root.
+#
+# An empty directory, kept in the host-only STATE_DIR (never mounted into a box), to mount
+# read-only over the image's managed-settings.d below. Emptied each launch.
+mkdir -p "$STATE_DIR/managed-settings.d"
+find "$STATE_DIR/managed-settings.d" -mindepth 1 -delete
 args=(
   --rm -it
   --hostname airlock
@@ -1797,7 +1802,16 @@ args=(
   # validator, Postgres and claude itself run unchanged.
   --security-opt "seccomp=$_repo/image/seccomp.json"
   -e TERM -e "TZ=${TZ:-UTC}"
-  -e DISABLE_AUTOUPDATER=1
+  -e DISABLE_AUTOUPDATER=1 -e DISABLE_TELEMETRY=1 -e DISABLE_ERROR_REPORTING=1
+  # Managed settings, mounted from this install rather than trusted to the image: the box's
+  # .airlock/config can pick any claude-airlock:* tag, including one built before the image
+  # carried this file. Only this layer holds against the box; the -e flags above and the
+  # asserted settings.json are overridden by a workspace .claude/settings.local.json.
+  -v "$_repo/image/managed-settings.json:/etc/claude-code/managed-settings.json:ro"
+  # Drop-ins in managed-settings.d outrank that file, and an image could ship some: cover
+  # the directory with an empty read-only one. (An empty bind, not a tmpfs: podman copies
+  # the image's files into a tmpfs by default.)
+  -v "$STATE_DIR/managed-settings.d:/etc/claude-code/managed-settings.d:ro"
   --env-file "$ENV_FILE"                         # OAuth token + secrets (0600, off the process table)
   -w "$WORKSPACE"
   -v "$STATE_DIR/dot-claude:/home/dev/.claude:rw"
