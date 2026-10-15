@@ -252,6 +252,7 @@ airlock egress                  show this project's egress posture
 airlock egress minimal|dev      Anthropic-only  |  + npm/PyPI/GitHub
 airlock egress github pypi      an explicit subset (replaces)
 airlock egress add|rm <groups>  edit the group set incrementally
+airlock egress proxy [SOCKET]   no network at all; everything through a host proxy (see below)
 
 airlock tmp                     print (and create) this project's $AIRLOCK_TMP scratch dir
 airlock paste                   save the clipboard IMAGE where a box can read it
@@ -408,10 +409,62 @@ One file is mounted, not its directory, so a second socket beside it is not expo
 the service's socket is recreated (restarting a systemd `.socket` unit does this; restarting
 only the service does not), relaunch the box to pick up the new one.
 
+## Egress through a host proxy — `airlock egress proxy`
+
+The third egress posture, beside `minimal` and `dev`. The box gets **no network at all**:
+it starts with `--network none`, so it has loopback and nothing else, no route and no
+resolver. Its only way out is one host proxy's Unix socket, mounted at its real path and
+bridged by the entrypoint to `127.0.0.1:3128`, with `HTTPS_PROXY` and `HTTP_PROXY` pointing
+there. The proxy decides what is reachable, and can log every connection.
+
+```
+airlock egress proxy /run/airlock-envoy/anthropic.sock   # this project
+airlock egress show                                      # posture, socket, and its check
+airlock egress minimal                                   # back to the in-box firewall
+```
+
+Or make it the default for every project in the host config:
+
+```
+AIRLOCK_EGRESS_MODE=proxy
+AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/anthropic.sock
+```
+
+A project that then sets another posture is named at each launch, so a box running
+outside the proxy is never silent.
+
+The guarantees:
+
+- **The network namespace enforces it, not the proxy variables.** A box that unsets
+  `HTTPS_PROXY`, kills the bridge or starts its own relay gains nothing: the socket is still
+  the only thing it can reach. The entrypoint also refuses to start Claude if it finds any
+  interface besides loopback.
+- **It fails closed.** If the socket is missing, or fails the [socket rule](#host-sockets--airlock-socket)
+  at launch, the box does not start. It never falls back to a network.
+- **The box cannot change it.** The posture lives in the host state dir like the rest, and
+  there is no `.airlock/config` key for it.
+- **One policy, the proxy's.** Egress groups, `egress =` lines and `AIRLOCK_EXTRA_EGRESS`
+  do not apply while it is set; a launch says so if any are present, and `add`/`rm` are
+  refused. To widen what a box can reach, widen the proxy's allowlist, or give the project
+  a socket for a different listener.
+- **No firewall capabilities.** With no network to filter, the box drops `NET_ADMIN` and
+  `NET_RAW` too.
+
+The socket must pass the same rule as `airlock socket add`, and the box connects as you,
+so grant your uid on it. [airlock-envoy](https://github.com/appletalk/airlock-envoy) is
+one such proxy: Envoy behind a systemd socket unit, an allowlist per listener, and an
+audit log of every connection. Anything that speaks HTTP `CONNECT` on a socket that
+passes the rule works too.
+
+Everything in the box has to go through the proxy, so tools that ignore the proxy
+variables fail rather than leak: the box has no DNS, and SSH remotes or raw TCP have no
+route. Images built before this posture are refused with a message to rebuild them.
+
 ## Host config — `~/.config/claude-airlock/config`
 
 Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
 `AIRLOCK_SHARE_BASE`, `AIRLOCK_EGRESS_MODE` (default posture for new projects),
+`AIRLOCK_EGRESS_PROXY` (the socket for the proxy posture),
 `AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`,
 `AIRLOCK_PROTECTED_PATHS` (extra paths no share or mount may overlap) and
 `AIRLOCK_SECRET_DENY` (pass entries never injected).
@@ -508,6 +561,10 @@ never *here is an older image you are about to mistake for the new one*.
   host-approved. Enforced by an in-container iptables/ipset default-DROP firewall, on
   **both IPv4 and IPv6** — a single unfiltered address family is a total bypass, so if
   the box has a global v6 address it cannot filter, it refuses to start.
+- **Or no network at all: `airlock egress proxy`.** The box has loopback only, and reaches
+  out through one host proxy socket whose allowlist decides, by name (an SNI-aware proxy
+  closes the CDN co-tenancy gap below). See
+  [Egress through a host proxy](#egress-through-a-host-proxy--airlock-egress-proxy).
 - **The allowlist matches destination IPs, not names — so it inherits CDN co-tenancy.**
   The firewall resolves each allowed domain to its IPs and permits TCP/443 to those IPs;
   it does not (and at that layer cannot) inspect the TLS SNI. So **any** site that resolves

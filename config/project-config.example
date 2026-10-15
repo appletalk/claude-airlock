@@ -22,13 +22,15 @@
 # the box looking configured while silently having no access. An entry that points
 # at the HOST (loopback, 169.254.x.x, 10.0.2.x, or an address on a host interface)
 # aborts too, unprompted: this file cannot grant the sandbox its own host.
+# Ignored when the project's posture is 'proxy' (`airlock egress proxy`): the proxy decides.
 # egress = cdn.jsdelivr.net fonts.gstatic.com
 # egress = 192.0.2.115:8428, 192.0.2.116:8428
 
 # NOT configurable here: the egress POSTURE. By default a project gets 'minimal' —
 # Anthropic core only, plus the `egress =` domains above. To also open package
 # registries, run one of these on the HOST: `airlock egress dev` (npm+PyPI+GitHub),
-# or a subset like `airlock egress github pypi` (GitHub+PyPI, no npm). Like secrets,
+# or a subset like `airlock egress github pypi` (GitHub+PyPI, no npm), or take the network
+# away entirely with `airlock egress proxy SOCKET`. Like secrets,
 # this is a host-controlled grant kept out of this box-writable file, so a compromised
 # session can't widen its own egress to the registries.
 

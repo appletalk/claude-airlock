@@ -14,7 +14,36 @@ set -euo pipefail
 AGENT_PATH="$PATH"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-/usr/local/bin/init-firewall.sh
+if [ -n "${AIRLOCK_EGRESS_PROXY:-}" ]; then
+  # Proxy posture: no firewall, because there is no network to filter. That only holds
+  # while it is true, so prove it: any interface besides loopback means this box was
+  # started some other way, and Claude does not start in it.
+  for n in /sys/class/net/*; do
+    if [ "${n##*/}" != lo ]; then
+      echo "[airlock] ERROR: proxy mode, but the box has a network interface (${n##*/}); not starting" >&2
+      exit 1
+    fi
+  done
+  [ -S "$AIRLOCK_EGRESS_PROXY" ] || { echo "[airlock] ERROR: proxy socket $AIRLOCK_EGRESS_PROXY is missing" >&2; exit 1; }
+  # Run as dev, the uid the host granted on the socket (root here is a subuid there). It
+  # needs no protecting from dev: killing it only cuts this box off. Its messages go to a
+  # file, not the terminal Claude draws on.
+  gosu dev socat -lf /tmp/airlock-proxy.log \
+    TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork "UNIX-CONNECT:$AIRLOCK_EGRESS_PROXY" &
+  # Wait for the listener in /proc rather than by connecting: a test connection would be
+  # relayed to the proxy and land in its audit log.
+  i=0
+  until grep -q '^ *[0-9]*: 0100007F:0C38 00000000:0000 0A' /proc/net/tcp; do
+    i=$((i + 1))
+    [ "$i" -lt 100 ] || { echo "[airlock] ERROR: the proxy bridge did not start (see /tmp/airlock-proxy.log)" >&2; exit 1; }
+    sleep 0.05
+  done
+  export HTTPS_PROXY=http://127.0.0.1:3128 https_proxy=http://127.0.0.1:3128
+  export HTTP_PROXY=http://127.0.0.1:3128 http_proxy=http://127.0.0.1:3128
+  export NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1
+else
+  /usr/local/bin/init-firewall.sh
+fi
 
 export HOME=/home/dev
 export PATH="$AGENT_PATH"
