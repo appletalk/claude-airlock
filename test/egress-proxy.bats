@@ -307,3 +307,22 @@ assert_proxy_box() {
   [[ "$output" == *"ignoring secret AIRLOCK_EGRESS_PROXY"* ]]
   [[ "$output" == *"ignoring secret HTTPS_PROXY"* ]]
 }
+
+@test "a stored posture is split without globbing against the workspace" {
+  p="$(mkproj pglob)"
+  touch "$p/github"
+  _launch "$p" egress minimal
+  printf '*\n' > "$(state_dir "$p")/egress-mode"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  refute launched
+}
+
+@test "padded postures resolve as their words" {
+  for m in " dev" "dev " "  github   pypi "; do
+    p="$(mkproj "pp-${m//[^a-z]/}")"
+    : > "$ENGINE_ARGS_FILE"
+    TEST_EGRESS_MODE="$m" _launch "$p" >/dev/null 2>&1 || true
+    launched || { echo "'$m' refused"; false; }
+  done
+}
