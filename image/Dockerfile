@@ -82,7 +82,12 @@ RUN mkdir -p /etc/airlock
 COPY firewall.conf /etc/airlock/firewall.conf
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY entrypoint.sh /usr/local/bin/airlock-entrypoint
-RUN chmod 0444 /etc/airlock/firewall.conf \
+# Claude Code's managed (policy) settings: telemetry, error reporting, the auto-updater and
+# claude.ai connectors off. Policy settings are applied after user, project and local
+# settings, so no settings file the box can write (its ~/.claude, or the workspace's
+# .claude/) can turn these back on. Root-owned and read-only, like the egress policy.
+COPY managed-settings.json /etc/claude-code/managed-settings.json
+RUN chmod 0444 /etc/airlock/firewall.conf /etc/claude-code/managed-settings.json \
     && chmod 0555 /usr/local/bin/init-firewall.sh /usr/local/bin/airlock-entrypoint
 
 # On PATH before the installer runs (it warns when its target dir is not), and inherited

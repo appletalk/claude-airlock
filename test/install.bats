@@ -649,3 +649,23 @@ _install_to_end() {
   _install_to_end
   grep -q 'One-time auth' "$BATS_TEST_TMPDIR/install.out"
 }
+
+# Telemetry is always off; install clears every project's leftover `telemetry-on` marker
+# from the retired switch and names the projects, so none keeps it on unseen.
+@test "install clears leftover telemetry-on markers and lists the projects" {
+  st="$AIRLOCK_HOME/.config/claude-airlock/state"
+  mkdir -p "$st/proj-a" "$st/proj-b" "$st/proj-c"
+  touch "$st/proj-a/telemetry-on" "$st/proj-c/telemetry-on"
+  _install
+  [ ! -e "$st/proj-a/telemetry-on" ]
+  [ ! -e "$st/proj-c/telemetry-on" ]
+  grep -q 'always off' "$BATS_TEST_TMPDIR/install.err"
+  grep -q 'proj-a' "$BATS_TEST_TMPDIR/install.err"
+  grep -q 'proj-c' "$BATS_TEST_TMPDIR/install.err"
+  ! grep -q 'proj-b' "$BATS_TEST_TMPDIR/install.err"
+}
+
+@test "install says nothing about telemetry when no project had it on" {
+  _install
+  ! grep -q 'always off' "$BATS_TEST_TMPDIR/install.err"
+}
