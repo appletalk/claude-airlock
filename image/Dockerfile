@@ -86,6 +86,9 @@ RUN mkdir -p /etc/airlock
 COPY firewall.conf /etc/airlock/firewall.conf
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY entrypoint.sh /usr/local/bin/airlock-entrypoint
+# This entrypoint can run a box with no network through a host proxy socket (`airlock
+# egress proxy`); the launcher refuses that posture on images without this label.
+LABEL org.claude-airlock.egress-proxy="1"
 # Claude Code's managed (policy) settings: telemetry, error reporting, the auto-updater and
 # claude.ai connectors off. Policy settings are applied after user, project and local
 # settings, so no settings file the box can write (its ~/.claude, or the workspace's

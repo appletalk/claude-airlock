@@ -15,7 +15,8 @@
 #                Claude, so `--resume` and saved memories continue in and out of
 #                the box. Everything else (config, settings/hooks, credentials,
 #                other projects) stays isolated.
-# Egress       : default-DROP allowlist enforced inside the container
+# Egress       : default-DROP allowlist enforced inside the container, or (`airlock
+#                egress proxy`) no network at all and one host proxy socket
 #
 # Optional config (bash syntax): ~/.config/claude-airlock/config
 set -euo pipefail
@@ -54,6 +55,9 @@ AIRLOCK_PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
 # list under docker. Set it when neither works,
 # e.g. docker on a host whose only resolver is loopback (see lib/host-dns.sh).
 AIRLOCK_DNS="${AIRLOCK_DNS:-}"
+# The host proxy socket for the 'proxy' egress posture (`airlock egress proxy`), used when
+# a project names none, and by AIRLOCK_EGRESS_MODE=proxy as the default for every project.
+AIRLOCK_EGRESS_PROXY="${AIRLOCK_EGRESS_PROXY:-}"
 
 # Snapshot before sourcing the config: `${VAR:-default}` afterwards cannot tell an
 # environment value from one the config just set, which is how "env-only" silently
@@ -244,13 +248,14 @@ fi
 
 # Canonical opt-in egress groups (the "dev registries"). CORE (Anthropic) is always
 # on and is NOT a group. A project's posture (STATE_DIR/egress-mode) is one of:
-# 'minimal' (core only), 'dev' (all groups), or an explicit subset like "github pypi".
+# 'minimal' (core only), 'dev' (all groups), an explicit subset like "github pypi", or
+# 'proxy <socket>' (no network; see _egress_proxy_socket).
 AIRLOCK_EGRESS_ALL_GROUPS="github npm pypi"
 # Normalize a stored posture to a validated space-separated group list ("" = minimal).
 _resolve_egress_groups() {
   local raw="$1" g out=""
   case "$raw" in
-    ""|minimal) return ;;
+    ""|minimal|proxy|"proxy "*) return ;;
     dev)        printf '%s' "$AIRLOCK_EGRESS_ALL_GROUPS"; return ;;
   esac
   for g in $raw; do                                   # explicit list — keep known groups, dedup
@@ -259,6 +264,20 @@ _resolve_egress_groups() {
     esac
   done
   printf '%s' "$out"
+}
+
+# The 'proxy' posture: the box gets no network at all (--network none, only loopback), and
+# reaches out through one host proxy's Unix socket, bridged to a loopback port inside the
+# box. The proxy alone decides what is reachable, so groups and `egress =` grants do not
+# apply. Stored as "proxy <socket>"; a bare "proxy" (AIRLOCK_EGRESS_MODE=proxy in the host
+# config) takes AIRLOCK_EGRESS_PROXY.
+_egress_is_proxy() { local w; read -r w _ <<< "$1"; [ "$w" = proxy ]; }
+# The socket for posture $1, or nothing when it is not 'proxy' or names no socket.
+_egress_proxy_socket() {
+  local w sock
+  read -r w sock _ <<< "$1"
+  [ "$w" = proxy ] || return 0
+  printf '%s' "${sock:-$AIRLOCK_EGRESS_PROXY}"
 }
 
 # True if directory $1 is, contains, or sits inside path $2 (both canonical).
@@ -773,40 +792,85 @@ if [ "${1:-}" = "socket" ]; then
   exit 0
 fi
 
-# `airlock egress [show|list|minimal|dev|<groups>|add <groups>|rm <groups>]` reviews or
-# sets this project's egress POSTURE. Default 'minimal' = Anthropic core only (Claude
-# can't run without it) plus any host-approved `egress =` domains. 'dev' opens all
+# `airlock egress [show|list|minimal|dev|<groups>|add <groups>|rm <groups>|proxy [SOCKET]]`
+# reviews or sets this project's egress POSTURE. Default 'minimal' = Anthropic core only
+# (Claude can't run without it) plus any host-approved `egress =` domains. 'dev' opens all
 # convenience groups; name a subset to REPLACE (e.g. `egress github pypi` — GitHub+PyPI,
-# no npm); or edit incrementally with `add`/`rm` (e.g. `egress rm pypi`). The posture
-# lives host-side in STATE_DIR (never mounted into the box), so widening is a deliberate
-# HOST action; a compromised box can't grant itself a registry as an exfil channel.
+# no npm); or edit incrementally with `add`/`rm` (e.g. `egress rm pypi`). 'proxy SOCKET'
+# takes the network away entirely and sends everything through that host proxy socket (see
+# _egress_is_proxy). The posture lives host-side in STATE_DIR (never mounted into the box),
+# so widening is a deliberate HOST action; a compromised box can't grant itself a registry
+# as an exfil channel, or leave the proxy.
 if [ "${1:-}" = "egress" ]; then
   _egslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
   _egdir="$HOME/.config/claude-airlock/state/$_egslug"; mkdir -p "$_egdir"
   _egmode="$(cat "$_egdir/egress-mode" 2>/dev/null || echo "${AIRLOCK_EGRESS_MODE:-minimal}")"
+  _egname="$(basename "$WORKSPACE")"
+  # Leaving proxy mode gives the box a network again, so say so rather than let a group
+  # change do it quietly.
+  _egleave() {
+    if _egress_is_proxy "$_egmode"; then
+      echo "  This leaves proxy mode: the box gets a network again, limited by the in-box firewall."
+    fi
+  }
   _egwrite() {   # store a resolved group list; empty -> minimal
     if [ -z "$1" ]; then printf 'minimal\n' > "$_egdir/egress-mode"
-      echo "airlock: egress for $(basename "$WORKSPACE") -> minimal (Anthropic core only)"
+      echo "airlock: egress for $_egname -> minimal (Anthropic core only)"
     else printf '%s\n' "$1" > "$_egdir/egress-mode"
-      echo "airlock: egress groups for $(basename "$WORKSPACE") -> $1"; fi
+      echo "airlock: egress groups for $_egname -> $1"; fi
+    _egleave
   }
+  _egapproved="$(grep -c . "$_egdir/approved-egress" 2>/dev/null || true)"
   case "${2:-show}" in
     show|list)
-      _egnow="$(_resolve_egress_groups "$_egmode")"
-      echo "egress for $(basename "$WORKSPACE"):"
-      echo "  posture: ${_egmode:-minimal}"
-      echo "  active groups: ${_egnow:-<none — Anthropic core only>}"
-      echo "  available groups: $AIRLOCK_EGRESS_ALL_GROUPS"
-      echo "  host-approved extra domains (.airlock/config 'egress ='):"
-      if [ -s "$_egdir/approved-egress" ]; then sed 's/^/    /' "$_egdir/approved-egress"; else echo "    (none)"; fi ;;
+      echo "egress for $_egname:"
+      if _egress_is_proxy "$_egmode"; then
+        _egp="$(_egress_proxy_socket "$_egmode")"
+        echo "  posture: proxy"
+        if [ -z "$_egp" ]; then
+          echo "  proxy socket: <none> (set AIRLOCK_EGRESS_PROXY or run 'airlock egress proxy SOCKET'; launches are refused)"
+        elif _egwhy="$(_airlock_socket_check "$_egp" 2>&1)"; then
+          echo "  proxy socket: $_egp"
+        else
+          echo "  proxy socket: $_egp  (launches are REFUSED: $_egwhy)"
+        fi
+        echo "  network: none; only the proxy is reachable, and its allowlist decides"
+        echo "  ignored while proxy is set: egress groups, host-approved 'egress =' domains (${_egapproved:-0})${AIRLOCK_EXTRA_EGRESS:+, AIRLOCK_EXTRA_EGRESS}"
+      else
+        _egnow="$(_resolve_egress_groups "$_egmode")"
+        echo "  posture: ${_egmode:-minimal}"
+        echo "  active groups: ${_egnow:-<none — Anthropic core only>}"
+        echo "  available groups: $AIRLOCK_EGRESS_ALL_GROUPS"
+        echo "  host-approved extra domains (.airlock/config 'egress ='):"
+        if [ -s "$_egdir/approved-egress" ]; then sed 's/^/    /' "$_egdir/approved-egress"; else echo "    (none)"; fi
+        if _egress_is_proxy "${AIRLOCK_EGRESS_MODE:-}"; then
+          echo "  note: the host default (AIRLOCK_EGRESS_MODE) is proxy; this project overrides it"
+        fi
+      fi ;;
+    proxy)
+      _egp="${3:-$AIRLOCK_EGRESS_PROXY}"
+      [ -n "$_egp" ] || { echo "usage: airlock egress proxy SOCKET   (or set AIRLOCK_EGRESS_PROXY in $CONFIG_FILE)" >&2; exit 1; }
+      case "$_egp" in *[[:space:]]*) echo "airlock: '$_egp' contains whitespace" >&2; exit 1 ;; esac
+      _egc="$(_airlock_socket_check "$_egp" 2>&1)" || { echo "airlock: $_egc" >&2; exit 1; }
+      printf 'proxy %s\n' "$_egc" > "$_egdir/egress-mode"
+      echo "airlock: egress for $_egname -> proxy via $_egc"
+      echo "  The box gets no network (loopback only). Everything goes through that socket, and"
+      echo "  the proxy behind it decides what is reachable; launches are refused while the socket"
+      echo "  is missing or fails the socket rule. Ignored while proxy is set: egress groups,"
+      echo "  host-approved 'egress =' domains (${_egapproved:-0})${AIRLOCK_EXTRA_EGRESS:+, AIRLOCK_EXTRA_EGRESS}." ;;
     minimal)
-      printf 'minimal\n' > "$_egdir/egress-mode"
-      echo "airlock: egress for $(basename "$WORKSPACE") -> minimal (Anthropic core only)" ;;
+      _egwrite "" ;;
     dev)
       printf 'dev\n' > "$_egdir/egress-mode"
-      echo "airlock: egress for $(basename "$WORKSPACE") -> dev (all groups: $AIRLOCK_EGRESS_ALL_GROUPS)" ;;
+      echo "airlock: egress for $_egname -> dev (all groups: $AIRLOCK_EGRESS_ALL_GROUPS)"
+      _egleave ;;
     add|rm|github|npm|pypi)                            # set/edit the group list
       _op="set"; case "$2" in add|rm) _op="$2"; shift 2 ;; *) shift ;; esac
+      if [ "$_op" != set ] && _egress_is_proxy "$_egmode"; then
+        echo "airlock: egress for $_egname is 'proxy': groups do not apply, the proxy decides." >&2
+        echo "  To leave proxy mode, set a posture: airlock egress minimal | dev | <groups>" >&2
+        exit 1
+      fi
       [ "$#" -gt 0 ] || { echo "usage: airlock egress $_op <groups: $AIRLOCK_EGRESS_ALL_GROUPS>" >&2; exit 1; }
       for _g in "$@"; do                               # validate every requested group
         case " $AIRLOCK_EGRESS_ALL_GROUPS " in *" $_g "*) ;; *) echo "airlock: unknown egress group '$_g' (valid: $AIRLOCK_EGRESS_ALL_GROUPS)" >&2; exit 1 ;; esac
@@ -819,7 +883,7 @@ if [ "${1:-}" = "egress" ]; then
                [ "$_keep" = 1 ] && _sel="${_sel:+$_sel }$_g"; done ;;
       esac
       _egwrite "$(_resolve_egress_groups "$_sel")" ;;  # resolver validates + dedups
-    *) echo "usage: airlock egress [show|list] | minimal | dev | <groups> | add <groups> | rm <groups>   (groups: $AIRLOCK_EGRESS_ALL_GROUPS)" >&2; exit 1 ;;
+    *) echo "usage: airlock egress [show|list] | minimal | dev | <groups> | add <groups> | rm <groups> | proxy [SOCKET]   (groups: $AIRLOCK_EGRESS_ALL_GROUPS)" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -1511,6 +1575,35 @@ trap '_airlock_cleanup || true; exit 141' PIPE
 EGRESS_MODE="$(cat "$STATE_DIR/egress-mode" 2>/dev/null || echo "${AIRLOCK_EGRESS_MODE:-minimal}")"
 AIRLOCK_EGRESS_GROUPS="$(_resolve_egress_groups "$EGRESS_MODE")"
 
+# Proxy posture: fail closed. A missing or refused socket stops the launch; falling back to
+# a network would hand the box the very route this posture exists to remove, silently.
+EGRESS_PROXY=""
+if _egress_is_proxy "$EGRESS_MODE"; then
+  EGRESS_PROXY="$(_egress_proxy_socket "$EGRESS_MODE")"
+  if [ -z "$EGRESS_PROXY" ]; then
+    echo "claude-airlock: egress is 'proxy' but names no socket; not launching." >&2
+    echo "  Run: airlock egress proxy SOCKET   (or set AIRLOCK_EGRESS_PROXY in $CONFIG_FILE)" >&2
+    exit 1
+  fi
+  if ! _egc="$(_airlock_socket_check "$EGRESS_PROXY" 2>&1)"; then
+    echo "claude-airlock: egress proxy: $_egc" >&2
+    echo "  Not launching: in proxy mode the box has no other way out. Start the proxy, or pick" >&2
+    echo "  another posture on the host: airlock egress minimal" >&2
+    exit 1
+  fi
+  EGRESS_PROXY="$_egc"
+  if [ -n "${_REQ_EGRESS:-}" ]; then
+    echo "claude-airlock: ignoring .airlock/config 'egress =' ($_REQ_EGRESS): in proxy mode the proxy decides." >&2
+    _REQ_EGRESS=""
+  fi
+  if [ -n "${AIRLOCK_EXTRA_EGRESS:-}" ]; then
+    echo "claude-airlock: ignoring AIRLOCK_EXTRA_EGRESS: in proxy mode the proxy decides." >&2
+    AIRLOCK_EXTRA_EGRESS=""
+  fi
+elif _egress_is_proxy "${AIRLOCK_EGRESS_MODE:-}"; then
+  echo "claude-airlock: egress for this project is '$EGRESS_MODE', not the proxy (host default); 'airlock egress proxy' to switch." >&2
+fi
+
 # Gate egress requested by the (box-writable) .airlock/config behind a host-side
 # approval list the box CANNOT touch — it lives in STATE_DIR, which is not mounted
 # into the container. Approved domains apply silently; a new/changed one (e.g. an
@@ -1785,7 +1878,6 @@ args=(
   --rm -it
   --hostname airlock
   --cap-drop=ALL
-  --cap-add=NET_ADMIN --cap-add=NET_RAW
   --cap-add=SETUID --cap-add=SETGID
   --security-opt=no-new-privileges
   # The engine's default seccomp profile minus new namespaces. With the default, `dev`
@@ -1819,6 +1911,12 @@ args=(
   -v "$AIRLOCK_TMP:$AIRLOCK_TMP:rw"                 # per-project scratch, same path host & box
   -e "AIRLOCK_TMP=$AIRLOCK_TMP"
 )
+
+# The firewall's capabilities, only where there is a firewall: a proxy-mode box has no
+# network to filter, and no use for control of its own network namespace.
+if [ -z "$EGRESS_PROXY" ]; then
+  args+=( --cap-add=NET_ADMIN --cap-add=NET_RAW )
+fi
 
 # Resource limits. Cap the in-box process count so a runaway or compromised agent can't
 # fork-bomb the host; podman already defaults pids-limit to 2048, but Docker's default is
@@ -1955,6 +2053,21 @@ if [ -s "$STATE_DIR/sockets" ]; then
       _ksock_pins+=( "$(stat -c %d:%i:%.9Z:%u:%f "$_kc") $_kc" )
     else echo "claude-airlock: NOT mounting socket $_k: $_kc" >&2; fi
   done < "$STATE_DIR/sockets"
+fi
+# The proxy socket, checked and pinned the same way, but refusal stops the launch. The
+# entrypoint bridges it to 127.0.0.1:3128 and points the proxy variables there.
+if [ -n "$EGRESS_PROXY" ]; then
+  if ! _kc="$(_airlock_socket_check "$EGRESS_PROXY" 2>&1)"; then
+    echo "claude-airlock: egress proxy: $_kc; not launching" >&2
+    exit 1
+  fi
+  _kdup=0
+  for _kp in "${_ksock_pins[@]}"; do [ "${_kp#* }" = "$_kc" ] && _kdup=1; done
+  if [ "$_kdup" = 0 ]; then
+    args+=( -v "$_kc:$_kc:ro" )
+    _ksock_pins+=( "$(stat -c %d:%i:%.9Z:%u:%f "$_kc") $_kc" )
+  fi
+  args+=( -e "AIRLOCK_EGRESS_PROXY=$_kc" )
 fi
 
 # Broad read-only roots (host-set AIRLOCK_ROOTS) for cross-project inspection, under
@@ -2137,7 +2250,18 @@ fi
 # must stay the last thing before the run.
 # shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
 source "$_repo/lib/host-dns.sh"
-if [ "$AIRLOCK_ENGINE" = podman ]; then
+if [ -n "$EGRESS_PROXY" ]; then
+  # No interfaces but loopback, and no resolver: the proxy socket is the only way out.
+  # The entrypoint refuses to start Claude if it finds any other interface.
+  args+=( --network=none )
+  # An image from before this posture would try to raise the firewall without the
+  # capabilities for it and die with a confusing error; say what is actually wrong.
+  if [ "$("$AIRLOCK_ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}' "$AIRLOCK_IMAGE" 2>/dev/null)" != 1 ]; then
+    echo "claude-airlock: $AIRLOCK_IMAGE predates the proxy posture (no socket bridge in its entrypoint)." >&2
+    echo "  Rebuild the images (make install), or pick another posture: airlock egress minimal" >&2
+    exit 1
+  fi
+elif [ "$AIRLOCK_ENGINE" = podman ]; then
   case "$AIRLOCK_PODMAN_NETWORK" in pasta|pasta:*|'') airlock_podman_probe ;; esac  # once
   # pasta maps 169.254.1.2 (host.containers.internal) to the host: from the box it
   # reaches any host service bound to 0.0.0.0 - a dev server, Postgres, an MCP server,
@@ -2157,10 +2281,13 @@ fi
 # DNS: point the box at the network stack's forwarder to the host resolver, and tell the
 # firewall which public resolvers the host actually chose. Without both, a loopback-only
 # host resolver makes the engine fall back to Google Public DNS (see lib/host-dns.sh).
-while IFS= read -r _ns; do
-  if [ -n "$_ns" ]; then args+=( "--dns=$_ns" ); fi
-done < <(airlock_dns_forwarders "$AIRLOCK_ENGINE" "$AIRLOCK_PODMAN_NETWORK")
-args+=( -e "AIRLOCK_HOST_DNS=$(airlock_host_nameservers)" )
+# A proxy-mode box has no resolver to reach: the proxy resolves.
+if [ -z "$EGRESS_PROXY" ]; then
+  while IFS= read -r _ns; do
+    if [ -n "$_ns" ]; then args+=( "--dns=$_ns" ); fi
+  done < <(airlock_dns_forwarders "$AIRLOCK_ENGINE" "$AIRLOCK_PODMAN_NETWORK")
+  args+=( -e "AIRLOCK_HOST_DNS=$(airlock_host_nameservers)" )
+fi
 
 # From here this session has actually MOUNTED the project's shared directories, so its
 # cleanup may remove them if it turns out to be the last one out. Before this point a run

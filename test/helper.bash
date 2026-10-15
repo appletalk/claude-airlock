@@ -45,6 +45,12 @@ if [ "\${1:-}" = info ] && [[ "\$*" == *Host.Pasta.Executable* ]]; then
   echo "Copyright Red Hat"
   exit 0
 fi
+# The launcher's proxy-posture image check: answered, not recorded. STUB_IMAGE_EGRESS_PROXY
+# is the label value (default 1, an image that has it; empty for one that predates it).
+if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ] && [[ "\$*" == *org.claude-airlock.egress-proxy* ]]; then
+  echo "\${STUB_IMAGE_EGRESS_PROXY-1}"
+  exit 0
+fi
 printf '%s\n' "\$@" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 printf '%s\n' "ENGINE_INVOKED=$_e" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 # Snapshot the session pidfiles that exist WHILE this session is live. Cleanup unlinks
@@ -146,6 +152,10 @@ _launch() {
     ${TEST_SSH_AUTH_SOCK:+SSH_AUTH_SOCK="$TEST_SSH_AUTH_SOCK"} \
     ${FAKE_OWNERS:+FAKE_OWNERS="$FAKE_OWNERS"} \
     ${FAKE_FSTYPE:+FAKE_FSTYPE="$FAKE_FSTYPE"} \
+    ${STUB_IMAGE_EGRESS_PROXY+STUB_IMAGE_EGRESS_PROXY="$STUB_IMAGE_EGRESS_PROXY"} \
+    ${TEST_EGRESS_MODE:+AIRLOCK_EGRESS_MODE="$TEST_EGRESS_MODE"} \
+    ${TEST_EGRESS_PROXY:+AIRLOCK_EGRESS_PROXY="$TEST_EGRESS_PROXY"} \
+    ${TEST_EXTRA_EGRESS:+AIRLOCK_EXTRA_EGRESS="$TEST_EXTRA_EGRESS"} \
     bash "$AIRLOCK" "$@" </dev/null
 }
 
