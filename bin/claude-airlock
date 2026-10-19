@@ -910,9 +910,13 @@ if [ "${1:-}" = "egress" ]; then
           echo "  proxy socket: $_egp  (launches are REFUSED: $_egwhy)"
         fi
         echo "  network: none; the proxy's allowlist decides what is reachable"
-        if [ -n "$_egp" ] && _airlock_client_manifest "$_egp" 2>/dev/null && [ -n "$_CLIENT_HOSTS" ]; then
-          echo "  plain HTTP through the proxy (it adds any credential; box git and gh use http:// for these):"
-          awk '{ printf "    %s (rules %s, credential %s)\n", $1, $2, $3 }' <<< "$_CLIENT_HOSTS"
+        if [ -n "$_egp" ]; then
+          if ! _egwhy="$(_airlock_client_manifest "$_egp" 2>&1)"; then
+            echo "  plain HTTP through the proxy: not set up (${_egwhy#claude-airlock: })"
+          elif _airlock_client_manifest "$_egp" 2>/dev/null && [ -n "$_CLIENT_HOSTS" ]; then
+            echo "  plain HTTP through the proxy (it adds any credential; box git and gh use http:// for these):"
+            awk '{ printf "    %s (rules %s, credential %s)\n", $1, $2, $3 }' <<< "$_CLIENT_HOSTS"
+          fi
         fi
         if [ -s "$_egdir/sockets" ] && grep -qvxF "$_egp" "$_egdir/sockets"; then
           echo "  also reachable, outside the proxy (granted with 'airlock socket add'):"
@@ -1496,6 +1500,19 @@ for _ef in "$STATE_DIR"/engine-env "$STATE_DIR"/engine-env.*; do
   esac
 done
 unset _ef _eftag _efpid
+# The box's launcher-written config (its ~/.gitconfig, its gh config), per session: what a
+# launch writes depends on the posture, so a shared file rewritten by the next launch would
+# change a running box's git (a dev box would gain the proxy's http:// rewrites and send in
+# the clear). Swept like the env-files once their session is gone.
+BOX_CFG="$STATE_DIR/box-config.$$.$SELF_START"
+for _bc in "$STATE_DIR"/box-config.*; do
+  [ -d "$_bc" ] || continue
+  [ "$_bc" = "$BOX_CFG" ] && continue
+  _bctag="${_bc##*/box-config.}"
+  [ "$(_airlock_proc_start "${_bctag%%.*}")" = "${_bctag#*.}" ] || rm -rf "$_bc"
+done
+unset _bc _bctag
+rm -f "$STATE_DIR/gitconfig"   # the shared file of earlier versions
 # Empty under persist-login — the var must be ABSENT, not empty-string: Claude
 # treats a set-but-empty token as a credential and fails auth instead of falling
 # through to its own /login.
@@ -1580,6 +1597,7 @@ _airlock_cleanup() {
     if [ "${_lpid:-}" = "$$" ]; then rm -f "$LOCK"; fi
   fi
   rm -f "$ENV_FILE"                              # drop the resolved token/secrets file
+  rm -rf "${BOX_CFG:-/nonexistent}"              # this box's git and gh config
   # Our own per-process temp files. Unique names mean a hard kill in the create->mv window
   # leaves one orphan PER PID forever, where the old fixed path left one reusable file -
   # bounded litter became unbounded.
@@ -2503,13 +2521,16 @@ done
   while IFS= read -r _h; do
     [ -n "$_h" ] || continue
     printf '[url "http://%s/"]\n' "$_h"
-    printf '\tinsteadOf = %s\n' "https://$_h/" "git@$_h:" "ssh://git@$_h/"
+    printf '\tinsteadOf = %s\n' "https://$_h/" "https://$_h:443/" "git@$_h:" "ssh://git@$_h/" "ssh://$_h/" "git+ssh://git@$_h/"
     for _p in "${_git_ssh_ports[@]}"; do printf '\tinsteadOf = ssh://git@%s:%s/\n' "$_h" "$_p"; done
   done < <(_airlock_client_git_hosts)
-} > "$STATE_DIR/gitconfig"
-if [ -s "$STATE_DIR/gitconfig" ]; then
-  args+=( -v "$STATE_DIR/gitconfig:/home/dev/.gitconfig:rw" )
+} > "$STATE_DIR/gitconfig.$$.tmp"
+if [ -s "$STATE_DIR/gitconfig.$$.tmp" ]; then
+  (umask 077; mkdir -p "$BOX_CFG")
+  mv -f "$STATE_DIR/gitconfig.$$.tmp" "$BOX_CFG/gitconfig"
+  args+=( -v "$BOX_CFG/gitconfig:/home/dev/.gitconfig:rw" )
 fi
+rm -f "$STATE_DIR/gitconfig.$$.tmp"
 
 # Inject per-project secrets (host-controlled grant) as env into the box. pass:
 # refs resolve here via `pass show` — if pass/gpg is locked it prompts, and on
@@ -2546,26 +2567,30 @@ if [ -f "$SECRETS_FILE" ]; then
   done < "$SECRETS_FILE"
 fi
 
-# gh, when the proxy serves api.github.com by plain HTTP: a box-only gh config sends gh's
-# requests over the proxy socket itself (gh's http_unix_socket, plain HTTP there), with a
-# placeholder token the proxy replaces with the real one. Read-only: the launcher owns it.
+# gh, when the proxy serves api.github.com by plain HTTP with a credential: a box-only gh
+# config sends gh's requests over the proxy socket itself (gh's http_unix_socket, plain HTTP
+# there), with a placeholder token the proxy replaces with the real one. Read-only: the
+# launcher owns it. Without a credential there is nothing to replace the placeholder, which
+# GitHub would refuse even on public endpoints, and gh won't run without a token: not set up.
 _gh_line="$(awk '$1 == "api.github.com"' <<< "$_CLIENT_HOSTS")"
-if [ -n "$_gh_line" ]; then
-  mkdir -p "$STATE_DIR/box-gh"
-  { echo "# Written by claude-airlock at every launch: gh speaks plain HTTP over the proxy socket."
+if [ -n "$_gh_line" ] && [ "${_gh_line##* }" != yes ]; then
+  echo "claude-airlock: the proxy has no credential for api.github.com, so gh is not set up for it" >&2
+elif [ -n "$_gh_line" ]; then
+  (umask 077; mkdir -p "$BOX_CFG/gh")
+  { echo "# Written by claude-airlock for this box: gh speaks plain HTTP over the proxy socket."
     echo "version: 1"
     echo "git_protocol: https"
     printf "http_unix_socket: '%s'\n" "${EGRESS_PROXY//\'/\'\'}"
-  } > "$STATE_DIR/box-gh/config.yml.new"
-  mv -f "$STATE_DIR/box-gh/config.yml.new" "$STATE_DIR/box-gh/config.yml"
-  args+=( -v "$STATE_DIR/box-gh:/etc/airlock-box/gh:ro" -e "GH_CONFIG_DIR=/etc/airlock-box/gh" )
-  if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
+  } > "$BOX_CFG/gh/config.yml"
+  args+=( -v "$BOX_CFG/gh:/etc/airlock-box/gh:ro" -e "GH_CONFIG_DIR=/etc/airlock-box/gh" )
+  if grep -qE '^GH_TOKEN=' "$ENV_FILE"; then
     echo "claude-airlock: the proxy adds GitHub's credential, yet secret GH_TOKEN puts one in the box too (airlock secret rm GH_TOKEN)" >&2
   else
     args+=( -e "GH_TOKEN=airlock-proxy-adds-the-credential" )
   fi
-  if [ "${_gh_line##* }" != yes ]; then
-    echo "claude-airlock: the proxy has no credential for api.github.com, so gh's requests carry only the placeholder token" >&2
+  _gh_other="$(grep -oE '^(GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)=' "$ENV_FILE" | tr -d = | tr '\n' ' ' || true)"
+  if [ -n "$_gh_other" ]; then
+    echo "claude-airlock: the proxy adds GitHub's credential, yet secret(s) ${_gh_other% } put a token in the box too (airlock secret rm ...)" >&2
   fi
 fi
 
