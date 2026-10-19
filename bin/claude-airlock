@@ -35,6 +35,7 @@ AIRLOCK_ARTIFACT_DIRS="${AIRLOCK_ARTIFACT_DIRS:-.venv node_modules}"  # env-buil
 AIRLOCK_PIDS_LIMIT="${AIRLOCK_PIDS_LIMIT:-4096}"     # cap in-box process count (fork-bomb guard); 0/"" = engine default
 AIRLOCK_MEMORY="${AIRLOCK_MEMORY:-}"                 # host RAM cap, e.g. 8g; empty = no limit (too low breaks real builds)
 AIRLOCK_PROTECTED_PATHS="${AIRLOCK_PROTECTED_PATHS:-}" # extra host paths no share or mount may contain (space-separated)
+AIRLOCK_GIT_RO="${AIRLOCK_GIT_RO:-1}"                # 1 = bind the git config and hooks of read-write repos read-only (0 = off)
 AIRLOCK_SECRET_DENY="${AIRLOCK_SECRET_DENY:-}"       # pass entry globs `airlock secret` must never inject (space-separated)
 
 # Container engine. Rootless podman is the DEFAULT and the recommended posture:
@@ -2115,6 +2116,122 @@ if [ -n "$EGRESS_PROXY" ]; then
     _ksock_pins+=( "$(stat -c %d:%i:%.9Z:%u:%f "$_kc") $_kc" )
   fi
   args+=( -e "AIRLOCK_EGRESS_PROXY=$_kc" )
+fi
+
+# Host git must not run what a box wrote. In each read-write root (the workspace and every
+# share_rw) that is a git checkout, the box still writes objects, refs, the index and new
+# worktrees, but what host git reads as instructions is bound read-only: .git/config, the
+# hooks, a core.hooksPath and included config files inside a read-write root, submodule
+# gitdirs, and existing linked worktrees' commondir. Each git directory is also bound onto
+# itself, so it cannot be renamed away and replaced (under rootful docker no user namespace
+# locks the nested mounts). Anything that looks planted (a symlink, a hard-linked config)
+# stops the launch. Box-created repos and worktrees stay box territory: see SECURITY.md.
+_git_rw_roots=( "$WORKSPACE" )
+for _m in "${SHARE_RW[@]:-}"; do [ -n "$_m" ] && _git_rw_roots+=( "$_m" ); done
+_git_in_rw() {
+  local r
+  for r in "${_git_rw_roots[@]}"; do case "$1" in "$r"|"$r"/*) return 0 ;; esac; done
+  return 1
+}
+# Read one config file and nothing else: from /, so git discovers no repository (it would
+# otherwise read the project's own config, includes and all, at startup), with no system
+# or global config. Exit 1 is "no such key"; anything else (a fatal parse, a circular
+# include) is a refusal, never an empty answer.
+_git_cfg() {
+  local out rc=0
+  out="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C / config --no-includes "$@" 2>&1)" || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$out" ;;
+    1) ;;
+    *) echo "cannot read git config (${*: -2}): ${out%%$'\n'*}" >&2; return 1 ;;
+  esac
+}
+_git_bound=()
+_git_bind() {   # $1 path, $2 ro|rw: bind it onto itself once
+  local b
+  for b in "${_git_bound[@]:-}"; do [ "$b" = "$1" ] && return 0; done
+  _git_bound+=( "$1" ); args+=( -v "$1:$1:$2" )
+}
+# A path named by a config value ($1, relative to $2) that lands inside a read-write root:
+# created if missing ($3 = dir|file), then bound read-only. Outside every root: nothing to do.
+_git_guard_path() {
+  local p="$1" c
+  # shellcheck disable=SC2088 # a literal ~/ in the config value, expanded the way git does
+  case "$p" in "~/"*) p="$HOME/${p#\~/}" ;; /*) ;; *) p="$2/$p" ;; esac
+  c="$(realpath -m -- "$p")"
+  _git_in_rw "$c" || return 0
+  [ "$c" = "$(realpath -ms -- "$p")" ] || { echo "$p resolves through a symlink inside a read-write root" >&2; return 1; }
+  if [ ! -e "$c" ]; then
+    if [ "$3" = dir ]; then mkdir -p -- "$c" || return 1; else mkdir -p -- "$(dirname -- "$c")" && : > "$c" || return 1; fi
+  fi
+  _git_bind "$c" ro
+}
+# Config file $1 of a repo whose hooks run in worktree $2. Includes are followed here, the
+# way git resolves them (relative to the including file, at most 10 deep), never by git
+# itself: an included file can set core.hooksPath too, and one inside a read-write root is
+# bound read-only like the config that names it. $3 is the include depth.
+_git_guard_config() {
+  local f="$1" depth="${3:-0}" k k_all v i
+  [ "$depth" -le 10 ] || { echo "$f: config includes nested more than 10 deep" >&2; return 1; }
+  [ -L "$f" ] && { echo "$f is a symlink" >&2; return 1; }
+  if _git_in_rw "$(realpath -m -- "$f")"; then
+    [ "$(stat -c %h -- "$f")" = 1 ] || { echo "$f has more than one hard link" >&2; return 1; }
+    _git_bind "$f" ro
+  fi
+  v="$(_git_cfg --file "$f" --get core.hooksPath)" || return 1
+  [ -z "$v" ] || _git_guard_path "$v" "$2" dir || return 1
+  k_all="$(_git_cfg --file "$f" --get-regexp '^(include|includeif\..*)\.path$')" || return 1
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    i="${k#* }"
+    # shellcheck disable=SC2088 # a literal ~/ in the config value, expanded the way git does
+    case "$i" in "~/"*) i="$HOME/${i#\~/}" ;; /*) ;; *) i="$(dirname -- "$f")/$i" ;; esac
+    _git_guard_path "$i" "$(dirname -- "$f")" file || return 1
+    if [ -f "$i" ]; then _git_guard_config "$i" "$2" $((depth + 1)) || return 1; fi
+  done <<< "$k_all"
+}
+_git_guard_gitdir() {   # git directory $1 (a repo's .git or a submodule's gitdir), worktree $2
+  local g="$1" d v
+  for d in "$g" "$g/config" "$g/hooks"; do [ -L "$d" ] && { echo "$d is a symlink" >&2; return 1; }; done
+  [ -f "$g/config" ] || { echo "$g has no config file" >&2; return 1; }
+  [ -d "$g/hooks" ] || mkdir -- "$g/hooks" || return 1
+  _git_bind "$g" rw
+  _git_bind "$g/hooks" ro
+  _git_guard_config "$g/config" "$2" || return 1
+  v="$(_git_cfg --file "$g/config" --bool --get extensions.worktreeConfig)" || return 1
+  if [ "$v" = true ]; then
+    [ -e "$g/config.worktree" ] || : > "$g/config.worktree" || return 1
+    _git_guard_config "$g/config.worktree" "$2" || return 1
+  fi
+  for d in "$g"/worktrees/*/; do
+    d="${d%/}"; [ -d "$d" ] || continue
+    [ -L "$d" ] && { echo "$d is a symlink" >&2; return 1; }
+    _git_bind "$d" rw
+    [ -f "$d/commondir" ] && { [ -L "$d/commondir" ] && { echo "$d/commondir is a symlink" >&2; return 1; }; _git_bind "$d/commondir" ro; }
+    [ -f "$d/config.worktree" ] && { _git_guard_config "$d/config.worktree" "$2" || return 1; }
+  done
+  return 0
+}
+_git_guard_root() {
+  local r="$1" g="$1/.git" m
+  [ -L "$g" ] && { echo "$g is a symlink" >&2; return 1; }
+  if [ -f "$g" ]; then _git_bind "$g" ro; return 0; fi    # a linked worktree's gitdir pointer
+  [ -d "$g" ] || return 0
+  _git_guard_gitdir "$g" "$r" || return 1
+  if [ -d "$g/modules" ]; then
+    while IFS= read -r m; do
+      _git_guard_gitdir "${m%/config}" "$r" || return 1
+    done < <(find "$g/modules" -maxdepth 8 -type f -name config -path '*/modules/*' 2>/dev/null | sort)
+  fi
+}
+if [ "$AIRLOCK_GIT_RO" = 1 ]; then
+  for _r in "${_git_rw_roots[@]}"; do
+    if ! _git_guard_root "$_r" 2>"$STATE_DIR/git-ro.err"; then
+      echo "claude-airlock: $(tail -n 1 "$STATE_DIR/git-ro.err"); not launching. A box may have planted it: inspect, fix it on the host, relaunch (AIRLOCK_GIT_RO=0 skips this guard)." >&2
+      exit 1
+    fi
+  done
+  rm -f "$STATE_DIR/git-ro.err"
 fi
 
 # Broad read-only roots (host-set AIRLOCK_ROOTS) for cross-project inspection, under
