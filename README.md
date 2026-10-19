@@ -478,17 +478,26 @@ If the proxy writes a client manifest next to its socket (`<name>.clients` besid
 
 - **git**: in the box's own `~/.gitconfig`, remotes on each git host (rules `git`, `git-read`
   or `any`) are rewritten to `http://<host>/`: `https://<host>/`, `https://<host>:443/`,
-  `git@<host>:`, `ssh://git@<host>/`, `ssh://<host>/` and `git+ssh://git@<host>/`, plus
-  `ssh://git@<host>:PORT/` for each port in `AIRLOCK_GIT_SSH_PORTS` (host config, e.g.
-  `AIRLOCK_GIT_SSH_PORTS=2222`). The repo's own config, which your host git also reads, keeps
-  its ssh or https URLs.
+  `git@<host>:`, `<host>:`, `ssh://git@<host>/`, `ssh://git@<host>:22/`, `ssh://<host>/`,
+  `git+ssh://git@<host>/` and `git://<host>/`, plus `ssh://git@<host>:PORT/` for each port in
+  `AIRLOCK_GIT_SSH_PORTS` (host config, e.g. `AIRLOCK_GIT_SSH_PORTS=2222`). The repo's own
+  config, which your host git also reads, keeps its ssh or https URLs. Not rewritten (git
+  matches the prefix exactly), so they fail with no route out: a host in another case
+  (`git@GitHub.com:`), a user in an https URL (`https://user@<host>/`), another ssh user, an
+  `~/.ssh/config` alias, and other names of the host (`www.`). These rewrites win over a
+  repo's own `insteadOf` for the same host, so such a repo also goes through the proxy, with
+  the proxy's identity.
 - **gh**: if `api.github.com` is one of the hosts and the proxy has a credential for it, a
   read-only box gh config (`GH_CONFIG_DIR=/etc/airlock-box/gh`) sends gh's requests over the
   proxy socket itself (`http_unix_socket`), with a placeholder `GH_TOKEN` the proxy replaces.
   Without a credential gh is not set up (GitHub refuses the placeholder, and gh won't run
-  without a token). A `GH_TOKEN`, `GITHUB_TOKEN` or enterprise token secret is left as it is,
-  and the launch says it puts a token in the box needlessly. gh reaches only `api.github.com`
-  this way (uploads and other GitHub hosts are refused by the proxy).
+  without a token). Under rules other than `github-api` (say `github-issues`) the launch says
+  which writes will get 403. gh's telemetry and update checks are off. gh reaches only
+  `api.github.com` this way (uploads and other GitHub hosts are refused by the proxy).
+- **Tokens in the box anyway**: while the proxy holds any credential, the launch names every
+  secret that looks like a GitHub token, by key (`GH_TOKEN`, `GITHUB_*_TOKEN`, `*_PAT`, ...) or
+  by value (`ghp_`, `github_pat_`, ...), never printing it. It warns and launches; remove them
+  with `airlock secret rm`. A `GH_TOKEN` secret also takes the placeholder's place.
 - Each session gets its own copy of both (removed when it ends), so a later launch in another
   posture never changes what a running box's git does. If the launcher is killed while its box
   runs on, the next launch sweeps that copy: the box keeps its git config but its gh config

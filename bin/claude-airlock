@@ -2521,16 +2521,17 @@ done
   while IFS= read -r _h; do
     [ -n "$_h" ] || continue
     printf '[url "http://%s/"]\n' "$_h"
-    printf '\tinsteadOf = %s\n' "https://$_h/" "https://$_h:443/" "git@$_h:" "ssh://git@$_h/" "ssh://$_h/" "git+ssh://git@$_h/"
+    printf '\tinsteadOf = %s\n' "https://$_h/" "https://$_h:443/" "git@$_h:" "$_h:" "ssh://git@$_h/" "ssh://git@$_h:22/" \
+      "ssh://$_h/" "git+ssh://git@$_h/" "git://$_h/"
     for _p in "${_git_ssh_ports[@]}"; do printf '\tinsteadOf = ssh://git@%s:%s/\n' "$_h" "$_p"; done
   done < <(_airlock_client_git_hosts)
-} > "$STATE_DIR/gitconfig.$$.tmp"
-if [ -s "$STATE_DIR/gitconfig.$$.tmp" ]; then
+} > "$STATE_DIR/gitconfig.tmp.$$"
+if [ -s "$STATE_DIR/gitconfig.tmp.$$" ]; then
   (umask 077; mkdir -p "$BOX_CFG")
-  mv -f "$STATE_DIR/gitconfig.$$.tmp" "$BOX_CFG/gitconfig"
+  mv -f "$STATE_DIR/gitconfig.tmp.$$" "$BOX_CFG/gitconfig"
   args+=( -v "$BOX_CFG/gitconfig:/home/dev/.gitconfig:rw" )
 fi
-rm -f "$STATE_DIR/gitconfig.$$.tmp"
+rm -f "$STATE_DIR/gitconfig.tmp.$$"
 
 # Inject per-project secrets (host-controlled grant) as env into the box. pass:
 # refs resolve here via `pass show` — if pass/gpg is locked it prompts, and on
@@ -2582,15 +2583,23 @@ elif [ -n "$_gh_line" ]; then
     echo "git_protocol: https"
     printf "http_unix_socket: '%s'\n" "${EGRESS_PROXY//\'/\'\'}"
   } > "$BOX_CFG/gh/config.yml"
-  args+=( -v "$BOX_CFG/gh:/etc/airlock-box/gh:ro" -e "GH_CONFIG_DIR=/etc/airlock-box/gh" )
-  if grep -qE '^GH_TOKEN=' "$ENV_FILE"; then
-    echo "claude-airlock: the proxy adds GitHub's credential, yet secret GH_TOKEN puts one in the box too (airlock secret rm GH_TOKEN)" >&2
-  else
-    args+=( -e "GH_TOKEN=airlock-proxy-adds-the-credential" )
+  # No telemetry or update checks: they would only reach the proxy and be refused.
+  args+=( -v "$BOX_CFG/gh:/etc/airlock-box/gh:ro" -e "GH_CONFIG_DIR=/etc/airlock-box/gh"
+          -e GH_TELEMETRY=0 -e GH_NO_UPDATE_NOTIFIER=1 )
+  # A GH_TOKEN secret is left to win (and named below); otherwise the placeholder.
+  grep -qE '^GH_TOKEN=' "$ENV_FILE" || args+=( -e "GH_TOKEN=airlock-proxy-adds-the-credential" )
+  _gh_rules="$(awk '{ print $2 }' <<< "$_gh_line")"
+  if [ "$_gh_rules" != github-api ]; then
+    echo "claude-airlock: gh: api.github.com has the $_gh_rules rules on this proxy, so writes beyond them (PR create or edit, for github-issues) get 403" >&2
   fi
-  _gh_other="$(grep -oE '^(GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)=' "$ENV_FILE" | tr -d = | tr '\n' ' ' || true)"
-  if [ -n "$_gh_other" ]; then
-    echo "claude-airlock: the proxy adds GitHub's credential, yet secret(s) ${_gh_other% } put a token in the box too (airlock secret rm ...)" >&2
+fi
+# With the proxy holding credentials, a GitHub token among the secrets puts one in the box
+# anyway: named by key (GitHub-ish names) or by value (GitHub's token prefixes), never shown.
+if grep -q ' yes$' <<< "$_CLIENT_HOSTS"; then
+  _gh_tok="$(awk -F= '{ k = $1; v = substr($0, length($1) + 2) }
+    toupper(k) ~ /(^|_)(GH|GITHUB|GIT)_([A-Z0-9_]*_)?(TOKEN|PAT)$/ || v ~ /^(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_)/ { printf "%s ", k }' "$ENV_FILE")"
+  if [ -n "$_gh_tok" ]; then
+    echo "claude-airlock: the proxy adds credentials, yet secret(s) ${_gh_tok% } look like a GitHub token and put one in the box (airlock secret rm ...)" >&2
   fi
 fi
 
