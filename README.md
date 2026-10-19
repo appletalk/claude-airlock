@@ -475,8 +475,10 @@ Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
 `AIRLOCK_SHARE_BASE`, `AIRLOCK_EGRESS_MODE` (default posture for new projects),
 `AIRLOCK_EGRESS_PROXY` (the socket for the proxy posture),
 `AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`,
-`AIRLOCK_PROTECTED_PATHS` (extra paths no share or mount may overlap) and
-`AIRLOCK_SECRET_DENY` (pass entries never injected).
+`AIRLOCK_PROTECTED_PATHS` (extra paths no share or mount may overlap),
+`AIRLOCK_SECRET_DENY` (pass entries never injected) and `AIRLOCK_GIT_RO` (default `1`:
+read-write repos get their git config and hooks bound read-only, see SECURITY.md; `0` turns
+it off).
 
 ## Statusline — `config/airlock-statusline.sh`
 

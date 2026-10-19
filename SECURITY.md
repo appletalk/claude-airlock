@@ -50,10 +50,24 @@ our risk assessment, is very welcome):
   includes the gitignored `.tooling/` shellcheck/bats that `make check` and the
   pre-commit hook fall back to when no system copy is installed: `make bootstrap`
   re-verifies them, run with no box open on the checkout. Shared memory is read
-  by the host agent every session. The firewall cannot see a file write, and there is no
-  wrapper policing host `git` by design. Review a touched repo, including `.git/config`
-  and `.claude/`, before host tooling runs in it; tighten memory with
-  `AIRLOCK_SHARE_MEMORY=ro`. Symlinks in the shared session directory are refused.
+  by the host agent every session. The firewall cannot see a file write.
+  **Git's own instructions are bound read-only** (`AIRLOCK_GIT_RO=1`, the default). This
+  applies in the workspace and in every `share_rw` that is a checkout. Read-only there:
+  - `.git/config` and `.git/hooks`
+  - a `core.hooksPath`, and any included config file, that lies inside a read-write root
+  - submodule gitdirs
+  - existing linked worktrees' `commondir`
+
+  Each git directory is also bound onto itself, so it can't be renamed away and replaced.
+  A symlink or a hard-linked config in any of those places stops the launch, because a box
+  may have planted it. Config is read hermetically: no repository discovery, no system or
+  global config, and includes are followed by hand. A read error refuses the launch rather
+  than reading as empty.
+
+  Still open: repos and worktrees a box *creates*, `.claude/`, `.mcp.json`, `.envrc`, build
+  scripts, and any script you later run by hand. Review a touched repo before host tooling
+  runs in it. Tighten memory with `AIRLOCK_SHARE_MEMORY=ro`. Symlinks in the shared session
+  directory are refused.
 - **Class B — destructive but *authorized* actions** (a bad `terraform destroy`, a
   force-push) are not solved by isolation. Keep write credentials out of the box.
 
