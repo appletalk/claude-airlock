@@ -106,6 +106,10 @@ no_clients() {
   [ "$(box_url git@gitlab.com:o/r.git)" = git@gitlab.com:o/r.git ]
   # An ssh port the host config doesn't name: not rewritten.
   [ "$(box_url ssh://git@git.example.org:2222/o/r.git)" = ssh://git@git.example.org:2222/o/r.git ]
+  # ...but :22, scp form with no user, and git:// are.
+  [ "$(box_url ssh://git@git.example.org:22/o/r.git)" = http://git.example.org/o/r.git ]
+  [ "$(box_url git.example.org:o/r.git)" = http://git.example.org/o/r.git ]
+  [ "$(box_url git://git.example.org/o/r.git)" = http://git.example.org/o/r.git ]
   # gh is not configured without api.github.com.
   refute arg_matches '^GH_TOKEN='
 }
@@ -117,7 +121,7 @@ no_clients() {
   [[ "$output" == *"ignoring AIRLOCK_GIT_SSH_PORTS entry 'x'"* ]]
   [[ "$output" == *"entry '0'"* && "$output" == *"entry '65536'"* ]]
   [ "$(box_url ssh://git@git.example.org:2222/o/r.git)" = http://git.example.org/o/r.git ]
-  [ "$(box_url ssh://git@git.example.org:22/o/r.git)" = ssh://git@git.example.org:22/o/r.git ]
+  [ "$(box_url ssh://git@git.example.org:22/o/r.git)" = http://git.example.org/o/r.git ]   # :22 always
 }
 
 @test "the git identity stays alongside the rewrites" {
@@ -139,6 +143,10 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   grep -qx "http_unix_socket: '$S'" "$SNAP/gh/config.yml"
   grep -qx 'git_protocol: https' "$SNAP/gh/config.yml"
   [[ "$output" != *"no credential for api.github.com"* ]]
+  [[ "$output" != *"look like a GitHub token"* ]]       # Claude's own token is not one
+  [[ "$output" != *"rules on this proxy"* ]]            # github-api: no notice
+  has_arg GH_TELEMETRY=0
+  has_arg GH_NO_UPDATE_NOTIFIER=1
   # gh itself reads it that way.
   if command -v gh >/dev/null; then
     [ "$(GH_CONFIG_DIR="$SNAP/gh" gh config get http_unix_socket)" = "$S" ]
@@ -160,7 +168,7 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   _launch "$P" secret set GITHUB_TOKEN real-token-value >/dev/null
   run _launch "$P"
   has_arg GH_TOKEN=airlock-proxy-adds-the-credential
-  [[ "$output" == *"secret(s) GITHUB_TOKEN put a token in the box too"* ]]
+  [[ "$output" == *"secret(s) GITHUB_TOKEN look like a GitHub token"* ]]
 }
 
 @test "each session has its own box config, gone when it ends; a dead session's is swept; the old shared file goes" {
@@ -184,7 +192,7 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   run _launch "$P"
   launched
   refute arg_matches '^GH_TOKEN='
-  [[ "$output" == *"secret GH_TOKEN puts one in the box too"* ]]
+  [[ "$output" == *"secret(s) GH_TOKEN look like a GitHub token"* ]]
 }
 
 @test "a malformed manifest is not used at all, and the box still launches" {
@@ -270,4 +278,46 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   manifest 'Bad.example.org 443 git yes\n'
   run _launch "$P" egress show
   [[ "$output" == *"plain HTTP through the proxy: not set up (ignoring $M: line 2 is not"* ]]
+}
+
+@test "GitHub-looking secrets are named whenever the proxy holds a credential: by key or by value, never shown" {
+  manifest 'github.com 443 git-read yes\n'            # git only, no gh
+  _launch "$P" secret set GH_PAT pat-value-1 >/dev/null
+  _launch "$P" secret set MY_KEY ghp_abcdefghij1234567890 >/dev/null
+  _launch "$P" secret set GITHUB_PERSONAL_ACCESS_TOKEN pat-value-2 >/dev/null
+  _launch "$P" secret set DIGITALOCEAN_TOKEN not-github >/dev/null
+  run _launch "$P"
+  launched
+  [[ "$output" == *"look like a GitHub token"* ]]
+  [[ "$output" == *GH_PAT* && "$output" == *MY_KEY* && "$output" == *GITHUB_PERSONAL_ACCESS_TOKEN* ]]
+  [[ "$output" != *DIGITALOCEAN_TOKEN* ]]
+  [[ "$output" != *ghp_abc* && "$output" != *pat-value* ]]
+  # No credential on the proxy: nothing to say.
+  manifest 'github.com 443 git-read no\n'
+  run _launch "$P"
+  [[ "$output" != *"look like a GitHub token"* ]]
+}
+
+@test "gh on api.github.com with the github-issues rules: set up, with a notice that PR writes get 403" {
+  manifest 'api.github.com 443 github-issues yes\n'
+  run _launch "$P"
+  has_arg GH_TOKEN=airlock-proxy-adds-the-credential
+  [[ "$output" == *"api.github.com has the github-issues rules on this proxy"* ]]
+}
+
+@test "the manifest's directory must be root's and not group/world-writable (checked on its own)" {
+  # A full launch can't reach this check (the socket rule refuses the same directory first),
+  # so run the function alone, with the same stat stub.
+  fn="$BATS_TEST_TMPDIR/fn.sh"
+  sed -n '/^_airlock_hostname_ok() {/,/^}/p; /^_airlock_client_manifest() {/,/^}/p' "$AIRLOCK" > "$fn"
+  manifest 'git.example.org 443 git yes\n'
+  check() { PATH="$STUBBIN:$PATH" bash -c 'source "$1"; _airlock_client_manifest "$2" && printf "%s" "$_CLIENT_HOSTS"' _ "$fn" "$S" 2>&1; }
+  [ "$(check)" = "git.example.org git yes" ]
+  chmod 775 "$SD"
+  [[ "$(check)" == *"it and its directory must be root's"* ]]
+  chmod 757 "$SD"
+  [[ "$(check)" == *"it and its directory must be root's"* ]]
+  chmod 755 "$SD"
+  sed -i "\\# $SD\$#d" "$FAKE_OWNERS"; owns 1000 "$SD"
+  [[ "$(check)" == *"it and its directory must be root's"* ]]
 }
