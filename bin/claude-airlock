@@ -35,6 +35,7 @@ AIRLOCK_ARTIFACT_DIRS="${AIRLOCK_ARTIFACT_DIRS:-.venv node_modules}"  # env-buil
 AIRLOCK_PIDS_LIMIT="${AIRLOCK_PIDS_LIMIT:-4096}"     # cap in-box process count (fork-bomb guard); 0/"" = engine default
 AIRLOCK_MEMORY="${AIRLOCK_MEMORY:-}"                 # host RAM cap, e.g. 8g; empty = no limit (too low breaks real builds)
 AIRLOCK_PROTECTED_PATHS="${AIRLOCK_PROTECTED_PATHS:-}" # extra host paths no share or mount may contain (space-separated)
+AIRLOCK_GIT_RO="${AIRLOCK_GIT_RO:-1}"                # 1 = bind the git config and hooks of read-write repos read-only (0 = off)
 AIRLOCK_SECRET_DENY="${AIRLOCK_SECRET_DENY:-}"       # pass entry globs `airlock secret` must never inject (space-separated)
 
 # Container engine. Rootless podman is the DEFAULT and the recommended posture:
@@ -2115,6 +2116,229 @@ if [ -n "$EGRESS_PROXY" ]; then
     _ksock_pins+=( "$(stat -c %d:%i:%.9Z:%u:%f "$_kc") $_kc" )
   fi
   args+=( -e "AIRLOCK_EGRESS_PROXY=$_kc" )
+fi
+
+# Host git must not read instructions a box wrote. In each read-write root (the workspace and
+# every share_rw) that holds a git repo, every config file host git reads for it is bound
+# read-only: .git/config and its in-root includes, config.worktree, commondir (created as "."
+# where git would otherwise look for one, so it can't be added to point git elsewhere), the
+# .git pointer files of in-root linked worktrees and submodules, and their gitdirs' configs.
+# The hooks too, and an in-root core.hooksPath (per worktree) or hook symlink target. Each git
+# directory is bound onto itself so it cannot be renamed away and replaced (under rootful
+# docker no user namespace locks the nested mounts). Work happens on canonical paths and binds
+# land at the path the box sees. Anything that looks planted (a symlink, a hard link, an
+# unreadable git directory, a commondir pointing elsewhere) stops the launch.
+# Not covered here, see SECURITY.md: hooks and core.fsmonitor reached through repos a box
+# creates (a gitlink, a new submodule), paused rebase/am/cherry-pick state, global config.
+_git_roots_c=() _git_roots_l=()   # each read-write root: canonical path, and the path the box sees
+_git_add_root() { local c; c="$(realpath -e -- "$1" 2>/dev/null)" || return 0; _git_roots_c+=("$c"); _git_roots_l+=("$1"); }
+_git_add_root "$WORKSPACE"
+for _m in "${SHARE_RW[@]:-}"; do   # as mounted below: a share the workspace sits inside is not
+  [ -n "$_m" ] || continue
+  case "$WORKSPACE" in "$_m"/*) continue ;; esac
+  _git_add_root "$_m"
+done
+_git_root_of() {   # the root holding canonical path $1, into _git_ri
+  local i
+  for i in "${!_git_roots_c[@]}"; do
+    case "$1" in "${_git_roots_c[$i]}"|"${_git_roots_c[$i]}"/*) _git_ri=$i; return 0 ;; esac
+  done
+  return 1
+}
+_git_bound=()
+# Bind existing path $1 ($2 = ro|rw) at the path the box sees. It must be canonical (no
+# symlink anywhere in it) and, for a file, its only name: a second name would stay writable.
+_git_bind() {
+  local b d c
+  c="$(realpath -e -- "$1" 2>/dev/null)" || { echo "$1 does not exist" >&2; return 1; }
+  if [ "$c" != "$1" ]; then   # a symlink: refused if it or what it reaches is in a root
+    if _git_root_of "$c" || _git_root_of "$1"; then echo "$1 is, or goes through, a symlink" >&2; return 1; fi
+    return 0
+  fi
+  _git_root_of "$1" || return 0
+  [ "$1" != "${_git_roots_c[$_git_ri]}" ] || return 0   # a root is mounted already (and can't be renamed)
+  if [ -f "$1" ] && [ "$(stat -c %h -- "$1")" != 1 ]; then echo "$1 has more than one hard link" >&2; return 1; fi
+  d="${_git_roots_l[$_git_ri]}${1#"${_git_roots_c[$_git_ri]}"}"
+  for b in "${_git_bound[@]:-}"; do [ "$b" = "$d" ] && return 0; done
+  _git_bound+=("$d"); args+=( -v "$1:$d:$2" )
+}
+_git_readable_dir() { [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ] || { echo "$1 can't be read (a box may have changed its permissions)" >&2; return 1; }; }
+# Read one config file and nothing else: from /, so git discovers no repository (from inside
+# the project it would read the project's own config, includes and all, at startup), with no
+# system or global config. Exit 1 is "no such key"; anything else (a fatal parse) refuses.
+_git_cfg() {
+  local out rc=0
+  [ -r "${2:?}" ] || { echo "cannot read git config $2" >&2; return 1; }
+  out="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C / config --no-includes "$@" 2>&1)" || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$out" ;;
+    1) ;;
+    *) echo "cannot read git config ($2): ${out%%$'\n'*}" >&2; return 1 ;;
+  esac
+}
+# A path named by a config value: $1, relative to $2 (canonical). Inside a read-write root it is
+# created if missing ($3 = dir|file) and bound read-only; its canonical form goes to _git_path.
+# ~user/ and %(prefix)/ forms only come from config the box can't write: not followed.
+_git_guard_path() {
+  local p="$1"
+  _git_path=""
+  # shellcheck disable=SC2088 # a literal ~/ in the config value, expanded the way git does
+  case "$p" in "~/"*) p="$HOME/${p#\~/}" ;; "~"*|"%(prefix)"*) return 0 ;; /*) ;; *) [ -n "$2" ] || return 0; p="$2/$p" ;; esac
+  p="$(realpath -ms -- "$p")"
+  _git_path="$p"
+  # Outside every root, also once symlinks are followed: nothing the box can write.
+  _git_root_of "$p" || _git_root_of "$(realpath -m -- "$p")" || return 0
+  if [ ! -e "$p" ] && [ ! -L "$p" ]; then
+    if [ "$3" = dir ]; then mkdir -p -- "$p" || return 1; else { mkdir -p -- "$(dirname -- "$p")" && : > "$p"; } || return 1; fi
+  fi
+  _git_bind "$p" ro
+}
+# Config file $1 (canonical) of a repo with a worktree at $2 (canonical, or "" for none: then a
+# relative core.hooksPath has nothing to resolve against). Includes are followed here the way
+# git resolves them (relative to the including file, at most 10 deep), never by git. $3: depth.
+_git_guard_config() {
+  local f="$1" depth="${3:-0}" k k_all v
+  [ "$depth" -le 10 ] || { echo "$f: config includes nested more than 10 deep" >&2; return 1; }
+  _git_bind "$f" ro || return 1
+  v="$(_git_cfg --file "$f" --get core.hooksPath)" || return 1
+  [ -z "$v" ] || _git_guard_path "$v" "$2" dir || return 1
+  k_all="$(_git_cfg --file "$f" --get-regexp '^(include|includeif\..*)\.path$')" || return 1
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    _git_guard_path "${k#* }" "$(dirname -- "$f")" file || return 1
+    if [ -n "$_git_path" ] && [ -f "$_git_path" ]; then _git_guard_config "$_git_path" "$2" $((depth + 1)) || return 1; fi
+  done <<< "$k_all"
+}
+_git_wtcfg=0   # extensions.worktreeConfig of the repo being guarded
+_git_guard_wtconfig() {   # config.worktree $1 for worktree $2, when the extension is on
+  [ "$_git_wtcfg" = true ] || return 0
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then : > "$1" || return 1; fi
+  _git_guard_config "$1" "$2"
+}
+_git_pointer_target() {   # the gitdir a .git pointer file $1 names, canonical-ish (no symlinks resolved)
+  local t
+  t="$(sed -n '1s/^gitdir: //p' -- "$1")"
+  case "$t" in /*) ;; *) t="$(dirname -- "$1")/$t" ;; esac
+  realpath -m -- "$t"
+}
+_git_guard_pointer() {   # a worktree's .git pointer file $1 (as the gitdir records it)
+  local p
+  p="$(realpath -ms -- "$1")"
+  _git_root_of "$p" || _git_root_of "$(realpath -m -- "$p")" || return 0
+  [ -e "$p" ] || [ -L "$p" ] || return 0   # a worktree whose checkout is gone
+  [ -f "$p" ] || { echo "$p is not a .git pointer file" >&2; return 1; }
+  _git_bind "$p" ro
+}
+# A repo's common git directory $1 (canonical, inside a read-write root), whose main worktree
+# is $2 ("" if it has none in view).
+_git_guard_common() {
+  local c="$1" wt="$2" d e t
+  _git_readable_dir "$c" || return 1
+  [ -f "$c/config" ] || { echo "$c has no config file" >&2; return 1; }
+  [ -d "$c/hooks" ] || [ -L "$c/hooks" ] || mkdir -- "$c/hooks" || return 1
+  _git_readable_dir "$c/hooks" || return 1
+  _git_bind "$c" rw || return 1
+  _git_bind "$c/hooks" ro || return 1
+  for e in "$c"/hooks/*; do   # a hook that is a symlink into a read-write root: its target too
+    [ -L "$e" ] || continue
+    if ! t="$(realpath -e -- "$e" 2>/dev/null)"; then   # dangling: the box could create the target
+      t="$(realpath -m -- "$e")"
+      if _git_root_of "$t"; then echo "$e is a symlink to $t, which doesn't exist (the box could create it)" >&2; return 1; fi
+      continue
+    fi
+    if _git_root_of "$t"; then _git_bind "$t" ro || return 1; fi
+  done
+  if [ -e "$c/commondir" ] || [ -L "$c/commondir" ]; then
+    [ -f "$c/commondir" ] && [ ! -L "$c/commondir" ] && [ "$(cat -- "$c/commondir")" = . ] \
+      || { echo "$c/commondir points git somewhere else" >&2; return 1; }
+  else printf '.\n' > "$c/commondir" || return 1; fi
+  _git_bind "$c/commondir" ro || return 1
+  _git_wtcfg="$(_git_cfg --file "$c/config" --bool --get extensions.worktreeConfig)" || return 1
+  _git_guard_config "$c/config" "$wt" || return 1
+  [ -z "$wt" ] || _git_guard_wtconfig "$c/config.worktree" "$wt" || return 1
+  if [ -e "$c/worktrees" ] || [ -L "$c/worktrees" ]; then
+    _git_readable_dir "$c/worktrees" || return 1
+    for d in "$c"/worktrees/*; do
+      [ -e "$d" ] || [ -L "$d" ] || continue
+      _git_readable_dir "$d" || return 1
+      _git_bind "$d" rw || return 1
+      # Without a commondir git takes this directory for a whole repo (its own config and
+      # hooks); one that resolves elsewhere points git at another config. Either refuses.
+      [ -f "$d/commondir" ] && [ ! -L "$d/commondir" ] \
+        && [ "$(realpath -m -- "$d/$(head -n 1 -- "$d/commondir")")" = "$c" ] \
+        || { echo "$d/commondir is missing or doesn't lead back to $c" >&2; return 1; }
+      _git_bind "$d/commondir" ro || return 1
+      e=""
+      if [ -e "$d/gitdir" ] || [ -L "$d/gitdir" ]; then
+        _git_bind "$d/gitdir" ro || return 1
+        e="$(realpath -ms -- "$(head -n 1 -- "$d/gitdir")")"
+        if [ -e "$e" ] || [ -L "$e" ]; then
+          # The checkout's .git must point back here, or the gitdir file was redirected.
+          [ -f "$e" ] && [ "$(_git_pointer_target "$e")" = "$d" ] \
+            || { echo "$d/gitdir names $e, which doesn't point back to $d" >&2; return 1; }
+          _git_guard_pointer "$e" || return 1
+          e="$(dirname -- "$e")"
+          _git_guard_config "$c/config" "$e" || return 1
+        else e=""; fi   # a checkout that is gone (prunable): nothing to guard, nothing created
+      fi
+      _git_guard_wtconfig "$d/config.worktree" "$e" || return 1
+    done
+  fi
+}
+_git_guard_root() {   # read-write root $1 (canonical)
+  local r="$1" g="$1/.git" gd c m mwt
+  [ -L "$g" ] && { echo "$g is a symlink" >&2; return 1; }
+  if [ -f "$g" ]; then   # a linked worktree (or submodule checkout): guard the chain it points at
+    _git_bind "$g" ro || return 1
+    gd="$(sed -n '1s/^gitdir: //p' -- "$g")"
+    [ -n "$gd" ] || { echo "$g is not a gitdir pointer" >&2; return 1; }
+    case "$gd" in /*) ;; *) gd="$r/$gd" ;; esac
+    gd="$(realpath -ms -- "$gd")"
+    c="$gd"
+    [ -f "$gd/commondir" ] && c="$(realpath -ms -- "$gd/$(head -n 1 -- "$gd/commondir")")"
+    if _git_root_of "$c"; then _git_guard_common "$c" "" || return 1
+    else _git_wtcfg="$(_git_cfg --file "$c/config" --bool --get extensions.worktreeConfig)" || return 1; fi
+    if _git_root_of "$gd" && [ "$gd" != "$c" ]; then
+      _git_bind "$gd" rw || return 1
+      if [ -e "$gd/commondir" ]; then _git_bind "$gd/commondir" ro || return 1; fi
+    fi
+    _git_guard_config "$c/config" "$r" || return 1
+    _git_guard_wtconfig "$gd/config.worktree" "$r" || return 1
+    return 0
+  fi
+  if [ ! -e "$g" ] && [ -f "$r/HEAD" ] && [ -f "$r/config" ] && [ -d "$r/objects" ]; then
+    _git_guard_common "$r" "" || return 1   # a bare repo: the root is its git directory
+    return 0
+  fi
+  [ -d "$g" ] || return 0
+  _git_guard_common "$g" "$r" || return 1
+  # Submodule gitdirs, nested ones included (each holds a HEAD); an unreadable directory under
+  # modules/ refuses instead of hiding what is below it.
+  if [ -e "$g/modules" ] || [ -L "$g/modules" ]; then
+    _git_readable_dir "$g/modules" || return 1
+    m="$(find "$g/modules" -maxdepth 64 \( -type d ! \( -readable -executable \) -printf 'UNREADABLE %p\n' -prune \) -o \( -type f -name HEAD -printf '%h\n' \) 2>&1)" \
+      || { echo "cannot walk $g/modules: ${m%%$'\n'*}" >&2; return 1; }
+    case "$m" in *UNREADABLE*) echo "$g/modules holds a directory that can't be read (a box may have changed its permissions)" >&2; return 1 ;; esac
+    while IFS= read -r c; do
+      [ -n "$c" ] && [ -f "$c/config" ] || continue
+      mwt="$(_git_cfg --file "$c/config" --get core.worktree)" || return 1
+      if [ -n "$mwt" ]; then
+        case "$mwt" in /*) ;; *) mwt="$c/$mwt" ;; esac
+        mwt="$(realpath -ms -- "$mwt")"
+        _git_guard_pointer "$mwt/.git" || return 1
+      fi
+      _git_guard_common "$c" "$mwt" || return 1
+    done < <(printf '%s\n' "$m" | sort -u)
+  fi
+}
+if [ "$AIRLOCK_GIT_RO" = 1 ]; then
+  for _r in "${_git_roots_c[@]}"; do
+    if ! _git_guard_root "$_r" 2>"$STATE_DIR/git-ro.err"; then
+      echo "claude-airlock: $(tail -n 1 "$STATE_DIR/git-ro.err"); not launching. A box may have planted it: inspect, fix it on the host, relaunch (AIRLOCK_GIT_RO=0 skips this guard)." >&2
+      exit 1
+    fi
+  done
+  rm -f "$STATE_DIR/git-ro.err"
 fi
 
 # Broad read-only roots (host-set AIRLOCK_ROOTS) for cross-project inspection, under
