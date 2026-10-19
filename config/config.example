@@ -146,6 +146,11 @@ AIRLOCK_MODEL=opus
 # `airlock egress proxy` with no argument. It must pass the `airlock socket` rule.
 # AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/anthropic.sock
 
+# ssh ports besides the default that git remotes name (ssh://git@host:PORT/...). In the proxy
+# posture, remotes on the proxy's plain-HTTP git hosts become http://<host>/ in the box; these
+# ports are rewritten too (README: "Plain HTTP through the proxy").
+# AIRLOCK_GIT_SSH_PORTS=2222
+
 # Extra egress domains ALWAYS allowed (host-trusted, applied in every mode but proxy), added
 # to the allowlist regardless of posture. Space or comma separated. For per-project,
 # box-approved domains use `egress =` in that project's .airlock/config instead.
