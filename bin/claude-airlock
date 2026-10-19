@@ -297,6 +297,51 @@ _egress_proxy_socket() {
   printf '%s' "${sock:-$AIRLOCK_EGRESS_PROXY}"
 }
 
+# The proxy's client manifest, for posture socket $1: airlock-envoy writes <listener>.clients
+# next to each box socket, one line per host the box reaches by plain HTTP through it
+# ("<host> <port> <rules> <yes|no>"): the proxy checks each request, adds the credential (yes)
+# and does the TLS. The launcher points the box's git and gh at http:// for those hosts. What
+# it names ends up in the box's git config, so the file is held to the socket's own rule
+# (root's, writable only by root, in the socket's root-owned directory) and every line to a
+# strict form, or none of it is used. Sets _CLIENT_HOSTS ("<host> <rules> <yes|no>" lines).
+# No manifest is not an error: the proxy may not write one.
+_airlock_hostname_ok() {
+  [ "${#1}" -le 253 ] && [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
+}
+_airlock_client_manifest() {
+  local LC_ALL=C m line n=0 out="" host rules cred
+  _CLIENT_HOSTS=""
+  case "$1" in *.sock) m="${1%.sock}.clients" ;; *) return 0 ;; esac
+  [ -e "$m" ] || [ -L "$m" ] || return 0
+  if [ -L "$m" ] || [ ! -f "$m" ]; then
+    echo "claude-airlock: ignoring $m: not a regular file; box clients not set up for the proxy" >&2; return 1
+  fi
+  if [ "$(stat -c %u "$m")" != 0 ] || [ -n "$(find "$m" -maxdepth 0 -perm /022 -print)" ] \
+     || [ "$(stat -c %u "$(dirname "$m")")" != 0 ] || [ -n "$(find "$(dirname "$m")" -maxdepth 0 -perm /022 -print)" ]; then
+    echo "claude-airlock: ignoring $m: it and its directory must be root's, writable only by root; box clients not set up for the proxy" >&2
+    return 1
+  fi
+  if [ "$(stat -c %s "$m")" -gt 65536 ]; then
+    echo "claude-airlock: ignoring $m: over 64 KiB; box clients not set up for the proxy" >&2; return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    case "$line" in ''|'#'*) continue ;; esac
+    host="" rules="" cred=""
+    if [[ "$line" =~ ^([a-z0-9.-]+)\ ([1-9][0-9]{0,4})\ ([a-z][a-z0-9-]{0,31})\ (yes|no)$ ]]; then
+      host=${BASH_REMATCH[1]} rules=${BASH_REMATCH[3]} cred=${BASH_REMATCH[4]}
+    fi
+    if [ -z "$host" ] || ! _airlock_hostname_ok "$host"; then
+      echo "claude-airlock: ignoring $m: line $n is not '<host> <port> <rules> yes|no'; box clients not set up for the proxy" >&2
+      return 1
+    fi
+    out+="$host $rules $cred"$'\n'
+  done < "$m"
+  _CLIENT_HOSTS="$out"
+}
+# The plain-HTTP hosts git goes to (rules that serve git), one per line.
+_airlock_client_git_hosts() { awk '$2 == "git" || $2 == "git-read" || $2 == "any" { print $1 }' <<< "$_CLIENT_HOSTS"; }
+
 # True if directory $1 is, contains, or sits inside path $2 (both canonical).
 _airlock_overlaps() {
   [ "$1" = / ] || [ "$2" = / ] && return 0
@@ -865,6 +910,10 @@ if [ "${1:-}" = "egress" ]; then
           echo "  proxy socket: $_egp  (launches are REFUSED: $_egwhy)"
         fi
         echo "  network: none; the proxy's allowlist decides what is reachable"
+        if [ -n "$_egp" ] && _airlock_client_manifest "$_egp" 2>/dev/null && [ -n "$_CLIENT_HOSTS" ]; then
+          echo "  plain HTTP through the proxy (it adds any credential; box git and gh use http:// for these):"
+          awk '{ printf "    %s (rules %s, credential %s)\n", $1, $2, $3 }' <<< "$_CLIENT_HOSTS"
+        fi
         if [ -s "$_egdir/sockets" ] && grep -qvxF "$_egp" "$_egdir/sockets"; then
           echo "  also reachable, outside the proxy (granted with 'airlock socket add'):"
           grep -vxF "$_egp" "$_egdir/sockets" | sed 's/^/    /'
@@ -1612,6 +1661,7 @@ AIRLOCK_EGRESS_GROUPS="$(_resolve_egress_groups "$EGRESS_MODE")"
 # Proxy posture: fail closed. A missing or refused socket stops the launch; falling back to
 # a network would hand the box the very route this posture exists to remove, silently.
 EGRESS_PROXY=""
+_CLIENT_HOSTS=""   # its client manifest's plain-HTTP hosts (_airlock_client_manifest)
 if ! _egress_posture_valid "$EGRESS_MODE"; then
   echo "claude-airlock: egress posture '$EGRESS_MODE' is not minimal, dev, proxy or a group list; not launching." >&2
   echo "  Fix AIRLOCK_EGRESS_MODE in $CONFIG_FILE, or set one: airlock egress minimal | dev | proxy SOCKET" >&2
@@ -2116,6 +2166,8 @@ if [ -n "$EGRESS_PROXY" ]; then
     _ksock_pins+=( "$(stat -c %d:%i:%.9Z:%u:%f "$_kc") $_kc" )
   fi
   args+=( -e "AIRLOCK_EGRESS_PROXY=$_kc" )
+  # Plain-HTTP hosts behind it: their git remotes and gh are pointed at http:// below.
+  _airlock_client_manifest "$_kc" || true
 fi
 
 # Host git must not read instructions a box wrote. In each read-write root (the workspace and
@@ -2430,13 +2482,32 @@ fi
 # Git identity: the box has no ~/.gitconfig, so supply the host's global
 # user.name/email as the box's GLOBAL git config, so commits are attributed
 # correctly. A repo's own local .git/config still wins (it's in the mounted repo).
+# In proxy mode, also the proxy's plain-HTTP git hosts (its client manifest): their remotes
+# become http://<host>/ in the box only, so the box's git goes through the proxy, which adds
+# the credential and does the TLS, while the repo's config (the host's git reads it too)
+# keeps its ssh or https URLs. AIRLOCK_GIT_SSH_PORTS: ssh ports besides the default that
+# remotes name (ssh://git@host:PORT/...), each rewritten too.
 GIT_NAME="${AIRLOCK_GIT_NAME:-$(git config --global user.name 2>/dev/null || true)}"
 GIT_EMAIL="${AIRLOCK_GIT_EMAIL:-$(git config --global user.email 2>/dev/null || true)}"
-if [ -n "$GIT_NAME$GIT_EMAIL" ]; then
-  { echo "[user]"
-    [ -n "$GIT_NAME" ]  && printf '\tname = %s\n'  "$GIT_NAME"
-    [ -n "$GIT_EMAIL" ] && printf '\temail = %s\n' "$GIT_EMAIL"
-  } > "$STATE_DIR/gitconfig"
+_git_ssh_ports=()
+read -ra _gp <<< "${AIRLOCK_GIT_SSH_PORTS:-}"
+for _p in "${_gp[@]}"; do
+  if [[ "$_p" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$_p" -le 65535 ]; then _git_ssh_ports+=( "$_p" )
+  else echo "claude-airlock: ignoring AIRLOCK_GIT_SSH_PORTS entry '$_p' (want a port number)" >&2; fi
+done
+{ if [ -n "$GIT_NAME$GIT_EMAIL" ]; then
+    echo "[user]"
+    if [ -n "$GIT_NAME" ]; then printf '\tname = %s\n' "$GIT_NAME"; fi
+    if [ -n "$GIT_EMAIL" ]; then printf '\temail = %s\n' "$GIT_EMAIL"; fi
+  fi
+  while IFS= read -r _h; do
+    [ -n "$_h" ] || continue
+    printf '[url "http://%s/"]\n' "$_h"
+    printf '\tinsteadOf = %s\n' "https://$_h/" "git@$_h:" "ssh://git@$_h/"
+    for _p in "${_git_ssh_ports[@]}"; do printf '\tinsteadOf = ssh://git@%s:%s/\n' "$_h" "$_p"; done
+  done < <(_airlock_client_git_hosts)
+} > "$STATE_DIR/gitconfig"
+if [ -s "$STATE_DIR/gitconfig" ]; then
   args+=( -v "$STATE_DIR/gitconfig:/home/dev/.gitconfig:rw" )
 fi
 
@@ -2473,6 +2544,29 @@ if [ -f "$SECRETS_FILE" ]; then
       *) printf '%s=%s\n' "$_skey" "$_sval" >> "$ENV_FILE" ;;      # into the 0600 env-file, not argv
     esac
   done < "$SECRETS_FILE"
+fi
+
+# gh, when the proxy serves api.github.com by plain HTTP: a box-only gh config sends gh's
+# requests over the proxy socket itself (gh's http_unix_socket, plain HTTP there), with a
+# placeholder token the proxy replaces with the real one. Read-only: the launcher owns it.
+_gh_line="$(awk '$1 == "api.github.com"' <<< "$_CLIENT_HOSTS")"
+if [ -n "$_gh_line" ]; then
+  mkdir -p "$STATE_DIR/box-gh"
+  { echo "# Written by claude-airlock at every launch: gh speaks plain HTTP over the proxy socket."
+    echo "version: 1"
+    echo "git_protocol: https"
+    printf "http_unix_socket: '%s'\n" "${EGRESS_PROXY//\'/\'\'}"
+  } > "$STATE_DIR/box-gh/config.yml.new"
+  mv -f "$STATE_DIR/box-gh/config.yml.new" "$STATE_DIR/box-gh/config.yml"
+  args+=( -v "$STATE_DIR/box-gh:/etc/airlock-box/gh:ro" -e "GH_CONFIG_DIR=/etc/airlock-box/gh" )
+  if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
+    echo "claude-airlock: the proxy adds GitHub's credential, yet secret GH_TOKEN puts one in the box too (airlock secret rm GH_TOKEN)" >&2
+  else
+    args+=( -e "GH_TOKEN=airlock-proxy-adds-the-credential" )
+  fi
+  if [ "${_gh_line##* }" != yes ]; then
+    echo "claude-airlock: the proxy has no credential for api.github.com, so gh's requests carry only the placeholder token" >&2
+  fi
 fi
 
 [ -n "$AIRLOCK_MODEL" ] && args+=( -e "ANTHROPIC_MODEL=$AIRLOCK_MODEL" )

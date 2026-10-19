@@ -469,6 +469,30 @@ Everything in the box has to go through the proxy, so tools that ignore the prox
 variables fail rather than leak: the box has no DNS, and SSH remotes or raw TCP have no
 route. Images built before this posture are refused with a message to rebuild them.
 
+### Plain HTTP through the proxy: git and gh without a credential in the box
+
+A proxy can serve some hosts by **plain HTTP**: the box sends `http://<host>/...`, and the
+proxy checks the request, adds the credential and does the TLS (airlock-envoy's `http` lines).
+If the proxy writes a client manifest next to its socket (`<name>.clients` beside
+`<name>.sock`; airlock-envoy does), each launch points the box's clients at those hosts:
+
+- **git**: in the box's own `~/.gitconfig` (written by the launcher every launch), remotes
+  on each git host (rules `git`, `git-read` or `any`) are rewritten to `http://<host>/`:
+  `https://<host>/`, `git@<host>:` and `ssh://git@<host>/`, plus `ssh://git@<host>:PORT/` for
+  each port in `AIRLOCK_GIT_SSH_PORTS` (host config, e.g. `AIRLOCK_GIT_SSH_PORTS=2222`). The
+  repo's own config, which your host git also reads, keeps its ssh or https URLs.
+- **gh**: if `api.github.com` is one of the hosts, a read-only box gh config
+  (`GH_CONFIG_DIR=/etc/airlock-box/gh`) sends gh's requests over the proxy socket itself
+  (`http_unix_socket`), with a placeholder `GH_TOKEN` the proxy replaces. A `GH_TOKEN` secret
+  is left as it is, and the launch says it is needless. gh reaches only `api.github.com` this
+  way (uploads and other GitHub hosts are refused by the proxy).
+- **curl and the rest**: use `http://<host>/` URLs; the proxy variables already point there.
+
+`airlock egress show` lists the hosts. The manifest ends up in git config, so it is used only
+if it is root's, writable only by root, in a root-owned directory, at most 64 KiB, and every
+line is `<host> <port> <rules> yes|no` with a valid lowercase host name. Otherwise the launch
+says why and goes on with no client set up. No manifest, nothing changes.
+
 ## Host config — `~/.config/claude-airlock/config`
 
 Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
