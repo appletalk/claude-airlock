@@ -490,7 +490,9 @@ If the proxy writes a client manifest next to its socket (`<name>.clients` besid
   and the launch says it puts a token in the box needlessly. gh reaches only `api.github.com`
   this way (uploads and other GitHub hosts are refused by the proxy).
 - Each session gets its own copy of both (removed when it ends), so a later launch in another
-  posture never changes what a running box's git does.
+  posture never changes what a running box's git does. If the launcher is killed while its box
+  runs on, the next launch sweeps that copy: the box keeps its git config but its gh config
+  empties, so gh fails closed (no network) until the box is relaunched.
 - **curl and the rest**: use `http://<host>/` URLs; the proxy variables already point there.
 
 `airlock egress show` lists the hosts. The manifest ends up in git config, so it is used only
