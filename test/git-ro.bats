@@ -329,7 +329,7 @@ commit_init() { git -C "$1" -c user.name=t -c user.email=t@t commit -q --allow-e
   mv "$p/.git/worktrees/sib3/commondir" "$p/cd"; ln -s ../../../cd "$p/.git/worktrees/sib3/commondir"
   run _launch "$p"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"commondir is, or goes through, a symlink"* ]]
+  [[ "$output" == *"commondir is missing or doesn't lead back"* ]]
   q="$(mkproj wts2)"; mkrepo "$q"; commit_init "$q"
   git -C "$q" worktree add -q "$BATS_TEST_TMPDIR/sib4"
   mv "$q/.git/worktrees/sib4" "$q/wtdir"; ln -s ../../wtdir "$q/.git/worktrees/sib4"
@@ -376,4 +376,68 @@ commit_init() { git -C "$1" -c user.name=t -c user.email=t@t commit -q --allow-e
   run _launch "$p"
   [ "$status" -ne 0 ]
   [[ "$output" == *"goes through, a symlink"* ]]
+}
+
+# ---- from the 2026-10-19 re-review ----
+
+@test "a worktree gitdir file redirected to a decoy refuses (it must point back)" {
+  p="$(mkproj gdr)"; mkrepo "$p"; commit_init "$p"
+  git -C "$p" worktree add -q "$p/.wt/real"
+  mkdir -p "$p/.wt/decoy"; printf 'gitdir: /elsewhere\n' > "$p/.wt/decoy/.git"
+  echo "$p/.wt/decoy/.git" > "$p/.git/worktrees/real/gitdir"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"doesn't point back"* ]]
+}
+
+@test "a worktree's gitdir file is bound read-only; a gone checkout is skipped, nothing created" {
+  p="$(mkproj gdro)"; mkrepo "$p"; commit_init "$p"
+  git -C "$p" config core.hooksPath .githooks
+  git -C "$p" worktree add -q "$p/.wt/a"
+  git -C "$p" worktree add -q "$BATS_TEST_TMPDIR/gone"; rm -rf "$BATS_TEST_TMPDIR/gone"
+  _launch "$p" >/dev/null 2>&1
+  bound "$p/.git/worktrees/a/gitdir" ro
+  bound "$p/.git/worktrees/gone/gitdir" ro
+  [ ! -e "$BATS_TEST_TMPDIR/gone" ]
+}
+
+@test "a worktree dir with no commondir, or one leading elsewhere, refuses" {
+  p="$(mkproj ncd)"; mkrepo "$p"; commit_init "$p"
+  git -C "$p" worktree add -q "$BATS_TEST_TMPDIR/s5"
+  rm "$p/.git/worktrees/s5/commondir"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"commondir is missing or doesn't lead back"* ]]
+  q="$(mkproj ecd)"; mkrepo "$q"; commit_init "$q"
+  git -C "$q" worktree add -q "$BATS_TEST_TMPDIR/s6"
+  mkdir -p "$q/.evil"; echo ../../../.evil > "$q/.git/worktrees/s6/commondir"
+  run _launch "$q"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"doesn't lead back"* ]]
+}
+
+@test "a bare repo share_rw: its config, hooks and commondir are bound read-only" {
+  git init -q --bare "$SHARE_BASE/bare.git"
+  p="$(mkproj bare)"; write_config "$p" "share_rw = bare.git"; approve "$p" bare.git -rw
+  _launch "$p" >/dev/null 2>&1
+  bound "$SHARE_BASE/bare.git/config" ro
+  bound "$SHARE_BASE/bare.git/hooks" ro
+  bound "$SHARE_BASE/bare.git/commondir" ro
+  no_dup_dest
+}
+
+@test "a dangling hook symlink into the repo refuses (the box could create its target)" {
+  p="$(mkproj dangle)"; mkrepo "$p"
+  ln -s ../../scripts/pre-commit "$p/.git/hooks/pre-commit"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"doesn't exist (the box could create it)"* ]]
+}
+
+@test "a share_rw the workspace sits inside is not mounted, so its .git is not bound either" {
+  mkrepo "$SHARE_BASE/parent"; p="$SHARE_BASE/parent/proj"; mkdir -p "$p/.airlock"
+  write_config "$p" "share_rw = parent"; approve "$p" parent -rw
+  _launch "$p" >/dev/null 2>&1
+  refute_bound "$SHARE_BASE/parent/.git"
+  refute_bound "$SHARE_BASE/parent"
 }

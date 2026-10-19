@@ -2133,7 +2133,11 @@ fi
 _git_roots_c=() _git_roots_l=()   # each read-write root: canonical path, and the path the box sees
 _git_add_root() { local c; c="$(realpath -e -- "$1" 2>/dev/null)" || return 0; _git_roots_c+=("$c"); _git_roots_l+=("$1"); }
 _git_add_root "$WORKSPACE"
-for _m in "${SHARE_RW[@]:-}"; do [ -n "$_m" ] && _git_add_root "$_m"; done
+for _m in "${SHARE_RW[@]:-}"; do   # as mounted below: a share the workspace sits inside is not
+  [ -n "$_m" ] || continue
+  case "$WORKSPACE" in "$_m"/*) continue ;; esac
+  _git_add_root "$_m"
+done
 _git_root_of() {   # the root holding canonical path $1, into _git_ri
   local i
   for i in "${!_git_roots_c[@]}"; do
@@ -2152,6 +2156,7 @@ _git_bind() {
     return 0
   fi
   _git_root_of "$1" || return 0
+  [ "$1" != "${_git_roots_c[$_git_ri]}" ] || return 0   # a root is mounted already (and can't be renamed)
   if [ -f "$1" ] && [ "$(stat -c %h -- "$1")" != 1 ]; then echo "$1 has more than one hard link" >&2; return 1; fi
   d="${_git_roots_l[$_git_ri]}${1#"${_git_roots_c[$_git_ri]}"}"
   for b in "${_git_bound[@]:-}"; do [ "$b" = "$d" ] && return 0; done
@@ -2210,6 +2215,12 @@ _git_guard_wtconfig() {   # config.worktree $1 for worktree $2, when the extensi
   if [ ! -e "$1" ] && [ ! -L "$1" ]; then : > "$1" || return 1; fi
   _git_guard_config "$1" "$2"
 }
+_git_pointer_target() {   # the gitdir a .git pointer file $1 names, canonical-ish (no symlinks resolved)
+  local t
+  t="$(sed -n '1s/^gitdir: //p' -- "$1")"
+  case "$t" in /*) ;; *) t="$(dirname -- "$1")/$t" ;; esac
+  realpath -m -- "$t"
+}
 _git_guard_pointer() {   # a worktree's .git pointer file $1 (as the gitdir records it)
   local p
   p="$(realpath -ms -- "$1")"
@@ -2230,8 +2241,12 @@ _git_guard_common() {
   _git_bind "$c/hooks" ro || return 1
   for e in "$c"/hooks/*; do   # a hook that is a symlink into a read-write root: its target too
     [ -L "$e" ] || continue
-    t="$(realpath -e -- "$e" 2>/dev/null)" || continue
-    _git_root_of "$t" && { _git_bind "$t" ro || return 1; }
+    if ! t="$(realpath -e -- "$e" 2>/dev/null)"; then   # dangling: the box could create the target
+      t="$(realpath -m -- "$e")"
+      if _git_root_of "$t"; then echo "$e is a symlink to $t, which doesn't exist (the box could create it)" >&2; return 1; fi
+      continue
+    fi
+    if _git_root_of "$t"; then _git_bind "$t" ro || return 1; fi
   done
   if [ -e "$c/commondir" ] || [ -L "$c/commondir" ]; then
     [ -f "$c/commondir" ] && [ ! -L "$c/commondir" ] && [ "$(cat -- "$c/commondir")" = . ] \
@@ -2247,13 +2262,24 @@ _git_guard_common() {
       [ -e "$d" ] || [ -L "$d" ] || continue
       _git_readable_dir "$d" || return 1
       _git_bind "$d" rw || return 1
-      if [ -e "$d/commondir" ] || [ -L "$d/commondir" ]; then _git_bind "$d/commondir" ro || return 1; fi
+      # Without a commondir git takes this directory for a whole repo (its own config and
+      # hooks); one that resolves elsewhere points git at another config. Either refuses.
+      [ -f "$d/commondir" ] && [ ! -L "$d/commondir" ] \
+        && [ "$(realpath -m -- "$d/$(head -n 1 -- "$d/commondir")")" = "$c" ] \
+        || { echo "$d/commondir is missing or doesn't lead back to $c" >&2; return 1; }
+      _git_bind "$d/commondir" ro || return 1
       e=""
-      if [ -f "$d/gitdir" ]; then
-        e="$(head -n 1 -- "$d/gitdir")"
-        _git_guard_pointer "$e" || return 1
-        e="$(dirname -- "$(realpath -ms -- "$e")")"
-        _git_guard_config "$c/config" "$e" || return 1
+      if [ -e "$d/gitdir" ] || [ -L "$d/gitdir" ]; then
+        _git_bind "$d/gitdir" ro || return 1
+        e="$(realpath -ms -- "$(head -n 1 -- "$d/gitdir")")"
+        if [ -e "$e" ] || [ -L "$e" ]; then
+          # The checkout's .git must point back here, or the gitdir file was redirected.
+          [ -f "$e" ] && [ "$(_git_pointer_target "$e")" = "$d" ] \
+            || { echo "$d/gitdir names $e, which doesn't point back to $d" >&2; return 1; }
+          _git_guard_pointer "$e" || return 1
+          e="$(dirname -- "$e")"
+          _git_guard_config "$c/config" "$e" || return 1
+        else e=""; fi   # a checkout that is gone (prunable): nothing to guard, nothing created
       fi
       _git_guard_wtconfig "$d/config.worktree" "$e" || return 1
     done
@@ -2278,6 +2304,10 @@ _git_guard_root() {   # read-write root $1 (canonical)
     fi
     _git_guard_config "$c/config" "$r" || return 1
     _git_guard_wtconfig "$gd/config.worktree" "$r" || return 1
+    return 0
+  fi
+  if [ ! -e "$g" ] && [ -f "$r/HEAD" ] && [ -f "$r/config" ] && [ -d "$r/objects" ]; then
+    _git_guard_common "$r" "" || return 1   # a bare repo: the root is its git directory
     return 0
   fi
   [ -d "$g" ] || return 0

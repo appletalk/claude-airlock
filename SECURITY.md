@@ -71,23 +71,41 @@ our risk assessment, is very welcome):
   hermetically (no repository discovery, no system or global config), and a read error
   refuses instead of reading as empty.
 
-  **Not closed by binding, so also neutralise hooks on the host.** Hooks and
-  `core.fsmonitor` can still run through a repo the box *creates*: a gitlink it adds to the
-  index, a new submodule, a new worktree (the next launch guards what exists by then). Paused
+  Linked worktrees must check out: each `worktrees/*/commondir` has to lead back to the
+  repo, and each `gitdir` file has to name a `.git` file that points back to it. A bare repo
+  shared read-write is guarded as a git directory. A hook symlink whose target doesn't
+  exist yet in a read-write root refuses (the box could create it).
+
+  **Not closed by binding, so also neutralise git on the host.** While a box runs it can
+  create a repo that host git then enters: a `.git` file or directory in a submodule path
+  (upstream's or one it adds, populated or not), a new submodule, a new worktree. Its config
+  is the box's, so hooks, `core.fsmonitor`, filter and diff drivers in it can all run on a
+  plain host `git status` or `diff` (the next launch guards what exists by then). Paused
   rebase, `am` and cherry-pick state can hold `exec` lines that `--continue` runs. Hook
   managers (husky, pre-commit, lefthook) read tracked files. Global or system config that
   points into a share, and independent repos nested in the workspace, aren't checked. Host
   environment config outranks every config file, so set it in your shell (child processes
-  inherit it): `GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
-  GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false`, and run a repo's hooks by hand
-  when you want them. Abort, rather than continue, a rebase or `am` a box left paused.
+  inherit it), keeping host git out of submodules and hooks:
+
+  ```
+  GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+  GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
+  GIT_CONFIG_KEY_2=diff.ignoreSubmodules GIT_CONFIG_VALUE_2=all
+  ```
+
+  Run a repo's hooks by hand when you want them, and look into submodules with explicit
+  `git -C <sub>` commands. Abort, rather than continue, a rebase or `am` a box left paused.
 
   **What this costs in the box:** commit, branch, checkout, stash, rebase, `gc` and new
   worktrees work. Anything that writes config fails, sometimes after doing half its work:
   `remote add`, `branch --set-upstream`/`push -u`, `switch -c x origin/x` (the branch is
-  made, its tracking isn't), `branch -D` (deleted, config error), `submodule add`, `config
-  --worktree`, `maintenance register`. Removing or pruning a worktree that existed at launch
-  fails on its bound gitdir; edit a tracked hooks directory on the host.
+  made, its tracking isn't), `branch -D` (deleted, config error), `submodule add` and
+  `submodule update` (even a no-op on an initialised one), `config --worktree`, `maintenance
+  register`. Removing or pruning a worktree that existed at launch fails on its bound gitdir.
+  Edit a tracked hooks directory on the host. An include that goes through a symlink into a
+  read-write root refuses the launch: point it at the real path. With a workspace reached
+  through a symlinked path, in-root worktrees don't work in the box (git records the real
+  path, which the box doesn't see).
 
   Also open: `.claude/`, `.mcp.json`, `.envrc`, build scripts, and any script you later run
   by hand. Review a touched repo before host tooling runs in it. Tighten memory with
