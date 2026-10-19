@@ -51,23 +51,47 @@ our risk assessment, is very welcome):
   pre-commit hook fall back to when no system copy is installed: `make bootstrap`
   re-verifies them, run with no box open on the checkout. Shared memory is read
   by the host agent every session. The firewall cannot see a file write.
-  **Git's own instructions are bound read-only** (`AIRLOCK_GIT_RO=1`, the default). This
-  applies in the workspace and in every `share_rw` that is a checkout. Read-only there:
-  - `.git/config` and `.git/hooks`
-  - a `core.hooksPath`, and any included config file, that lies inside a read-write root
-  - submodule gitdirs
-  - existing linked worktrees' `commondir`
+  **Every config file host git reads for a repo in a read-write root is read-only in the box**
+  (`AIRLOCK_GIT_RO=1`, the default). That covers what a config can name: `credential.helper`,
+  `core.editor`, `core.fsmonitor`, `diff.external`, filter and merge drivers,
+  `remote.*.uploadpack`, aliases, hooks. In the workspace and every `share_rw`, read-only:
+  - `.git/config`, and its includes that lie in a read-write root (followed by hand, 10 deep)
+  - `config.worktree`, for the repo and each worktree when `extensions.worktreeConfig` is on
+  - `commondir`: created as `.` where git would look for one, so a box can't add one that
+    points git at a config it wrote
+  - the `.git` pointer files of in-root linked worktrees and submodule checkouts, and
+    submodule gitdirs' configs, nested ones included
+  - the hooks, an in-root `core.hooksPath` (resolved per worktree), and the in-root target of
+    a hook that is a symlink
 
-  Each git directory is also bound onto itself, so it can't be renamed away and replaced.
-  A symlink or a hard-linked config in any of those places stops the launch, because a box
-  may have planted it. Config is read hermetically: no repository discovery, no system or
-  global config, and includes are followed by hand. A read error refuses the launch rather
-  than reading as empty.
+  Each git directory is bound onto itself, so it can't be renamed away and replaced. The
+  checks run on canonical paths and the binds land where the box sees them, so a symlinked
+  parent or share base changes nothing. A symlink, a hard link, an unreadable git directory or
+  a `commondir` pointing elsewhere stops the launch: a box may have planted it. Config is read
+  hermetically (no repository discovery, no system or global config), and a read error
+  refuses instead of reading as empty.
 
-  Still open: repos and worktrees a box *creates*, `.claude/`, `.mcp.json`, `.envrc`, build
-  scripts, and any script you later run by hand. Review a touched repo before host tooling
-  runs in it. Tighten memory with `AIRLOCK_SHARE_MEMORY=ro`. Symlinks in the shared session
-  directory are refused.
+  **Not closed by binding, so also neutralise hooks on the host.** Hooks and
+  `core.fsmonitor` can still run through a repo the box *creates*: a gitlink it adds to the
+  index, a new submodule, a new worktree (the next launch guards what exists by then). Paused
+  rebase, `am` and cherry-pick state can hold `exec` lines that `--continue` runs. Hook
+  managers (husky, pre-commit, lefthook) read tracked files. Global or system config that
+  points into a share, and independent repos nested in the workspace, aren't checked. Host
+  environment config outranks every config file, so set it in your shell (child processes
+  inherit it): `GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+  GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false`, and run a repo's hooks by hand
+  when you want them. Abort, rather than continue, a rebase or `am` a box left paused.
+
+  **What this costs in the box:** commit, branch, checkout, stash, rebase, `gc` and new
+  worktrees work. Anything that writes config fails, sometimes after doing half its work:
+  `remote add`, `branch --set-upstream`/`push -u`, `switch -c x origin/x` (the branch is
+  made, its tracking isn't), `branch -D` (deleted, config error), `submodule add`, `config
+  --worktree`, `maintenance register`. Removing or pruning a worktree that existed at launch
+  fails on its bound gitdir; edit a tracked hooks directory on the host.
+
+  Also open: `.claude/`, `.mcp.json`, `.envrc`, build scripts, and any script you later run
+  by hand. Review a touched repo before host tooling runs in it. Tighten memory with
+  `AIRLOCK_SHARE_MEMORY=ro`. Symlinks in the shared session directory are refused.
 - **Class B — destructive but *authorized* actions** (a bad `terraform destroy`, a
   force-push) are not solved by isolation. Keep write credentials out of the box.
 

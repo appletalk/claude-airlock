@@ -13,6 +13,12 @@ approve() { local sd; sd="$(state_dir "$1")"; mkdir -p "$sd"; printf '%s\n' "$2"
 bound() { engine_args | grep -qx -- "$1:$1:$2"; }
 refute_bound() { if engine_args | grep -q -- "^$1:$1:"; then echo "unexpectedly bound: $1"; return 1; fi; }
 mkrepo() { git init -q "$1"; }
+bound_at() { engine_args | grep -qx -- "$1:$2:$3"; }   # source, box path, mode
+no_dup_dest() {   # podman refuses a launch with two mounts at one destination
+  local d; d="$(engine_args | grep -E ':(ro|rw)$' | awk -F: '{ print $2 }' | while IFS= read -r x; do realpath -ms -- "$x"; done | sort | uniq -d)"
+  [ -z "$d" ] || { echo "duplicate mount destination: $d"; return 1; }
+}
+commit_init() { git -C "$1" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init; }
 
 @test "a workspace repo: .git bound onto itself rw, config and hooks read-only" {
   p="$(mkproj ws)"; mkrepo "$p"
@@ -75,7 +81,7 @@ mkrepo() { git init -q "$1"; }
   : > "$ENGINE_ARGS_FILE"
   run _launch "$p"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"through a symlink"*"not launching"* ]]
+  [[ "$output" == *"goes through, a symlink"*"not launching"* ]]
   [ ! -s "$ENGINE_ARGS_FILE" ]
 }
 
@@ -84,7 +90,7 @@ mkrepo() { git init -q "$1"; }
   : > "$ENGINE_ARGS_FILE"
   run _launch "$p"
   [ "$status" -ne 0 ]
-  [[ "$output" == *".git/config is a symlink"* ]]
+  [[ "$output" == *".git/config is, or goes through, a symlink"* ]]
   [ ! -s "$ENGINE_ARGS_FILE" ]
 }
 
@@ -92,7 +98,7 @@ mkrepo() { git init -q "$1"; }
   p="$(mkproj hooksym)"; mkrepo "$p"; rm -rf "$p/.git/hooks"; mkdir "$p/h"; ln -s ../h "$p/.git/hooks"
   run _launch "$p"
   [ "$status" -ne 0 ]
-  [[ "$output" == *".git/hooks is a symlink"* ]]
+  [[ "$output" == *".git/hooks is, or goes through, a symlink"* ]]
   q="$(mkproj gitsym)"; mkrepo "$BATS_TEST_TMPDIR/realrepo"; ln -s "$BATS_TEST_TMPDIR/realrepo/.git" "$q/.git"
   run _launch "$q"
   [ "$status" -ne 0 ]
@@ -190,7 +196,7 @@ mkrepo() { git init -q "$1"; }
   : > "$p/planted"; ln -s ../planted "$p/.git/config.worktree"
   run _launch "$p"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"config.worktree is a symlink"* ]]
+  [[ "$output" == *"config.worktree is, or goes through, a symlink"* ]]
   q="$(mkproj wthard)"; mkrepo "$q"; git -C "$q" config extensions.worktreeConfig true
   : > "$q/.git/config.worktree"; ln "$q/.git/config.worktree" "$q/twin"
   run _launch "$q"
@@ -226,4 +232,148 @@ mkrepo() { git init -q "$1"; }
   run _launch "$p"
   [ "$status" -ne 0 ]
   [[ "$output" == *"nested more than 10 deep"* ]]
+}
+
+# ---- from the 2026-10-19 cold review ----
+
+@test "commondir: created as '.' and bound read-only, so the box can't add one pointing elsewhere" {
+  p="$(mkproj cd1)"; mkrepo "$p"; commit_init "$p"
+  _launch "$p" >/dev/null 2>&1
+  [ "$(cat "$p/.git/commondir")" = . ]
+  bound "$p/.git/commondir" ro
+  git -C "$p" -c user.name=t -c user.email=t@t commit -q --allow-empty -m still-works
+  no_dup_dest
+}
+
+@test "a commondir pointing anywhere else refuses the launch" {
+  p="$(mkproj cd2)"; mkrepo "$p"; mkdir "$p/.git/alt"; echo alt > "$p/.git/commondir"
+  : > "$ENGINE_ARGS_FILE"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"commondir points git somewhere else"* ]]
+  [ ! -s "$ENGINE_ARGS_FILE" ]
+}
+
+@test "a workspace reached through a symlinked parent: binds at the path the box sees" {
+  mkdir -p "$BATS_TEST_TMPDIR/real"; ln -s "$BATS_TEST_TMPDIR/real" "$BATS_TEST_TMPDIR/link"
+  mkrepo "$BATS_TEST_TMPDIR/real/proj"; mkdir -p "$BATS_TEST_TMPDIR/real/proj/.airlock"
+  # env -i drops PWD, so bash would use the physical path; an interactive shell passes the logical one.
+  TEST_LOGICAL_PWD="$BATS_TEST_TMPDIR/link/proj" _launch "$BATS_TEST_TMPDIR/link/proj" >/dev/null 2>&1
+  engine_args | grep -qx -- "$BATS_TEST_TMPDIR/link/proj:$BATS_TEST_TMPDIR/link/proj:rw"   # the workspace really is logical here
+  bound_at "$BATS_TEST_TMPDIR/real/proj/.git/config" "$BATS_TEST_TMPDIR/link/proj/.git/config" ro
+  bound_at "$BATS_TEST_TMPDIR/real/proj/.git/hooks" "$BATS_TEST_TMPDIR/link/proj/.git/hooks" ro
+  no_dup_dest
+}
+
+@test "a share_rw under a symlinked share base still gets its config bound" {
+  mkdir -p "$BATS_TEST_TMPDIR/realbase"; mkrepo "$BATS_TEST_TMPDIR/realbase/repo"
+  ln -s "$BATS_TEST_TMPDIR/realbase" "$BATS_TEST_TMPDIR/linkbase"
+  SHARE_BASE="$BATS_TEST_TMPDIR/linkbase"
+  p="$(mkproj sbl)"; write_config "$p" "share_rw = repo"; approve "$p" repo -rw
+  _launch "$p" >/dev/null 2>&1
+  engine_args | grep -q -- "realbase/repo/.git/config:.*/repo/.git/config:ro$"
+  no_dup_dest
+}
+
+@test "an unreadable .git/worktrees or submodule gitdir refuses the launch (no silent skip)" {
+  p="$(mkproj perm)"; mkrepo "$p"; commit_init "$p"
+  git -C "$p" worktree add -q "$BATS_TEST_TMPDIR/sib"
+  chmod 000 "$p/.git/worktrees"
+  run _launch "$p"
+  chmod 755 "$p/.git/worktrees"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"can't be read"* ]]
+  q="$(mkproj perm2)"; mkrepo "$q"; git init -q --bare "$q/.git/modules/lib"; chmod 000 "$q/.git/modules/lib"
+  run _launch "$q"
+  chmod 755 "$q/.git/modules/lib"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"can't be read"* ]]
+}
+
+@test "an in-root linked worktree: pointer read-only, its relative hooksPath and config.worktree guarded" {
+  p="$(mkproj inwt)"; mkrepo "$p"; commit_init "$p"
+  git -C "$p" config core.hooksPath .githooks
+  git -C "$p" config extensions.worktreeConfig true
+  git -C "$p" worktree add -q "$p/.wt/feat"
+  _launch "$p" >/dev/null 2>&1
+  bound "$p/.wt/feat/.git" ro
+  bound "$p/.wt/feat/.githooks" ro
+  bound "$p/.githooks" ro
+  [ -f "$p/.git/worktrees/feat/config.worktree" ]
+  bound "$p/.git/worktrees/feat/config.worktree" ro
+  no_dup_dest
+}
+
+@test "a workspace that is a linked worktree: its relative hooksPath is guarded too" {
+  mkrepo "$BATS_TEST_TMPDIR/main2"; commit_init "$BATS_TEST_TMPDIR/main2"
+  git -C "$BATS_TEST_TMPDIR/main2" config core.hooksPath .husky/_
+  p="$BATS_TEST_TMPDIR/proj-lwt"
+  git -C "$BATS_TEST_TMPDIR/main2" worktree add -q "$p"; mkdir -p "$p/.airlock"
+  _launch "$p" >/dev/null 2>&1
+  bound "$p/.git" ro
+  bound "$p/.husky/_" ro
+}
+
+@test "an existing worktree's config.worktree that is a symlink or hard link refuses" {
+  p="$(mkproj wtc)"; mkrepo "$p"; commit_init "$p"; git -C "$p" config extensions.worktreeConfig true
+  git -C "$p" worktree add -q "$BATS_TEST_TMPDIR/sib2"
+  : > "$p/twin"; ln "$p/twin" "$p/.git/worktrees/sib2/config.worktree"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"more than one hard link"* ]]
+}
+
+@test "a worktree gitdir or its commondir that is a symlink refuses" {
+  p="$(mkproj wts)"; mkrepo "$p"; commit_init "$p"
+  git -C "$p" worktree add -q "$BATS_TEST_TMPDIR/sib3"
+  mv "$p/.git/worktrees/sib3/commondir" "$p/cd"; ln -s ../../../cd "$p/.git/worktrees/sib3/commondir"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"commondir is, or goes through, a symlink"* ]]
+  q="$(mkproj wts2)"; mkrepo "$q"; commit_init "$q"
+  git -C "$q" worktree add -q "$BATS_TEST_TMPDIR/sib4"
+  mv "$q/.git/worktrees/sib4" "$q/wtdir"; ln -s ../../wtdir "$q/.git/worktrees/sib4"
+  run _launch "$q"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sib4 is, or goes through, a symlink"* ]]
+}
+
+@test "includes written ./x or ../x launch (bound once, canonical)" {
+  p="$(mkproj incdot)"; mkrepo "$p"
+  git -C "$p" config include.path ./inc.cfg
+  git -C "$p" config --add include.path ../.gitconfig-extra
+  : > "$p/.git/inc.cfg"; : > "$p/.gitconfig-extra"
+  _launch "$p" >/dev/null 2>&1
+  bound "$p/.git/inc.cfg" ro
+  bound "$p/.gitconfig-extra" ro
+  no_dup_dest
+}
+
+@test "a hook that is a symlink into the repo: its target is bound read-only" {
+  p="$(mkproj hooklink)"; mkrepo "$p"; mkdir -p "$p/scripts"; printf '#!/bin/sh\n' > "$p/scripts/pre-commit"
+  ln -s ../../scripts/pre-commit "$p/.git/hooks/pre-commit"
+  _launch "$p" >/dev/null 2>&1
+  bound "$p/scripts/pre-commit" ro
+}
+
+@test "nested submodule gitdirs deep under modules/ are guarded, and their checkout pointers" {
+  p="$(mkproj deepmod)"; mkrepo "$p"
+  m="$p/.git/modules/a/modules/b/modules/c"
+  mkdir -p "$m"; git init -q --bare "$m"; git init -q --bare "$p/.git/modules/a"
+  mkdir -p "$p/a"; printf 'gitdir: ../.git/modules/a\n' > "$p/a/.git"
+  git -C / config --file "$p/.git/modules/a/config" core.worktree ../../../a
+  _launch "$p" >/dev/null 2>&1
+  bound "$m/config" ro
+  bound "$m/hooks" ro
+  bound "$p/a/.git" ro
+  no_dup_dest
+}
+
+@test "a hooksPath through a symlink outside every root that lands inside one refuses" {
+  p="$(mkproj outlink)"; mkrepo "$p"; mkdir -p "$p/.githooks"
+  ln -s "$p" "$BATS_TEST_TMPDIR/sneaky"
+  git -C "$p" config core.hooksPath "$BATS_TEST_TMPDIR/sneaky/.githooks"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"goes through, a symlink"* ]]
 }
