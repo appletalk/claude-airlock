@@ -113,12 +113,12 @@ RUN set -eux; \
 # the release); it used to float to "newest v24.x at build time" on TLS alone, the one
 # download in the image a re-tag or a bad mirror could change silently. Bump with the
 # other pins.
-ARG NODE_VERSION=24.21.0
+ARG NODE_VERSION=24.22.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) narch=x64;   sha=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;; \
-      arm64) narch=arm64; sha=6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2 ;; \
+      amd64) narch=x64;   sha=cc2f601cee82d9a5a233302fe307abc600727035fd7d2c3a3571755989e95008 ;; \
+      arm64) narch=arm64; sha=fef00bb4d36e1c50104a9775a10359beee98f162b4104dd12472c75065c6a143 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${narch}.tar.xz" -o /tmp/node.tar.xz; \
@@ -181,14 +181,14 @@ RUN set -eux; \
 
 # terraform: `fmt` only (see scope note above). tflint carries its terraform
 # ruleset inside the binary, so it lints with no plugin download.
-ARG TERRAFORM_VERSION=1.16.4
+ARG TERRAFORM_VERSION=1.16.6
 ARG TFLINT_VERSION=0.64.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) tfsha=dc94af0eef1147718ad7c8daea792ed199e3e0492eec180d0adafa2a65a879df; \
+      amd64) tfsha=38034b38d03096399a7a1264a14561a8029b2b496fd1f169452656e53968f1b7; \
              tlsha=cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537 ;; \
-      arm64) tfsha=8263f301cb1a24489a4adeed147bf28504053f77237b3ea97a0ef2972659de30; \
+      arm64) tfsha=a750b5a11038f165846b2658c40c88cd7070aa67a61bab431a14ba27928ea9ea; \
              tlsha=560da89aacf59389d4eb029730dd5b109b7288096c32f2726a0d9e783a5ea8eb ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
@@ -207,12 +207,12 @@ ENV CHECKPOINT_DISABLE=1
 
 # vector: the musl static build, so the binary carries its own libc and stays
 # decoupled from the Debian base.
-ARG VECTOR_VERSION=0.58.0
+ARG VECTOR_VERSION=0.60.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) varch=x86_64;  sha=ad013ddc164b80e425cc403d2174e26b811673846d1125c80bc7b5024826ce39 ;; \
-      arm64) varch=aarch64; sha=b21afc8ba23a6fca9aec049a313ba6da5e59b7fc2ed018839d83241de5ab95f7 ;; \
+      amd64) varch=x86_64;  sha=9584f402e67fea7ff2dd846f0a8bbb56fa32951bded11749093ff3780e1513cf ;; \
+      arm64) varch=aarch64; sha=e2984f826aa61bf3ea98fba4cccde2437f645794b2f8a3d45c97df9594dcfbd1 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/vectordotdev/vector/releases/download/v${VECTOR_VERSION}/vector-${VECTOR_VERSION}-${varch}-unknown-linux-musl.tar.gz" -o /tmp/vector.tgz; \
@@ -232,12 +232,12 @@ RUN set -eux; \
 # Note the size: this is a ~450MB binary (every component plus the embedded UI are
 # linked in, and Go binaries don't strip usefully). It is the single largest tool
 # in the image -- roughly promtool + terraform + vector combined.
-ARG ALLOY_VERSION=1.20.1
+ARG ALLOY_VERSION=1.21.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) sha=451fe650e8277d22d69cb8db50bba809f581fe78decba7fce4027ef185457be9 ;; \
-      arm64) sha=396827d58158f181c98d5776c908348b38b4099f1d18a1e7554f2fda0fcb9203 ;; \
+      amd64) sha=2348c2342ab09dd865c33135aa28347618c41faf964149649e66b553eb4cbab3 ;; \
+      arm64) sha=5bdebe19c5c0ea6a196b58179fd95a6adf406fb547007ee96239d0380ca1922e ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-${arch}.zip" -o /tmp/alloy.zip; \
@@ -253,13 +253,13 @@ RUN set -eux; \
 # AllUsers module path: the box's $HOME is a fresh mount every session, so a
 # CurrentUser install would vanish. Baking it here is also what makes the linter
 # work with zero egress.
-ARG POWERSHELL_VERSION=7.6.6
+ARG POWERSHELL_VERSION=7.6.7
 ARG PSSCRIPTANALYZER_VERSION=1.25.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=x64;   sha=ddbc4a2d113bbd46d283cfedcbcd117a70caefd7673f41f2b4e0000badf103bc ;; \
-      arm64) parch=arm64; sha=924829e54c983648f6f1419a2dc7f9433c861b2fb5bd57736ff096c24f133729 ;; \
+      amd64) parch=x64;   sha=6896f9e3a6b0a354bf470835a96da76d2f801cd50dcf047ad7c4563bf93bf431 ;; \
+      arm64) parch=arm64; sha=ba465efdfb0984c1c5dc5ed9eb0b79a7e91a1b52c45f99377058c0659b84d3f1 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-${parch}.tar.gz" -o /tmp/pwsh.tgz; \
@@ -333,18 +333,18 @@ RUN set -eux; \
 # Pinned by version + sha256 per arch, same as the validators. drill comes from the apt
 # layer at the top.
 ARG KUBECTL_VERSION=1.37.1
-ARG HELM_VERSION=4.3.0
+ARG HELM_VERSION=4.3.1
 ARG SOPS_VERSION=3.13.3
 ARG TEA_VERSION=0.16.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       amd64) kcsha=65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8; \
-             hmsha=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb; \
+             hmsha=0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b; \
              spsha=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b; \
              tesha=9c142c8a0b31485eea2387031c1c404f12b7141075eb4ffbd7ced49441590636 ;; \
       arm64) kcsha=ff749f4b78d9c4f1ec87307df9b50119ed819e2094aa9810cb9acffc3286c8c7; \
-             hmsha=31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08; \
+             hmsha=8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88; \
              spsha=53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77; \
              tesha=0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
