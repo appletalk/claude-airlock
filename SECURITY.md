@@ -28,6 +28,12 @@ Anything that lets a contained box exceed its intended authority, for example:
   host-side store it should not (the state dir, another project's data).
 - **Credential exposure** — the OAuth token or an injected secret leaking to a place it
   shouldn't be (other host users, logs, the process table).
+- **Host code trusting box-writable files** — the launcher (or `airlock paste`) runs on the
+  host as the box's user, and the box decides what every name in its read-write mounts is
+  (a file, a folder, a FIFO, a link to anywhere that user can reach). Host code never opens
+  a path there by name: it builds content in a private temp file outside the mounts and
+  renames it in, reads only through a private copy of a regular file, and stops on a folder
+  where a file should be. A write or read through such a path is in scope.
 
 ## What is a known limitation, not a vulnerability
 

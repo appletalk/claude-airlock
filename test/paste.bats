@@ -49,23 +49,35 @@ EOF
 
 # Run `airlock paste` hermetically. Display vars and the paste project are passed
 # explicitly because the shared _launch scrubs the environment with `env -i`.
+_paste_env() {
+  PASTE_ENV=(
+    PATH="${PATH_OVERRIDE:-$STUBBIN:/usr/bin:/usr/sbin:/bin}"
+    HOME="$AIRLOCK_HOME"
+    TERM=xterm
+    AIRLOCK_ENGINE="$ENGINE"
+    AIRLOCK_IMAGE="claude-airlock:dev"
+    AIRLOCK_TMP_BASE="$TMP_BASE"
+    PNG_B64="$PNG_B64"
+    ${CLIPTEST:+CLIPTEST="$CLIPTEST"}
+    ${AIRLOCK_CONFIG:+AIRLOCK_CONFIG="$AIRLOCK_CONFIG"}
+    ${WAYLAND_DISPLAY:+WAYLAND_DISPLAY="$WAYLAND_DISPLAY"}
+    ${DISPLAY:+DISPLAY="$DISPLAY"}
+    ${AIRLOCK_PASTE_PROJECT:+AIRLOCK_PASTE_PROJECT="$AIRLOCK_PASTE_PROJECT"}
+  )
+}
 _paste() {
   local proj="$1"; shift
   cd "$proj" || return 1
-  env -i \
-    PATH="${PATH_OVERRIDE:-$STUBBIN:/usr/bin:/usr/sbin:/bin}" \
-    HOME="$AIRLOCK_HOME" \
-    TERM=xterm \
-    AIRLOCK_ENGINE="$ENGINE" \
-    AIRLOCK_IMAGE="claude-airlock:dev" \
-    AIRLOCK_TMP_BASE="$TMP_BASE" \
-    PNG_B64="$PNG_B64" \
-    ${CLIPTEST:+CLIPTEST="$CLIPTEST"} \
-    ${AIRLOCK_CONFIG:+AIRLOCK_CONFIG="$AIRLOCK_CONFIG"} \
-    ${WAYLAND_DISPLAY:+WAYLAND_DISPLAY="$WAYLAND_DISPLAY"} \
-    ${DISPLAY:+DISPLAY="$DISPLAY"} \
-    ${AIRLOCK_PASTE_PROJECT:+AIRLOCK_PASTE_PROJECT="$AIRLOCK_PASTE_PROJECT"} \
-    bash "$AIRLOCK" paste "$@" </dev/null
+  _paste_env
+  env -i "${PASTE_ENV[@]}" bash "$AIRLOCK" paste "$@" </dev/null
+}
+# As _paste, with the paste's PID known first (see _launch_planted in helper.bash).
+_paste_planted() {
+  local fn="$1" proj="$2"; shift 2
+  ( cd "$proj" || exit 1
+    _paste_env
+    "$fn" "$BASHPID"
+    exec env -i "${PASTE_ENV[@]}" bash "$AIRLOCK" paste "$@" </dev/null )
 }
 
 pastes_dir() { printf '%s' "$TMP_BASE/$(_slug "$1")/pastes"; }
@@ -567,4 +579,32 @@ swap_during_pass() {  # swap_during_pass <shell command run when pass is asked>
   [[ "$output" == *"changed after it was checked"* ]]
   ! engine_args | grep -q '^ENGINE_INVOKED=' || false
   chmod 755 "$D"
+}
+
+# The pastes dir sits in the project's scratch dir, which its box mounts read-write: a box
+# can plant a link at the paste's old guessable work name, or make `pastes` itself a link
+# (pentest 2026-10-20, O22).
+_plant_paste_work() { mkdir -p "$(pastes_dir "$P")"; ln -s "$VICTIM" "$(pastes_dir "$P")/.paste.$1.work"; }
+
+@test "a link at the paste's work name in pastes/ is not written through (O22)" {
+  P="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$P" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  VICTIM="$BATS_TEST_TMPDIR/victim"; printf 'VICTIM-UNCHANGED\n' > "$VICTIM"
+  stub_clipboard
+  run _paste_planted _plant_paste_work "$P"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$VICTIM")" = VICTIM-UNCHANGED ]
+  [ "$(head -c 4 "$output" | od -An -tx1 | tr -d ' \n')" = "89504e47" ]   # the paste still landed
+}
+
+@test "a pastes/ that is a link is refused, and nothing lands where it points" {
+  P="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$P" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  elsewhere="$BATS_TEST_TMPDIR/elsewhere"; mkdir -p "$elsewhere" "$TMP_BASE/$(_slug "$P")"
+  chmod 700 "$TMP_BASE" "$TMP_BASE/$(_slug "$P")"
+  ln -s "$elsewhere" "$(pastes_dir "$P")"
+  run _paste "$P"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"pastes is a symlink, not a folder"* ]]
+  [[ "$output" == *"was this planted?"* ]]
+  [ -z "$(ls -A "$elsewhere")" ]
 }

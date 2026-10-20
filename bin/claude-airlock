@@ -719,6 +719,36 @@ _airlock_mount_check() {
   printf '%s\n' "$c"
 }
 
+# Writes into folders the box mounts read-write (dot-claude/, the scratch dir's pastes/).
+# dot-claude/ is mounted read-write into the box, so the box decides what every name in it
+# is: a file, a folder, a FIFO, or a symlink to anywhere this user can reach on the host.
+# The launcher therefore never opens a path there by name. It builds content in a private
+# temp file in $STATE_DIR (not mounted into the box) and renames it in: rename(2) replaces a
+# link or a FIFO instead of following it, and stays atomic for sibling launches reading the
+# same file. A folder in the way stops the launch rather than being guessed about.
+# (Temp names inside dot-claude, `name.tmp.$$`, let a box that guessed the next launcher PID
+# plant a link there and have the launcher write through it: pentest 2026-10-20, O9/O10.)
+_airlock_private_tmp() { mktemp "$STATE_DIR/.write.$$.XXXXXX"; }
+_airlock_kind() {   # what a path is, for the message below
+  if [ -L "$1" ]; then echo "a symlink"
+  elif [ -d "$1" ]; then echo "a folder"
+  elif [ -p "$1" ]; then echo "a FIFO"
+  elif [ -e "$1" ]; then echo "not a regular file"
+  else echo "missing"; fi
+}
+_airlock_planted() {   # $1 = path, $2 = what it is, $3 = what it should be
+  echo "claude-airlock: $1 is $2, not $3. It sits in a folder the box can write, so the box" >&2
+  echo "  may have put it there to redirect the launcher (was this planted?). Check it, remove" >&2
+  echo "  it, then launch again." >&2
+}
+_airlock_place() {   # $1 = private temp file, $2 = destination in a box-writable folder
+  if [ -d "$2" ] && [ ! -L "$2" ]; then
+    rm -f "$1"; _airlock_planted "$2" "a folder" "a regular file"; exit 1
+  fi
+  if ! mv -fT -- "$1" "$2"; then
+    rm -f "$1"; _airlock_planted "$2" "$(_airlock_kind "$2")" "a regular file"; exit 1
+  fi
+}
 # The paste drop box (AIRLOCK_PASTE_DIR): canonical path on stdout if it may be mounted
 # read-only into the box; otherwise the reason on stderr and 1. Unlike `mount`, it may be
 # another account's directory (whoever hands you pastes owns it and writes it; you only read
@@ -1238,7 +1268,20 @@ if [ "${1:-}" = "paste" ]; then
     _pslug="$(printf '%s' "$(cd "$_pproj" && pwd)" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
     _pdir="$AIRLOCK_TMP_BASE/$_pslug/pastes"
     _airlock_tmp_base_ready "$AIRLOCK_TMP_BASE" || exit 1
-    mkdir -p "$_pdir" && chmod 700 "$AIRLOCK_TMP_BASE/$_pslug"
+    # Both are inside the project's scratch dir, which its box mounts read-write: the box
+    # decides what `pastes` is. Never `mkdir -p` through it (that follows a link to anywhere
+    # this user can write); create each level only if absent and check what is there.
+    mkdir -m 0700 "$AIRLOCK_TMP_BASE/$_pslug" 2>/dev/null || true
+    if [ -L "$AIRLOCK_TMP_BASE/$_pslug" ] || [ ! -d "$AIRLOCK_TMP_BASE/$_pslug" ] \
+       || [ "$(stat -c %u "$AIRLOCK_TMP_BASE/$_pslug")" != "$(id -u)" ]; then
+      echo "claude-airlock: the scratch dir $AIRLOCK_TMP_BASE/$_pslug is not a folder of yours; not pasting" >&2
+      exit 1
+    fi
+    chmod 700 "$AIRLOCK_TMP_BASE/$_pslug"
+    mkdir -m 0700 "$_pdir" 2>/dev/null || true
+    if [ -L "$_pdir" ] || [ ! -d "$_pdir" ]; then
+      _airlock_planted "$_pdir" "$(_airlock_kind "$_pdir")" "a folder"; exit 1
+    fi
   fi
 
   # Collect only files this tool created: `YYYYMMDD-HHMMSSmmm.png`, one fixed shape, so
@@ -1302,7 +1345,15 @@ if [ "${1:-}" = "paste" ]; then
   # Work file has no .png suffix, so the *.png glob (list, retention) cannot see a
   # half-written paste. The finished image is moved into place at the very end.
   _ptmp="$(mktemp "${TMPDIR:-/tmp}/airlock-paste.XXXXXX")" || exit 1
-  _pwork="$_pdir/.paste.$$.work"
+  # The work file is never a name in the box-writable pastes dir: the box could plant a link
+  # at a guessable name there and have the converter write through it (pentest O22). In the
+  # project mode it goes in the private scratch base (same filesystem, not mounted into any
+  # box) and is renamed in; a drop box (AIRLOCK_PASTE_DIR) no box can write, so mktemp there.
+  if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then
+    _pwork="$(mktemp --suffix=.work "$_pdir/.paste.XXXXXX")" || exit 1
+  else
+    _pwork="$(mktemp --suffix=.work "$AIRLOCK_TMP_BASE/.paste.XXXXXX")" || exit 1
+  fi
   trap 'rm -f "$_ptmp" "$_pwork"' EXIT INT TERM HUP
 
   # `|| true` is load-bearing under `set -e`: an assignment takes the substitution's
@@ -1362,7 +1413,7 @@ Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pwork" || _pfail "
   # would keep it out.
   [ -z "${AIRLOCK_PASTE_DIR:-}" ] || chmod 0640 "$_pwork" || _pfail "could not make the paste group-readable"
   # Atomic publish: same filesystem, so nothing ever observes a partial *.png.
-  mv -f "$_pwork" "$_pout" || _pfail "could not move the image into $_pdir"
+  mv -fT -- "$_pwork" "$_pout" || _pfail "could not move the image into $_pdir"
 
   # Retain the newest 20. EXCLUDES the file just written - it is not always the
   # lexically-last entry (a clock moved backwards, or hand-copied files whose names
@@ -1710,6 +1761,7 @@ _airlock_cleanup() {
   # node_modules yields an ordinary name. Omitting the directory missed both.
   rm -f "$STATE_DIR"/*.tmp."$$" "$STATE_DIR"/dot-claude/*.tmp."$$" \
         "$STATE_DIR"/artifacts/*.tmp."$$" "$STATE_DIR"/artifacts/.*.tmp."$$" 2>/dev/null || true
+  rm -rf "$STATE_DIR"/.write."$$".* 2>/dev/null || true   # private temp files (_airlock_private_tmp)
   # Release the artifact stores we hold read-write, so the next session can take them -
   # but only where the file still records US. "Ours by definition" is exactly the
   # assumption the lock release above refuses to make, and it is wrong for the same
@@ -1953,16 +2005,15 @@ fi
 # doesn't misread the sandbox. Refreshed each launch.
 _self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 _repo="$(dirname "$(dirname "$_self")")"
-# Copy via a per-process temp + rename, the ninth site of the same class as the eight
-# below. A plain `cp` to a shared destination opens O_CREAT|O_EXCL when the file does not
-# yet exist, so two launches racing the FIRST creation give one of them
-# "cannot create regular file: File exists" and a non-zero launch. rename(2) cannot.
+# Seed files are placed like every other write into dot-claude (_airlock_place, above).
 _seed() {
   [ -f "$1" ] || return 0
-  if cp "$1" "$2.tmp.$$"; then
-    mv -f "$2.tmp.$$" "$2"
+  local t
+  t="$(_airlock_private_tmp)" || return 1
+  if cp "$1" "$t" && chmod --reference="$1" "$t"; then
+    _airlock_place "$t" "$2"
   else
-    rm -f "$2.tmp.$$"
+    rm -f "$t"
     return 1
   fi
 }
@@ -1974,27 +2025,34 @@ _seed "$_repo/config/airlock-statusline.sh" "$STATE_DIR/dot-claude/airlock-statu
 # defaults. Airlock defaults win on conflicts; other keys Claude wrote are kept.
 if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; then
   _bs="$STATE_DIR/dot-claude/settings.json"
-  # Atomic reset, for the same reason as every other write on this path: a plain redirect
-  # TRUNCATES the shared destination, so a sibling launch reading it mid-merge gets an
-  # empty file, its jq fails, and that box silently runs without the airlock settings
-  # baseline. No error, no signal - which is what makes it worth fixing over a window
-  # only a few syscalls wide.
-  # The box can write this file, so anything but a JSON object is reset too: a string or a
-  # number is valid JSON that every filter below would fail on. (An object with odd nested
-  # shapes can still fail the baseline merge; that warns, and the telemetry filter below
-  # still applies.)
-  if ! { [ -s "$_bs" ] && jq -e 'type == "object"' "$_bs" >/dev/null 2>&1; }; then
-    echo '{}' > "$_bs.tmp.$$" && mv -f "$_bs.tmp.$$" "$_bs"
+  # Read through a private copy, never through the box-writable name (see _airlock_place):
+  # the box may have made it a link to any JSON file this user can read, and the merge
+  # would copy that file into the box. Only a regular file is read; `cp -P` copies a link
+  # as a link, so one swapped in after the test is caught on the copy; the timeout covers a
+  # FIFO swapped in by a sibling box. Anything else, and anything but a JSON object, starts
+  # from {} (a string or a number is valid JSON that every filter below would fail on).
+  # Every step writes a new private file and the result is renamed in once, atomically, so
+  # a sibling launch never reads a half-written file.
+  if [ -d "$_bs" ] && [ ! -L "$_bs" ]; then
+    _airlock_planted "$_bs" "a folder" "a regular file"; exit 1
   fi
+  _bsd="$(mktemp -d "$STATE_DIR/.write.$$.XXXXXX")"
+  if [ -f "$_bs" ] && [ ! -L "$_bs" ]; then
+    timeout 10 cp -P -- "$_bs" "$_bsd/in" 2>/dev/null || true
+  fi
+  if [ -L "$_bsd/in" ] || [ ! -f "$_bsd/in" ] || [ "$(stat -c %s "$_bsd/in")" -gt 1048576 ] \
+     || ! jq -e 'type == "object"' "$_bsd/in" >/dev/null 2>&1; then
+    rm -f "$_bsd/in"; echo '{}' > "$_bsd/in"
+  fi
+  _bscur="$_bsd/in"
   if jq -s '
     .[0] as $e | .[1] as $d
     | ($e * $d)
     | .permissions.allow = ((($e.permissions.allow // []) + ($d.permissions.allow // [])) | unique)
     | .permissions.deny  = ((($e.permissions.deny  // []) + ($d.permissions.deny  // [])) | unique)
-  ' "$_bs" "$_repo/config/box-settings.json" > "$_bs.tmp.$$" 2>/dev/null; then
-    mv "$_bs.tmp.$$" "$_bs"
+  ' "$_bscur" "$_repo/config/box-settings.json" > "$_bsd/merged" 2>/dev/null; then
+    _bscur="$_bsd/merged"
   else
-    rm -f "$_bs.tmp.$$"
     echo "airlock: WARNING: could not merge the settings baseline into $_bs (malformed?); the box runs without it" >&2
   fi
 
@@ -2003,8 +2061,8 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   # on`, which deleted DISABLE_TELEMETRY) is corrected on its next launch. The mounted
   # managed settings keep them off regardless; this keeps the file honest.
   _tfilter='.env |= ((if type == "object" then . else {} end) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
-  if jq "$_tfilter" "$_bs" > "$_bs.tmp.$$" 2>/dev/null; then
-    mv "$_bs.tmp.$$" "$_bs"
+  if jq "$_tfilter" "$_bscur" > "$_bsd/final" 2>/dev/null; then
+    _bscur="$_bsd/final"
     # A project switched on with the retired `airlock telemetry on` still has its marker.
     # Clear it and say so once, only now that the box's settings say off.
     if [ -f "$STATE_DIR/telemetry-on" ]; then
@@ -2013,9 +2071,10 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
       echo "  works without it on Claude Code 2.1.283+). Boxes still running keep it until they restart." >&2
     fi
   else
-    rm -f "$_bs.tmp.$$"
     echo "airlock: WARNING: could not assert telemetry off in $_bs; the mounted managed settings still apply" >&2
   fi
+  _airlock_place "$_bscur" "$_bs"
+  rm -rf "$_bsd"
 elif ! command -v jq >/dev/null 2>&1; then
   echo "airlock: WARNING: jq not found; the box's settings.json was not checked (the mounted managed settings still apply)" >&2
 fi
