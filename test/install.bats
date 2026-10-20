@@ -201,6 +201,20 @@ _install_clone() {
   ! readlink -f "$AIRLOCK_HOME/.local/bin/claude-airlock" | grep -q "^$CLONE" || false
 }
 
+@test "install puts the host status line in ~/.claude, a copy of the installed version's" {
+  mkclone
+  mkdir -p "$AIRLOCK_HOME/.claude"
+  printf '{"statusLine":{"command":"bash %s/config/airlock-statusline.sh --host"}}' "$CLONE" > "$AIRLOCK_HOME/.claude/settings.json"
+  _install_clone
+  sl="$AIRLOCK_HOME/.claude/airlock-statusline.sh"
+  [ -f "$sl" ] && [ ! -L "$sl" ]
+  cmp -s "$sl" "$(IROOT)/current/config/airlock-statusline.sh"
+  grep -q "runs another copy of the status line" "$BATS_TEST_TMPDIR/install.err"
+  printf '{"statusLine":{"command":"bash ~/.claude/airlock-statusline.sh --host"}}' > "$AIRLOCK_HOME/.claude/settings.json"
+  _install_clone
+  ! grep -q "runs another copy of the status line" "$BATS_TEST_TMPDIR/install.err" || false
+}
+
 @test "images are built from the new version's own directory, not the checkout" {
   mkclone
   _install_clone
