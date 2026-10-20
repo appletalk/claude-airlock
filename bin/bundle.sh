@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# Write the installed version of claude-airlock (launcher and images) to DIR as a bundle,
+# for another account on this host, or an offline host, to install without building or
+# fetching anything:
+#   bin/bundle.sh DIR           (make bundle DIR=...)   write it, replacing an earlier one
+#   bin/bundle.sh --clean DIR   (make bundle-clean DIR=...)  remove it once every reader
+#                               has installed it: a bundle is a handoff, not an archive
+# The reader runs DIR/install-bundle.sh. DIR is whatever both accounts can reach: written
+# by you, readable by the reader (its directory setgid with the reader's group, say).
+# Files are written 0640, and the manifest last, so a reader never takes a half-written one.
+set -euo pipefail
+umask 027
+
+clean=0
+[ "${1:-}" = --clean ] && { clean=1; shift; }
+DIR="${1:?usage: bundle.sh [--clean] DIR}"
+[ -d "$DIR" ] || { echo "claude-airlock: $DIR is not a directory" >&2; exit 1; }
+DIR="$(cd "$DIR" && pwd)"
+
+# Only names this script writes; anything else in DIR is left alone.
+_drop() {
+  rm -f -- "$DIR/MANIFEST"                       # first: from here on no reader starts on it
+  rm -f -- "$DIR"/claude-airlock-*.tar "$DIR"/images-*.tar "$DIR/install-bundle.sh" "$DIR"/*.part
+}
+if [ "$clean" = 1 ]; then _drop; echo "==> Removed the bundle in $DIR"; exit 0; fi
+[ -w "$DIR" ] || { echo "claude-airlock: $DIR is not writable by you" >&2; exit 1; }
+
+CONFIG_DIR="$HOME/.config/claude-airlock"
+AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-}"
+if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_DIR/config" ]; then
+  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_DIR/config" | tr -d '"'\''[:space:]' | tail -1)"
+fi
+AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
+case "$AIRLOCK_ENGINE" in podman|docker) ;; *) echo "claude-airlock: AIRLOCK_ENGINE must be podman or docker" >&2; exit 1 ;; esac
+
+# The live install, and the images it went live with: the tags must still be those.
+INSTALL_ROOT="${AIRLOCK_INSTALL_ROOT:-$HOME/.local/share/claude-airlock}"
+cur="$(readlink "$INSTALL_ROOT/current" 2>/dev/null)" || { echo "claude-airlock: nothing installed (make install first)" >&2; exit 1; }
+VER="$INSTALL_ROOT/$cur"
+REV="$(sed -n 's/^commit \([0-9a-f]\{12\}\)$/\1/p' "$VER/VERSION" 2>/dev/null | head -1)"
+[ -n "$REV" ] || { echo "claude-airlock: the live install ($cur) is not a git commit's; bundles carry commits only" >&2; exit 1; }
+[ -f "$VER/IMAGES" ] || { echo "claude-airlock: $cur has no image record (installed before bundles existed): make install again" >&2; exit 1; }
+_id() { "$AIRLOCK_ENGINE" image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
+for t in base os dev; do
+  want="$(awk -v t="$t" '$1 == t { print $2 }' "$VER/IMAGES")"
+  have="$(_id "claude-airlock:$t")"
+  if [ -z "$want" ] || [ "$have" != "$want" ]; then
+    echo "claude-airlock: claude-airlock:$t is ${have:-missing}, not the ${want:-unrecorded} image $REV went live with: make install again" >&2
+    exit 1
+  fi
+done
+
+_drop
+trap 'rm -f -- "$DIR"/*.part; for t in base os dev; do "$AIRLOCK_ENGINE" rmi "claude-airlock:$t-$REV" >/dev/null 2>&1 || true; done' EXIT
+echo "==> Bundling commit $REV into $DIR"
+tar -C "$VER" -cf "$DIR/claude-airlock-$REV.tar.part" .
+# Saved under this commit's own tags (added just for the save), so loading one moves no
+# reader's live tags before its install has checked them.
+for t in base os dev; do "$AIRLOCK_ENGINE" tag "claude-airlock:$t" "claude-airlock:$t-$REV"; done
+if [ "$AIRLOCK_ENGINE" = podman ]; then
+  podman save -q -m --format docker-archive -o "$DIR/images-$REV.tar.part" \
+    "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV"
+else
+  docker save -o "$DIR/images-$REV.tar.part" "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV"
+fi
+cp "$VER/bin/install-bundle.sh" "$DIR/install-bundle.sh.part"
+chmod 0640 "$DIR"/*.part
+for f in "claude-airlock-$REV.tar" "images-$REV.tar" install-bundle.sh; do mv -f "$DIR/$f.part" "$DIR/$f"; done
+{
+  echo "format 1"
+  echo "commit $REV"
+  for t in base os dev; do echo "image $t $(awk -v t="$t" '$1 == t { print $2 }' "$VER/IMAGES")"; done
+  for f in "claude-airlock-$REV.tar" "images-$REV.tar" install-bundle.sh; do
+    echo "sha256 $(sha256sum "$DIR/$f" | cut -d' ' -f1) $f"
+  done
+} > "$DIR/MANIFEST.part"
+mv -f "$DIR/MANIFEST.part" "$DIR/MANIFEST"
+echo "==> Bundle ready: $(du -ch "$DIR/claude-airlock-$REV.tar" "$DIR/images-$REV.tar" | tail -1 | cut -f1) in $DIR"
+echo "    The other account: bash $DIR/install-bundle.sh"
+echo "    Then remove it:    make bundle-clean DIR=$DIR   (or bin/bundle.sh --clean $DIR)"

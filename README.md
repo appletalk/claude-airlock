@@ -650,8 +650,10 @@ container or runtime escape then lands as a user who can read none of your files
 sessions, and the agent's work comes back to you only through what you choose to pull (git
 branches, say). Nothing in the launcher assumes it runs as you:
 
-- **Install per account.** As the agent's user: `bin/install.sh` (its own rootless images,
-  in its own store), its own `~/.config/claude-airlock/config`, its own Claude login. The
+- **Install per account.** Each account has its own rootless image store, so each installs
+  its own copy: as the agent's user, `bin/install.sh`, or, without giving it build-time
+  network, a bundle you wrote (below). It has its own `~/.config/claude-airlock/config` and
+  its own Claude login. The
   account needs subuid/subgid ranges (`usermod --add-subuids ... --add-subgids ...`) and a
   user manager (`loginctl enable-linger <user>`) for rootless Podman. Give it no `sudo`,
   none of your groups, a locked password, and its home `0700` (and yours).
@@ -670,6 +672,39 @@ branches, say). Nothing in the launcher assumes it runs as you:
 - **Get to its sessions without its password:** `machinectl shell <user>@.host` (with a
   polkit rule allowing you exactly that); a terminal multiplexer run in its user manager keeps
   sessions alive across your logouts.
+
+### Installing from a bundle (another account, or an offline host)
+
+A build needs the network (the Debian base, packages, the Claude Code release). An account
+that should not have it, such as an agent's own user, or a host that cannot reach it, can
+install what you built instead:
+
+```
+make install                              # as you, as usual
+make bundle DIR=/srv/agent-inbox/airlock  # the installed version: launcher + images, ~3.5 GB
+bash /srv/agent-inbox/airlock/install-bundle.sh   # as the other account: no build, no network
+make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has installed it
+```
+
+- **What it holds:** the installed commit's source tree, its three images (`podman save`,
+  shared layers stored once) and a `MANIFEST` with the commit, each image's ID and a sha256
+  of every file. `make bundle` refuses unless the image tags are still the ones that commit
+  went live with.
+- **What the reader checks:** every file against the manifest (a changed or half-written
+  bundle installs nothing; the manifest is written last), that the source tree is the
+  manifest's commit, and that each image loads as exactly the ID the manifest names. Then it
+  goes live like any install, containment check and image smoke test included. The reader
+  runs the bundle's own installer, so launcher and images always come from one commit. A
+  bundle is not signed: it proves the files are the ones the writer wrote, so put it where
+  only the writer can write (its directory owned by the writer, every directory above it
+  root's).
+- **Space:** a bundle is a handoff, not an archive: `make bundle` replaces an earlier one in
+  the same directory, and `bundle-clean` removes it. A reader keeps one version of the
+  images: each bundle install removes the ones it replaced. A build (`make install`) keeps a
+  week of its own untagged layers as build cache and removes older ones; nothing outside
+  claude-airlock's images is touched.
+- **Several readers:** each account has its own store, so each holds a copy (about 4 GB).
+  Write the bundle once, have each install it, then clean it.
 
 ## Security model
 

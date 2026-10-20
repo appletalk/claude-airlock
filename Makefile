@@ -14,7 +14,7 @@ SHELLCHECK ?= $(shell command -v shellcheck 2>/dev/null || echo .tooling/bin/she
 BATS       ?= $(shell command -v bats 2>/dev/null || echo .tooling/bin/bats)
 
 # Shell we lint. The zsh integration is excluded — shellcheck doesn't parse zsh.
-SHELL_SCRIPTS := bin/claude-airlock bin/install.sh \
+SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh \
                  image/init-firewall.sh image/entrypoint.sh \
                  config/airlock-statusline.sh \
                  hooks/pre-commit scripts/bootstrap-tools.sh \
@@ -30,6 +30,18 @@ help: ## Show this help
 
 install: ## install the launcher + build base/dev images (packages refreshed weekly; see bin/install.sh)
 	@bash bin/install.sh
+
+bundle: ## write the installed version (launcher + images) to DIR= for another account or an offline host
+	@test -n "$(DIR)" || { echo "usage: make bundle DIR=<directory the other account can read>"; exit 1; }
+	@bash bin/bundle.sh "$(DIR)"
+
+bundle-clean: ## remove the bundle in DIR= once every reader has installed it
+	@test -n "$(DIR)" || { echo "usage: make bundle-clean DIR=<directory>"; exit 1; }
+	@bash bin/bundle.sh --clean "$(DIR)"
+
+install-bundle: ## install from the bundle in DIR= (no build, no network); or: bash DIR/install-bundle.sh
+	@test -n "$(DIR)" || { echo "usage: make install-bundle DIR=<directory>"; exit 1; }
+	@bash bin/install-bundle.sh "$(DIR)"
 
 refresh: ## rebuild the images with today's Debian security updates (forces the weekly refresh now)
 	@AIRLOCK_APT_REFRESH="$$(date +%G-W%V).$$(date +%F-%H%M)" bash bin/install.sh
@@ -80,4 +92,4 @@ hooks: ## install the git pre-commit hook (symlink)
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap
+.PHONY: help install bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap
