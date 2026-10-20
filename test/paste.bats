@@ -17,7 +17,7 @@ setup() {
   # A 1x1 PNG and a BMP header, as the two shapes a real clipboard offers.
   PNG_B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
   # Keep scratch inside the bats tmpdir: the suite must not write to the real
-  # /tmp/airlock, and inside a container that path is root-owned anyway.
+  # /tmp/airlock-<user>.
   TMP_BASE="$BATS_TEST_TMPDIR/airlock-tmp"
   export PNG_B64 TMP_BASE
 }
@@ -523,5 +523,48 @@ mkinbox() {
   engine_args | grep -q '^ENGINE_INVOKED='
   ! engine_args | grep -q -- "$D:$D" || false
   ! engine_args | grep -q -- "^AIRLOCK_PASTES=" || false
+  chmod 755 "$D"
+}
+
+@test "paste dir: a system directory (it would cover the box's own) is refused; so are ',' and a newline" {
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox
+  export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  for d in /etc /usr/local/bin /var/lib /opt; do
+    printf 'AIRLOCK_PASTE_DIR=%s\n' "$d" > "$AIRLOCK_CONFIG"
+    run _paste "$p"
+    [ "$status" -ne 0 ] && [[ "$output" == *"is a system directory"* ]] || { echo "$d: $output"; return 1; }
+  done
+  printf 'AIRLOCK_PASTE_DIR=%s\n' "$T/a,b" > "$AIRLOCK_CONFIG"
+  run _paste "$p"; [ "$status" -ne 0 ]; [[ "$output" == *"contains ':', ','"* ]]
+  printf 'AIRLOCK_PASTE_DIR="%s\nx"\n' "$T/a" > "$AIRLOCK_CONFIG"
+  run _paste "$p"; [ "$status" -ne 0 ]; [[ "$output" == *"control character"* ]]
+}
+
+# The paste dir is checked while the launch is assembled; a prompt (pass, pinentry) may wait
+# after that for as long as a person takes. A swap or a chmod in that time stops the launch.
+swap_during_pass() {  # swap_during_pass <shell command run when pass is asked>
+  printf '#!/usr/bin/env bash\n%s\necho secret\n' "$1" > "$STUBBIN/pass"; chmod +x "$STUBBIN/pass"
+}
+@test "paste dir swapped for a link while a secret prompt waited: the launch stops, nothing mounted" {
+  p="$(mkproj sw)"; stub_stat; mkinbox
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock" "$AIRLOCK_HOME/.ssh"
+  printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  _launch "$p" secret set TOKEN pass:x/y >/dev/null
+  swap_during_pass "mv '$D' '$D.away' && ln -s '$AIRLOCK_HOME/.ssh' '$D'"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"paste dir $D changed after it was checked"* ]]
+  ! engine_args | grep -q '^ENGINE_INVOKED=' || false
+}
+@test "paste dir made group-writable while a secret prompt waited: the launch stops" {
+  p="$(mkproj sw2)"; stub_stat; mkinbox
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  _launch "$p" secret set TOKEN pass:x/y >/dev/null
+  swap_during_pass "chmod 775 '$D'"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"changed after it was checked"* ]]
+  ! engine_args | grep -q '^ENGINE_INVOKED=' || false
   chmod 755 "$D"
 }

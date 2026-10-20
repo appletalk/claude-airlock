@@ -33,6 +33,8 @@ tmp_fns() {
   check() { bash -c "$(tmp_fns)"'; _AIRLOCK_TMP_DEFAULT="$1"; _airlock_tmp_base_ready "$1"' _ "$b" 2>&1; }
   mkdir -m 0755 "$b"
   run check; [ "$status" -ne 0 ]; [[ "$output" == *"is not yours alone"* ]]
+  chmod 0750 "$b"                                   # group bits alone
+  run check; [ "$status" -ne 0 ]; [[ "$output" == *"is not yours alone"* ]]
   chmod 0700 "$b"; mv "$b" "$b.real"; ln -s "$b.real" "$b"
   run check; [ "$status" -ne 0 ]; [[ "$output" == *"is not yours alone"* ]]
   rm "$b"; mv "$b.real" "$b"
@@ -75,6 +77,33 @@ tmp_fns() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"is not yours alone"* ]]
   [[ "$output" != *CLAUDE-RAN* ]]
+}
+
+# The wrapper with a stat stub answering for the real default base ($1: "-c %u" or "-c %a",
+# $2: the answer), or zsh/stat loaded ($3 = zstat).
+wrapper_with() {
+  local b="/tmp/airlock-$ME" pre=""
+  [ ! -e "$b" ] || [ "$(stat -c %u:%a "$b")" = "$(id -u):700" ] || skip "$b exists and is not ours alone"
+  [ -z "${1:-}" ] || { printf '#!/usr/bin/env bash\n[ "$1 $2 $3" = "%s %s" ] && { echo %s; exit 0; }\nexec /usr/bin/stat "$@"\n' "$1" "$b" "$2" > "$STUBBIN/stat"; chmod +x "$STUBBIN/stat"; }
+  [ "${3:-}" != zstat ] || pre="zmodload zsh/stat; "
+  printf '#!/usr/bin/env bash\necho CLAUDE-RAN\n' > "$STUBBIN/claude"; chmod +x "$STUBBIN/claude"
+  p="$(mkproj "tbw$RANDOM")"
+  run env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" TERM=xterm \
+    zsh -c "${pre}source '$BATS_TEST_DIRNAME/../shell/claude-airlock.zsh' >/dev/null 2>&1; cd '$p' || exit 1; claude" </dev/null
+}
+
+@test "the host wrapper refuses a default base someone else owns, and one with group bits" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  wrapper_with "-c %u" 4242
+  [ "$status" -ne 0 ]; [[ "$output" == *"is not yours alone"* ]]; [[ "$output" != *CLAUDE-RAN* ]]
+  wrapper_with "-c %a" 750
+  [ "$status" -ne 0 ]; [[ "$output" == *"is not yours alone"* ]]; [[ "$output" != *CLAUDE-RAN* ]]
+}
+
+@test "the host wrapper works with zsh/stat loaded (its stat builtin takes no -c)" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  wrapper_with "" "" zstat
+  [[ "$output" == *CLAUDE-RAN* ]]
 }
 
 @test "a base set in the environment is the user's choice: not checked" {

@@ -739,6 +739,13 @@ _airlock_paste_dir_check() {
   [ "$c" = "$want" ] || { echo "'$want' is not its real path ($c): name that" >&2; return 1; }
   [ -d "$c" ] || { echo "'$c' is not a directory" >&2; return 1; }
   case "$c" in /|"$home") echo "refusing '$c' itself" >&2; return 1 ;; esac
+  # Mounted at its own path, a system directory would cover the image's own (its managed
+  # settings in /etc, its entrypoint in /usr/local/bin): a drop box lives somewhere of its own.
+  # (/tmp is refused below: it is writable by more than root.)
+  case "$c" in
+    /etc|/etc/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/opt/*|/root|/root/*|/boot|/boot/*|/var|/var/*|/run|/run/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/home|/home/dev|/home/dev/*)
+      echo "'$c' is a system directory (or inside one), which the box has its own of" >&2; return 1 ;;
+  esac
   _airlock_protected_check "$c" || return 1
   case "$c" in
     "$WORKSPACE"|"$WORKSPACE"/*) echo "'$c' is inside the workspace, which is already mounted" >&2; return 1 ;;
