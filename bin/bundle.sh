@@ -34,8 +34,16 @@ fi
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
 case "$AIRLOCK_ENGINE" in podman|docker) ;; *) echo "claude-airlock: AIRLOCK_ENGINE must be podman or docker" >&2; exit 1 ;; esac
 
-# The live install, and the images it went live with: the tags must still be those.
+# The live install, and the images it went live with: the tags must still be those. Under the
+# install lock, held to the end: an install (make refresh, say) builds under the same
+# per-commit tags this borrows for the save, and must not move the live tags in between.
 INSTALL_ROOT="${AIRLOCK_INSTALL_ROOT:-$HOME/.local/share/claude-airlock}"
+[ -d "$INSTALL_ROOT" ] || { echo "claude-airlock: nothing installed (make install first)" >&2; exit 1; }
+exec 9>"$INSTALL_ROOT/.lock"
+if ! flock -n 9; then
+  echo "==> An install is running; waiting up to 10 minutes for it to finish"
+  flock -w 600 9 || { echo "claude-airlock: $INSTALL_ROOT/.lock is still held; see fuser -v $INSTALL_ROOT/.lock" >&2; exit 1; }
+fi
 cur="$(readlink "$INSTALL_ROOT/current" 2>/dev/null)" || { echo "claude-airlock: nothing installed (make install first)" >&2; exit 1; }
 VER="$INSTALL_ROOT/$cur"
 REV="$(sed -n 's/^commit \([0-9a-f]\{12\}\)$/\1/p' "$VER/VERSION" 2>/dev/null | head -1)"
@@ -70,6 +78,7 @@ for f in "claude-airlock-$REV.tar" "images-$REV.tar" install-bundle.sh; do mv -f
 {
   echo "format 1"
   echo "commit $REV"
+  echo "engine $AIRLOCK_ENGINE"
   for t in base os dev; do echo "image $t $(awk -v t="$t" '$1 == t { print $2 }' "$VER/IMAGES")"; done
   for f in "claude-airlock-$REV.tar" "images-$REV.tar" install-bundle.sh; do
     echo "sha256 $(sha256sum "$DIR/$f" | cut -d' ' -f1) $f"

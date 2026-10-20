@@ -700,9 +700,12 @@ make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has instal
   root's).
 - **Space:** a bundle is a handoff, not an archive: `make bundle` replaces an earlier one in
   the same directory, and `bundle-clean` removes it. A reader keeps one version of the
-  images: each bundle install removes the ones it replaced. A build (`make install`) keeps a
-  week of its own untagged layers as build cache and removes older ones; nothing outside
-  claude-airlock's images is touched.
+  images: once an install passes its checks, the images it replaced go, and any a running
+  box kept go at the next install after that box is gone. A build (`make install`) keeps a
+  week of its own untagged layers as build cache and removes older ones. Only claude-airlock's
+  images go, and the unlabelled parents only they use (an older Debian base, say).
+- **Same engine on both sides:** podman and docker name and number images differently, so a
+  bundle records its engine and a reader on the other refuses it.
 - **Several readers:** each account has its own store, so each holds a copy (about 4 GB).
   Write the bundle once, have each install it, then clean it.
 
