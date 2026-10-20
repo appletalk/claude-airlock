@@ -64,6 +64,26 @@ AIRLOCK_EGRESS_PROXY="${AIRLOCK_EGRESS_PROXY:-}"
 # environment value from one the config just set, which is how "env-only" silently
 # became a config knob.
 _AIRLOCK_TMP_BASE_ENV="${AIRLOCK_TMP_BASE:-}"
+# The default scratch base is per user: one shared /tmp/airlock belonged to whoever
+# launched first, and another account on the host (an agent's own user, say) could not
+# make its project dirs in it.
+_AIRLOCK_TMP_DEFAULT="/tmp/airlock-$(id -un)"
+# Make the default scratch base, or refuse one that is not ours alone: in a shared /tmp
+# anyone can make /tmp/airlock-<you> first, and whoever owns it (or can write to it) can
+# read, swap or plant what every one of your boxes mounts. A base set in the environment
+# is the user's own choice and is not checked here.
+_airlock_tmp_base_ready() {
+  local b="$1"
+  [ "$b" = "$_AIRLOCK_TMP_DEFAULT" ] || return 0
+  mkdir -m 0700 "$b" 2>/dev/null || true
+  if [ -L "$b" ] || [ ! -d "$b" ] || [ "$(stat -c %u "$b")" != "$(id -u)" ] \
+     || [ -n "$(find "$b" -maxdepth 0 -perm /077 -print)" ]; then
+    echo "claude-airlock: $b is not yours alone (a symlink, another owner, or open to others)." >&2
+    echo "  Someone else may have made it to read or swap your scratch: remove it (or set" >&2
+    echo "  AIRLOCK_TMP_BASE in your environment to a directory of your own)." >&2
+    return 1
+  fi
+}
 # The doctor sources the config itself, on top of these; handing it the post-config
 # values would apply the config twice (an appending AIRLOCK_DNS doubles).
 _AIRLOCK_PODMAN_NETWORK_ENV="$AIRLOCK_PODMAN_NETWORK"
@@ -186,7 +206,7 @@ _airlock_history_peers() {
 if [ "${1:-}" = "session" ]; then
   _xslug="$(printf '%s' "$PWD" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
   _xdir="$HOME/.config/claude-airlock/state/$_xslug/sessions"
-  _xtmp="${_AIRLOCK_TMP_BASE_ENV:-/tmp/airlock}/$_xslug"
+  _xtmp="${_AIRLOCK_TMP_BASE_ENV:-$_AIRLOCK_TMP_DEFAULT}/$_xslug"
   _xpid="${3:-}"
   case "${2:-}" in
     register)
@@ -205,8 +225,8 @@ if [ "${1:-}" = "session" ]; then
         # .venv behind permanently (measured against real containers).
         _airlock_release_artifacts "$HOME/.config/claude-airlock/state/$_xslug"
         rmdir "$_xtmp" 2>/dev/null || true
-        if [ "${_AIRLOCK_TMP_BASE_ENV:-/tmp/airlock}" = /tmp/airlock ]; then
-          rmdir /tmp/airlock 2>/dev/null || true
+        if [ -z "$_AIRLOCK_TMP_BASE_ENV" ]; then
+          rmdir "$_AIRLOCK_TMP_DEFAULT" 2>/dev/null || true
         fi
         rmdir "$_xdir" 2>/dev/null || true
       fi ;;
@@ -231,7 +251,7 @@ if [ -n "${AIRLOCK_TMP_BASE:-}" ] && [ "${AIRLOCK_TMP_BASE}" != "$_AIRLOCK_TMP_B
   echo "  Export it from your shell rc, or remove it from the config." >&2
   exit 1
 fi
-AIRLOCK_TMP_BASE="${_AIRLOCK_TMP_BASE_ENV:-/tmp/airlock}"
+AIRLOCK_TMP_BASE="${_AIRLOCK_TMP_BASE_ENV:-$_AIRLOCK_TMP_DEFAULT}"
 
 case "$AIRLOCK_ENGINE" in
   podman|docker) ;;
@@ -697,6 +717,48 @@ _airlock_mount_check() {
   printf '%s\n' "$c"
 }
 
+# The paste drop box (AIRLOCK_PASTE_DIR): canonical path on stdout if it may be mounted
+# read-only into the box; otherwise the reason on stderr and 1. Unlike `mount`, it may be
+# another account's directory (whoever hands you pastes owns it and writes it; you only read
+# it), so the rule is about who can write there: its owner, or root, controls every
+# directory from / down to it, and no one else can write to any of them (a sticky /tmp
+# included: anyone could have made a directory there).
+_airlock_paste_dir_check() {
+  local want="$1" c home d o u m
+  case "$want" in /*) ;; *) echo "'$want' must be an absolute path" >&2; return 1 ;; esac
+  home="$(readlink -f "$HOME" 2>/dev/null)" || { echo "cannot resolve \$HOME" >&2; return 1; }
+  c="$(readlink -e "$want" 2>/dev/null)" || { echo "'$want' does not exist" >&2; return 1; }
+  [ "$c" = "$want" ] || { echo "'$want' is not its real path ($c): name that" >&2; return 1; }
+  [ -d "$c" ] || { echo "'$c' is not a directory" >&2; return 1; }
+  case "$c" in /|"$home") echo "refusing '$c' itself" >&2; return 1 ;; esac
+  _airlock_protected_check "$c" || return 1
+  case "$c" in
+    "$WORKSPACE"|"$WORKSPACE"/*) echo "'$c' is inside the workspace, which is already mounted" >&2; return 1 ;;
+  esac
+  case "$WORKSPACE" in "$c"/*) echo "'$c' contains the workspace" >&2; return 1 ;; esac
+  o="$(stat -c %u "$c")" d="$c"
+  while :; do
+    u="$(stat -c %u "$d")" m="$(stat -c %a "$d")"
+    if [ "$u" != 0 ] && [ "$u" != "$o" ]; then
+      echo "'$d' (holding '$c') belongs to neither root nor the paste dir's owner" >&2; return 1
+    fi
+    if [[ ! "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#022 )); then
+      echo "'$d' (holding or being '$c') is group/world-writable: only its owner may write there" >&2; return 1
+    fi
+    [ "$d" = / ] && break
+    d="$(dirname "$d")"
+  done
+  if [ -n "$(find "$c" -xdev -type f -links +1 -print -quit 2>/dev/null)" ]; then
+    echo "'$c' holds a hard-linked file, which could expose a file from anywhere (no override)" >&2
+    return 1
+  fi
+  if findmnt -rn -o TARGET 2>/dev/null | awk -v p="$c/" 'index($0, p) == 1 { f = 1 } END { exit !f }'; then
+    echo "'$c' contains a mount point (no override)" >&2
+    return 1
+  fi
+  printf '%s\n' "$c"
+}
+
 if [ "${1:-}" = "mount" ]; then
   _mslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
   _mstore="$HOME/.config/claude-airlock/state/$_mslug/mounts"
@@ -1093,6 +1155,7 @@ fi
 if [ "${1:-}" = "tmp" ]; then
   _tslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
   _tdir="$AIRLOCK_TMP_BASE/$_tslug"
+  _airlock_tmp_base_ready "$AIRLOCK_TMP_BASE" || exit 1
   mkdir -p "$_tdir" && chmod 700 "$_tdir"
   printf '%s\n' "$_tdir"
   exit 0
@@ -1111,7 +1174,8 @@ fi
 # The target project is REQUIRED and comes from AIRLOCK_PASTE_PROJECT (host config), not
 # from $PWD: you type this in whatever terminal is free while the agent holds the other
 # one, and a $PWD default would silently write pastes into a directory that box never
-# mounts.
+# mounts. With AIRLOCK_PASTE_DIR set, pastes go there instead, for every project: a drop
+# box every box mounts read-only (see the launcher).
 if [ "${1:-}" = "paste" ]; then
   shift
   _pcopy=0 _plist=0 _pn=10 _pproj="${AIRLOCK_PASTE_PROJECT:-}"
@@ -1125,7 +1189,19 @@ if [ "${1:-}" = "paste" ]; then
     shift
   done
 
-  if [ -z "$_pproj" ]; then
+  if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then
+    if [ "$_pproj" != "${AIRLOCK_PASTE_PROJECT:-}" ]; then
+      echo "claude-airlock: AIRLOCK_PASTE_DIR is set, so pastes go there for every project; --project does not apply." >&2
+      exit 1
+    fi
+    _pdir="$(_airlock_paste_dir_check "$AIRLOCK_PASTE_DIR" 2>&1)" \
+      || { echo "claude-airlock: AIRLOCK_PASTE_DIR: $_pdir" >&2; exit 1; }
+    if [ "$_plist" = 0 ] && [ ! -w "$_pdir" ]; then
+      echo "claude-airlock: $_pdir is not writable by you: its owner pastes there (with their own" >&2
+      echo "  tool), and your boxes read it. Nothing to do here." >&2
+      exit 1
+    fi
+  elif [ -z "$_pproj" ]; then
     echo "claude-airlock: AIRLOCK_PASTE_PROJECT is not set." >&2
     echo "  Pastes go to ONE project's scratch dir; there is no sensible default." >&2
     echo "  Set it in $CONFIG_FILE, e.g.:" >&2
@@ -1133,19 +1209,22 @@ if [ "${1:-}" = "paste" ]; then
     echo "  or override for one call:  airlock paste --project /path/to/project" >&2
     exit 1
   fi
-  case "$_pproj" in
-    /*) ;;
-    *)  echo "claude-airlock: the paste project must be an ABSOLUTE path (got '$_pproj')." >&2
-        echo "  A relative path resolves against whatever directory you happen to be in," >&2
-        echo "  which is the \$PWD dependence this setting exists to avoid." >&2
-        exit 1 ;;
-  esac
-  [ -d "$_pproj" ] || { echo "claude-airlock: paste project not found: $_pproj" >&2; exit 1; }
+  if [ -z "${AIRLOCK_PASTE_DIR:-}" ]; then
+    case "$_pproj" in
+      /*) ;;
+      *)  echo "claude-airlock: the paste project must be an ABSOLUTE path (got '$_pproj')." >&2
+          echo "  A relative path resolves against whatever directory you happen to be in," >&2
+          echo "  which is the \$PWD dependence this setting exists to avoid." >&2
+          exit 1 ;;
+    esac
+    [ -d "$_pproj" ] || { echo "claude-airlock: paste project not found: $_pproj" >&2; exit 1; }
 
-  # Same slug the launcher and `airlock tmp` use — this stays the single source of truth.
-  _pslug="$(printf '%s' "$(cd "$_pproj" && pwd)" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
-  _pdir="$AIRLOCK_TMP_BASE/$_pslug/pastes"
-  mkdir -p "$_pdir" && chmod 700 "$AIRLOCK_TMP_BASE/$_pslug"
+    # Same slug the launcher and `airlock tmp` use — this stays the single source of truth.
+    _pslug="$(printf '%s' "$(cd "$_pproj" && pwd)" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+    _pdir="$AIRLOCK_TMP_BASE/$_pslug/pastes"
+    _airlock_tmp_base_ready "$AIRLOCK_TMP_BASE" || exit 1
+    mkdir -p "$_pdir" && chmod 700 "$AIRLOCK_TMP_BASE/$_pslug"
+  fi
 
   # Collect only files this tool created: `YYYYMMDD-HHMMSSmmm.png`, one fixed shape, so
   # the shell's lexical glob order IS chronological order (no `ls -t`/SC2012, no GNU-only
@@ -1188,7 +1267,7 @@ if [ "${1:-}" = "paste" ]; then
   else
     echo "claude-airlock: no graphical session (\$WAYLAND_DISPLAY and \$DISPLAY are both unset)." >&2
     echo "  There is no clipboard to read here. Copy the image into" >&2
-    echo "  $AIRLOCK_TMP_BASE/$_pslug/ and give the agent that path directly." >&2
+    echo "  $_pdir/ and give the agent that path directly." >&2
     exit 1
   fi
 
@@ -1524,11 +1603,12 @@ fi
 # which silently loses derived artifacts (a dedup index, a cache) between sessions.
 # Give each project a host dir bind-mounted at the SAME path, so host and box name the
 # file identically (the real-path invariant used for the workspace and shares).
-# ONLY this project's dir is mounted — never /tmp/airlock, never bare /tmp — so nothing
+# ONLY this project's dir is mounted — never the base, never bare /tmp — so nothing
 # leaks between projects. It lives on the host's tmpfs: survives session exit, cleared
 # on reboot. An inter-session cache, not durable storage; bare /tmp stays ephemeral so
 # build/test temp files don't eat host RAM.
 AIRLOCK_TMP="$AIRLOCK_TMP_BASE/$slug"
+_airlock_tmp_base_ready "$AIRLOCK_TMP_BASE" || exit 1
 # Deliberately NOT `mkdir -p ... && chmod 700 ...`: under `set -e` only the LAST command
 # of an && list is fatal, so a failing mkdir there was silent and left the box with a
 # bind source that never got its 0700.
@@ -1638,7 +1718,7 @@ _airlock_cleanup() {
   rmdir "$AIRLOCK_TMP" 2>/dev/null || true
   # Only ever tidy up the tool's OWN default base. With a custom base this would be
   # removing a directory the user made for their own reasons.
-  if [ "$AIRLOCK_TMP_BASE" = /tmp/airlock ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
+  if [ "$AIRLOCK_TMP_BASE" = "$_AIRLOCK_TMP_DEFAULT" ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
   rmdir "$SESS_DIR" 2>/dev/null || true
 }
 # A signal handler in bash runs and then the script CONTINUES. On the old
@@ -2142,6 +2222,19 @@ for _m in "${SHARE_RO[@]:-}"; do
   case " ${SHARE_RW[*]:-} " in *" $_m "*) continue ;; esac      # already mounted rw
   args+=( -v "$_m:$_m:ro" )
 done
+
+# The paste drop box, read-only at its own path, for every project (AIRLOCK_PASTE_DIR): pastes
+# someone else hands this account (it only reads them). The box finds pastes at
+# $AIRLOCK_PASTES: that directory, or else this project's $AIRLOCK_TMP/pastes.
+_pastes="$AIRLOCK_TMP/pastes"
+if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then
+  if _pc="$(_airlock_paste_dir_check "$AIRLOCK_PASTE_DIR" 2>&1)"; then
+    args+=( -v "$_pc:$_pc:ro" ); _pastes="$_pc"
+  else
+    echo "claude-airlock: NOT mounting AIRLOCK_PASTE_DIR: $_pc" >&2; _pastes=""
+  fi
+fi
+[ -z "$_pastes" ] || args+=( -e "AIRLOCK_PASTES=$_pastes" )
 
 # Host-added read-only mounts (`airlock mount add`). Re-checked here, not trusted from the
 # store: a directory that has since become a symlink into ~/.ssh, or gained a hard link,

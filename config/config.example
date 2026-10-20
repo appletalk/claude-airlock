@@ -56,6 +56,13 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 # the agent holds the other one, and a $PWD default would quietly write into a directory
 # that box never mounts. Override for one call with `airlock paste --project DIR`.
 # AIRLOCK_PASTE_PROJECT="$HOME/development/myproject"
+#
+# Or a paste drop box instead, for every project: `airlock paste` writes there (if you can),
+# and every box mounts it READ-ONLY at the same path, as $AIRLOCK_PASTES. Meant for an
+# account that runs boxes but gets its pastes from another user (an agent's own account:
+# you paste, it only reads). Absolute, its real path; its owner (or root) must own every
+# directory down to it, and nothing on the way may be group/world-writable.
+# AIRLOCK_PASTE_DIR="/srv/agent-inbox/pastes"
 
 # Broad read-only roots mounted at /roots/<name> for cross-project inspection.
 # EMPTY by default (no other project is visible unless a project `share =`s it and
