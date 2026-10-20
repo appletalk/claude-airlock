@@ -21,9 +21,9 @@ setup_airlock_env() {
   export SHARE_BASE="$BATS_TEST_TMPDIR/base"
   export ENGINE_ARGS_FILE="$BATS_TEST_TMPDIR/engine-args"
   # Every full launch creates AND rmdirs $AIRLOCK_TMP_BASE/<slug>. Left at the default
-  # that is the REAL /tmp/airlock, so the suite would churn a live session's scratch
-  # base - and the last launch would also try to rmdir /tmp/airlock itself. Point the
-  # whole suite at the bats tmpdir; it is not scratch-lifetime.bats's private concern.
+  # that is the REAL /tmp/airlock-<user>, so the suite would churn a live session's
+  # scratch base. Point the whole suite at the bats tmpdir; it is not
+  # scratch-lifetime.bats's private concern.
   export AIRLOCK_TMP_BASE="$BATS_TEST_TMPDIR/airlock-tmp"
   mkdir -p "$AIRLOCK_HOME" "$STUBBIN" "$SHARE_BASE" "$AIRLOCK_TMP_BASE"
 

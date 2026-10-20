@@ -111,8 +111,9 @@ claude() {
   # or other bits): anyone can make it first in a shared /tmp.
   if [[ "$tbase" == "$tmpdef" ]]; then
     mkdir -m 0700 "$tmpdef" 2>/dev/null
-    tmode="$(stat -c %a "$tmpdef" 2>/dev/null)"
-    if [[ -L "$tmpdef" || ! -d "$tmpdef" || "$(stat -c %u "$tmpdef" 2>/dev/null)" != "$(id -u)" \
+    # `command`: with zsh/stat loaded, `stat` is a builtin that takes no -c.
+    tmode="$(command stat -c %a "$tmpdef" 2>/dev/null)"
+    if [[ -L "$tmpdef" || ! -d "$tmpdef" || "$(command stat -c %u "$tmpdef" 2>/dev/null)" != "$(id -u)" \
           || "$tmode" != <-> ]] || (( 8#$tmode & 8#077 )); then
       print -u2 "claude: $tmpdef is not yours alone (a symlink, another owner, or open to others)."
       print -u2 "  Someone else may have made it to read or swap your scratch. Only its owner or root"
