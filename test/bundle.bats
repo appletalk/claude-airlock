@@ -101,6 +101,7 @@ bundle() {  # bundle [--clean]: as the writer
 }
 reader_install() {  # as the reader: the bundle's own install-bundle.sh
   env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$R/home" FE_STATE="$R/fe" AIRLOCK_ENGINE="$ENGINE" \
+    ${R_CONFIG:+AIRLOCK_CONFIG="$R_CONFIG"} \
     ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" ${FE_LOAD_ID:+FE_LOAD_ID="$FE_LOAD_ID"} \
     ${FAIL_CHECK:+FAIL_CHECK="$FAIL_CHECK"} ${R_ENGINE:+AIRLOCK_ENGINE="$R_ENGINE"} \
     bash "$B/install-bundle.sh" </dev/null
@@ -341,4 +342,14 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
   run build_install
   [ "$status" -ne 0 ]
   ! engine_args | grep -qx -- label=org.claude-airlock.apt-refresh || false
+}
+
+@test "install-bundle with AIRLOCK_CONFIG (a config root keeps elsewhere): no default config written; closing words fit an account without a shell or network" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  printf 'AIRLOCK_EGRESS_MODE=proxy\n' > "$BATS_TEST_TMPDIR/agent.conf"
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$R/home/.config/claude-airlock/config" ]
+  [[ "$output" == *"Done (from a bundle)"*"AIRLOCK_PERSIST_LOGIN=1"* ]]
+  [[ "$output" != *"setup-token"* && "$output" != *"~/.zshrc"* ]]
 }
