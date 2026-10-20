@@ -2130,6 +2130,9 @@ args=(
   -v "$AIRLOCK_TMP:$AIRLOCK_TMP:rw"                 # per-project scratch, same path host & box
   -e "AIRLOCK_TMP=$AIRLOCK_TMP"
 )
+# A 24-bit terminal says so in COLORTERM, not TERM; without it Claude in the box falls back
+# to 256 colours. Passed only when the host sets it.
+[ -z "${COLORTERM:-}" ] || args+=( -e "COLORTERM=$COLORTERM" )
 
 # The firewall's capabilities, only where there is a firewall: a proxy-mode box has no
 # network to filter, and no use for control of its own network namespace.

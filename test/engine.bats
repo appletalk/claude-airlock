@@ -452,3 +452,17 @@ S
     grep -qx "AIRLOCK_HOST_USER=$(id -un)" "$ENGINE_ARGS_FILE" || { echo "$e: host user not passed"; false; }
   done
 }
+
+@test "COLORTERM reaches the box when the host sets it, under BOTH engines" {
+  # TERM alone says nothing about 24-bit colour; without COLORTERM Claude falls back to 256.
+  for e in podman docker; do
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engct-$e")"
+    TEST_COLORTERM=truecolor AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
+    grep -qx "COLORTERM=truecolor" "$ENGINE_ARGS_FILE" || { echo "$e: COLORTERM not passed"; false; }
+    : > "$ENGINE_ARGS_FILE"
+    AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
+    grep -qx -- "--cap-drop=ALL" "$ENGINE_ARGS_FILE" || { echo "$e: the box was not run"; false; }   # so the refute below is not vacuous
+    refute grep -q "^COLORTERM" "$ENGINE_ARGS_FILE"          # unset on the host: nothing passed
+  done
+}
