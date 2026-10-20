@@ -7,9 +7,19 @@
 # forced refresh is remembered so the next install in the same week keeps it.
 
 load helper
-setup() { setup_airlock_env; }
 
-# Run install.sh hermetically: isolated HOME, stubbed engine (records argv), a pinned
+# curl stub that serves $1 as https://claude.ai/install.sh and fails every other URL.
+_stub_upstream_installer() {
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in *claude.ai/install.sh) cat "%s"; exit 0 ;; esac; done\nexit 22\n' "$1" > "$STUBBIN/curl"
+  chmod +x "$STUBBIN/curl"
+}
+
+# Every install compares the vendored installer with upstream. Serve it the vendored copy
+# by default, so no test reaches the network and an offline host stays silent (no "drift
+# unknown" WARNING); the drift tests below replace this stub with their own upstream.
+setup() { setup_airlock_env; _stub_upstream_installer "$BATS_TEST_DIRNAME/../image/claude-install.sh"; }
+
+# Run install.sh hermetically: isolated HOME, stubbed engine (records argv) and curl, a pinned
 # Claude Code version so it never curls upstream, and stdin not a TTY so the paste-project
 # prompt is skipped. The trailing doctor fails against the stub, so the exit status is not
 # asserted - only what the build was asked to do.
@@ -121,10 +131,6 @@ EOF
 
 # The vendored installer goes stale by design; every build must say so, loudly, without
 # failing, and stay quiet when it matches. curl is stubbed to play upstream.
-_stub_upstream_installer() {   # $1 = file to serve as https://claude.ai/install.sh
-  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in *claude.ai/install.sh) cat "%s"; exit 0 ;; esac; done\nexit 22\n' "$1" > "$STUBBIN/curl"
-  chmod +x "$STUBBIN/curl"
-}
 
 @test "install reports installer drift loudly and still builds" {
   printf '#!/bin/sh\necho changed upstream\n' > "$BATS_TEST_TMPDIR/upstream.sh"

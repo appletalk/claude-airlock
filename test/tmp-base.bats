@@ -117,7 +117,9 @@ wrapper_with() {
   b="/tmp/airlock-$ME"
   [ ! -e "$b" ] || [ "$(stat -c %u:%a "$b")" = "$(id -u):700" ] || skip "$b exists and is not ours alone"
   p="$(mkproj tb)"
-  run env -i PATH="/usr/bin:/bin" HOME="$AIRLOCK_HOME" bash -c 'cd "$1" && bash "$2" tmp' _ "$p" "$AIRLOCK"
+  # env -i clears any base the caller set; the stub dir stays on PATH so the launcher's
+  # engine check finds the stub instead of needing a real podman on the host.
+  run env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$AIRLOCK_HOME" bash -c 'cd "$1" && bash "$2" tmp' _ "$p" "$AIRLOCK"
   [ "$status" -eq 0 ]
   [ "$output" = "$b/$(_slug "$p")" ]
   rmdir "$output"
