@@ -632,9 +632,13 @@ it, never swap it for a link to somewhere else. It is checked again, and must be
 directory, right before the engine starts. It may not be your home, inside the workspace or
 a protected path, nor hold hard links or mount points when checked (what the writer adds
 later is bounded by the kernel: `fs.protected_hardlinks` lets them link only files they own or
-may write, and their FUSE mounts are closed to other users). A paste dir that fails the check
-is not mounted (the launch warns and goes on). Make it setgid with the reader's group
-(`install -d -m 2750 -o <writer> -g <reader's group> DIR`) so new files carry that group.
+may write, and their FUSE mounts are closed to other users unless `/etc/fuse.conf` has
+`user_allow_other`; either way they can only show what they could copy in). A paste dir that fails the check
+is not mounted (the launch warns and goes on). Nor may it be a system directory (`/etc`,
+`/usr`, `/var`, `/opt`, ...), which would cover the box's own. Make it setgid with the
+reader's **primary** group (`install -d -m 2750 -o <writer> -g <reader's primary group> DIR`)
+so new files carry that group: a box runs with its user's primary group only, so a
+supplementary group would let the reader read pastes on the host but not in its boxes.
 The writer pastes with their own tool, or with `airlock paste` and `AIRLOCK_PASTE_DIR` set
 in *their* config, which writes the file group-readable (0640) but also mounts the drop box
 into the writer's own boxes.
