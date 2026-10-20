@@ -216,3 +216,12 @@ refute() {
     return 1
   fi
 }
+
+# install.sh compares the vendored Claude Code installer with https://claude.ai/install.sh
+# on every run. This curl stub serves $1 as that URL and fails every other one, so a test
+# that runs the installer never reaches the network. Pass image/claude-install.sh to play
+# an upstream that matches (no drift, no "drift unknown" warning).
+_stub_upstream_installer() {
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in *claude.ai/install.sh) cat "%s"; exit 0 ;; esac; done\nexit 22\n' "$1" > "$STUBBIN/curl"
+  chmod +x "$STUBBIN/curl"
+}

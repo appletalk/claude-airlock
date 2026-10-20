@@ -71,6 +71,7 @@ EOF
 setup() {
   setup_airlock_env
   fake_engine
+  _stub_upstream_installer "$BATS_TEST_DIRNAME/../image/claude-install.sh"   # build installs stay offline
   W="$BATS_TEST_TMPDIR/writer" R="$BATS_TEST_TMPDIR/reader" B="$BATS_TEST_TMPDIR/bundle"
   mkdir -p "$W/fe" "$R/home" "$R/fe" "$B"
   REPO="$BATS_TEST_DIRNAME/.."

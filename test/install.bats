@@ -8,12 +8,6 @@
 
 load helper
 
-# curl stub that serves $1 as https://claude.ai/install.sh and fails every other URL.
-_stub_upstream_installer() {
-  printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in *claude.ai/install.sh) cat "%s"; exit 0 ;; esac; done\nexit 22\n' "$1" > "$STUBBIN/curl"
-  chmod +x "$STUBBIN/curl"
-}
-
 # Every install compares the vendored installer with upstream. Serve it the vendored copy
 # by default, so no test reaches the network and an offline host stays silent (no "drift
 # unknown" WARNING); the drift tests below replace this stub with their own upstream.
