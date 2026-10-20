@@ -33,7 +33,8 @@ the bottom of this file apply too):
 - **The human cannot paste an image at you; they run `airlock paste`.** You have no
   clipboard — reading one needs `xclip`/`wl-paste` talking to a host display socket the
   box deliberately does not get. Instead they run `airlock paste` (or `alpaste`) on the
-  host, which drops a timestamped PNG in **`$AIRLOCK_TMP/pastes/`** and puts the *path* on
+  host, which drops a timestamped PNG in **`$AIRLOCK_PASTES`** (this project's
+  `$AIRLOCK_TMP/pastes/`, or a read-only drop box the host set up) and puts the *path* on
   their clipboard; what arrives in your prompt is text, and you open the file. When they
   say **"check the latest paste"** (or "the latest 3"), list that directory newest-first
   and read the top N. Filenames are `YYYYMMDD-HHMMSSmmm.png` in **host local time**,

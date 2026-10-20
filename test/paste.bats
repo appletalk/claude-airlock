@@ -77,7 +77,7 @@ pastes_dir() { printf '%s' "$TMP_BASE/$(_slug "$1")/pastes"; }
 minimal_path() {
   MINBIN="$BATS_TEST_TMPDIR/minbin"; mkdir -p "$MINBIN"
   local b src
-  for b in bash sed date mkdir chmod mktemp head od tr grep cp mv rm ls cat python3; do
+  for b in bash sed date mkdir chmod mktemp head od tr grep cp mv rm ls cat python3 id stat find; do
     src="$(command -v "$b" 2>/dev/null)" && ln -sf "$src" "$MINBIN/$b"
   done
   PATH_OVERRIDE="$STUBBIN:$MINBIN"
@@ -401,4 +401,120 @@ EOF
   [ "$status" -ne 124 ]                              # 124 = timed out = the hang
   [ "$status" -eq 0 ]
   [ -e "$output" ]
+}
+
+# --- AIRLOCK_PASTE_DIR: a drop box another account writes and this one's boxes read ---------
+
+# A stat stub: owners and modes from files ("value path" lines), the real stat otherwise. Every
+# directory above the test's tmpdir is reported root's and closed, as /srv would be: the
+# runner's real /tmp is world-writable, which the check rightly refuses.
+stub_stat() {
+  FO="$BATS_TEST_TMPDIR/owners" FM="$BATS_TEST_TMPDIR/modes"
+  : > "$FO"; : > "$FM"
+  cat > "$STUBBIN/stat" <<STUB
+#!/usr/bin/env bash
+look() { awk -v p="\$2" '{ q = \$0; sub(/^[^ ]+ /, "", q) } q == p { v = \$1 } END { print v }' "\$1"; }
+if [ "\$1" = -c ] && [ "\$2" = %u ]; then v="\$(look "$FO" "\$3")"; [ -n "\$v" ] && { echo "\$v"; exit 0; }; fi
+if [ "\$1" = -c ] && [ "\$2" = %a ]; then v="\$(look "$FM" "\$3")"; [ -n "\$v" ] && { echo "\$v"; exit 0; }; fi
+exec /usr/bin/stat "\$@"
+STUB
+  chmod +x "$STUBBIN/stat"
+  local d; d="$(dirname "$(readlink -f "$BATS_TEST_TMPDIR")")"
+  while :; do printf '0 %s\n' "$d" >> "$FO"; printf '755 %s\n' "$d" >> "$FM"; [ "$d" = / ] && break; d="$(dirname "$d")"; done
+}
+# The drop box: <tmpdir>/inbox/pastes, 0755 all the way, ours.
+mkinbox() {
+  D="$(readlink -f "$BATS_TEST_TMPDIR")/inbox/pastes"
+  mkdir -p "$D"; chmod 755 "$BATS_TEST_TMPDIR" "$(dirname "$D")" "$D"
+  export AIRLOCK_CONFIG="$BATS_TEST_TMPDIR/cfg"
+  printf 'AIRLOCK_PASTE_DIR=%s\n' "$1" > "$AIRLOCK_CONFIG"
+}
+
+@test "paste dir: paste writes there, for any project and with no paste project set; list reads it" {
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder; mkinbox "$D"
+  export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  run _paste "$p"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "$D/"*.png ]]
+  [ "$(head -c 4 "$output" | od -An -tx1 | tr -d ' \n')" = "89504e47" ]
+  [ ! -d "$(pastes_dir "$p")" ]
+  f="$output"
+  run _paste "$p" list
+  [ "$status" -eq 0 ]; [ "$output" = "$f" ]
+}
+
+@test "paste dir: --project does not apply, and says so" {
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder; mkinbox "$D"
+  export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  run _paste "$p" --project "$p"
+  [ "$status" -ne 0 ]; [[ "$output" == *"--project does not apply"* ]]
+}
+
+@test "paste dir: not writable by this account (its owner pastes): refused, nothing written; list still works" {
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder; mkinbox "$D"
+  chmod 555 "$D"
+  export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  run _paste "$p"
+  [ "$status" -ne 0 ]; [[ "$output" == *"not writable by you"* ]]
+  [ -z "$(ls -A "$D")" ]
+  run _paste "$p" list
+  [ "$status" -eq 0 ]
+  chmod 755 "$D"
+}
+
+@test "paste dir: refused when relative, a symlink, open to others, under someone else's or a world-writable dir, home, protected, or holding a hard link" {
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder
+  export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  T="$(readlink -f "$BATS_TEST_TMPDIR")"
+  refused() {  # refused <AIRLOCK_PASTE_DIR> <message part>
+    printf 'AIRLOCK_PASTE_DIR=%s\n' "$1" > "$AIRLOCK_CONFIG"
+    run _paste "$p"
+    [ "$status" -ne 0 ] && [[ "$output" == *"$2"* ]] || { echo "not refused as '$2': $1: $output"; return 1; }
+  }
+  refused "inbox/pastes" "must be an absolute path"
+  refused "$T/nope" "does not exist"
+  mkdir -p "$T/inbox/pastes"; chmod 755 "$T" "$T/inbox" "$T/inbox/pastes"
+  ln -s "$T/inbox/pastes" "$T/link"
+  refused "$T/link" "is not its real path"
+  refused "$T/inbox/pastes/" "is not its real path"
+  chmod 775 "$T/inbox/pastes"; refused "$T/inbox/pastes" "is group/world-writable"; chmod 755 "$T/inbox/pastes"
+  mkdir -p "$T/open/pastes"; chmod 777 "$T/open"; chmod 755 "$T/open/pastes"
+  refused "$T/open/pastes" "'$T/open' (holding or being"
+  printf '4242 %s\n' "$T/inbox" >> "$FO"
+  refused "$T/inbox/pastes" "belongs to neither root nor the paste dir's owner"
+  sed -i '$d' "$FO"
+  refused "$AIRLOCK_HOME" "itself"
+  mkdir -p "$AIRLOCK_HOME/.ssh/pastes"; chmod 755 "$AIRLOCK_HOME" "$AIRLOCK_HOME/.ssh" "$AIRLOCK_HOME/.ssh/pastes"
+  refused "$AIRLOCK_HOME/.ssh/pastes" "protected"
+  printf x > "$T/elsewhere"; ln "$T/elsewhere" "$T/inbox/pastes/hl.png"
+  refused "$T/inbox/pastes" "hard-linked"
+}
+
+@test "paste dir: every box mounts it READ-ONLY at its path and finds it as \$AIRLOCK_PASTES" {
+  p="$(mkproj pd)"; stub_stat; mkinbox placeholder
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- "$D:$D:ro"
+  ! engine_args | grep -q -- "^$D:$D:rw" || false
+  engine_args | grep -qx -- "AIRLOCK_PASTES=$D"
+}
+
+@test "no paste dir: no extra mount, \$AIRLOCK_PASTES is the project's scratch pastes" {
+  p="$(mkproj np)"
+  _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- "AIRLOCK_PASTES=$AIRLOCK_TMP_BASE/$(_slug "$p")/pastes"
+}
+
+@test "a paste dir that fails the check is not mounted: the launch warns and goes on" {
+  p="$(mkproj bad)"; stub_stat; mkinbox placeholder
+  chmod 777 "$D"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  run _launch "$p"
+  [[ "$output" == *"NOT mounting AIRLOCK_PASTE_DIR"*"group/world-writable"* ]]
+  engine_args | grep -q '^ENGINE_INVOKED='
+  ! engine_args | grep -q -- "$D:$D" || false
+  ! engine_args | grep -q -- "^AIRLOCK_PASTES=" || false
+  chmod 755 "$D"
 }
