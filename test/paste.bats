@@ -422,21 +422,24 @@ STUB
   local d; d="$(dirname "$(readlink -f "$BATS_TEST_TMPDIR")")"
   while :; do printf '0 %s\n' "$d" >> "$FO"; printf '755 %s\n' "$d" >> "$FM"; [ "$d" = / ] && break; d="$(dirname "$d")"; done
 }
-# The drop box: <tmpdir>/inbox/pastes, 0755 all the way, ours.
+# The drop box: <tmpdir>/inbox/pastes, ours, 0755; the directories above it reported root's
+# (as /srv/<inbox> would be), and the config naming it.
 mkinbox() {
-  D="$(readlink -f "$BATS_TEST_TMPDIR")/inbox/pastes"
-  mkdir -p "$D"; chmod 755 "$BATS_TEST_TMPDIR" "$(dirname "$D")" "$D"
+  T="$(readlink -f "$BATS_TEST_TMPDIR")" D="$(readlink -f "$BATS_TEST_TMPDIR")/inbox/pastes"
+  mkdir -p "$D"; chmod 755 "$T" "$T/inbox" "$D"
+  printf '0 %s\n' "$T" "$T/inbox" >> "$FO"
   export AIRLOCK_CONFIG="$BATS_TEST_TMPDIR/cfg"
-  printf 'AIRLOCK_PASTE_DIR=%s\n' "$1" > "$AIRLOCK_CONFIG"
+  printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_CONFIG"
 }
 
 @test "paste dir: paste writes there, for any project and with no paste project set; list reads it" {
-  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder; mkinbox "$D"
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox
   export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
   run _paste "$p"
   [ "$status" -eq 0 ]
   [[ "$output" == "$D/"*.png ]]
   [ "$(head -c 4 "$output" | od -An -tx1 | tr -d ' \n')" = "89504e47" ]
+  [ "$(stat -c %a "$output")" = 640 ]        # the reading account reads it through the group
   [ ! -d "$(pastes_dir "$p")" ]
   f="$output"
   run _paste "$p" list
@@ -444,14 +447,14 @@ mkinbox() {
 }
 
 @test "paste dir: --project does not apply, and says so" {
-  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder; mkinbox "$D"
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox
   export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
   run _paste "$p" --project "$p"
   [ "$status" -ne 0 ]; [[ "$output" == *"--project does not apply"* ]]
 }
 
 @test "paste dir: not writable by this account (its owner pastes): refused, nothing written; list still works" {
-  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder; mkinbox "$D"
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox
   chmod 555 "$D"
   export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
   run _paste "$p"
@@ -462,10 +465,9 @@ mkinbox() {
   chmod 755 "$D"
 }
 
-@test "paste dir: refused when relative, a symlink, open to others, under someone else's or a world-writable dir, home, protected, or holding a hard link" {
-  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox placeholder
+@test "paste dir: refused when relative, a symlink, open to others, under a dir that is not root's alone, home, protected, in the workspace, or holding a hard link" {
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox
   export WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
-  T="$(readlink -f "$BATS_TEST_TMPDIR")"
   refused() {  # refused <AIRLOCK_PASTE_DIR> <message part>
     printf 'AIRLOCK_PASTE_DIR=%s\n' "$1" > "$AIRLOCK_CONFIG"
     run _paste "$p"
@@ -473,16 +475,21 @@ mkinbox() {
   }
   refused "inbox/pastes" "must be an absolute path"
   refused "$T/nope" "does not exist"
-  mkdir -p "$T/inbox/pastes"; chmod 755 "$T" "$T/inbox" "$T/inbox/pastes"
+  refused "$T/a:b" "contains ':'"
   ln -s "$T/inbox/pastes" "$T/link"
   refused "$T/link" "is not its real path"
   refused "$T/inbox/pastes/" "is not its real path"
   chmod 775 "$T/inbox/pastes"; refused "$T/inbox/pastes" "is group/world-writable"; chmod 755 "$T/inbox/pastes"
-  mkdir -p "$T/open/pastes"; chmod 777 "$T/open"; chmod 755 "$T/open/pastes"
+  mkdir -p "$T/open/pastes"; chmod 777 "$T/open"; chmod 755 "$T/open/pastes"; printf '0 %s\n' "$T/open" >> "$FO"
   refused "$T/open/pastes" "'$T/open' (holding or being"
+  # A parent of the writer's own (not root's): the writer could swap the paste dir for a link.
+  mkdir -p "$T/mine/pastes"; chmod 755 "$T/mine" "$T/mine/pastes"
+  refused "$T/mine/pastes" "'$T/mine' (above '$T/mine/pastes') must be root's"
   printf '4242 %s\n' "$T/inbox" >> "$FO"
-  refused "$T/inbox/pastes" "belongs to neither root nor the paste dir's owner"
+  refused "$T/inbox/pastes" "must be root's"
   sed -i '$d' "$FO"
+  mkdir -p "$p/pastes"; chmod 755 "$p/pastes"
+  refused "$p/pastes" "inside the workspace"
   refused "$AIRLOCK_HOME" "itself"
   mkdir -p "$AIRLOCK_HOME/.ssh/pastes"; chmod 755 "$AIRLOCK_HOME" "$AIRLOCK_HOME/.ssh" "$AIRLOCK_HOME/.ssh/pastes"
   refused "$AIRLOCK_HOME/.ssh/pastes" "protected"
@@ -491,7 +498,7 @@ mkinbox() {
 }
 
 @test "paste dir: every box mounts it READ-ONLY at its path and finds it as \$AIRLOCK_PASTES" {
-  p="$(mkproj pd)"; stub_stat; mkinbox placeholder
+  p="$(mkproj pd)"; stub_stat; mkinbox
   mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
   printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_HOME/.config/claude-airlock/config"
   _launch "$p" >/dev/null 2>&1 || true
@@ -507,7 +514,7 @@ mkinbox() {
 }
 
 @test "a paste dir that fails the check is not mounted: the launch warns and goes on" {
-  p="$(mkproj bad)"; stub_stat; mkinbox placeholder
+  p="$(mkproj bad)"; stub_stat; mkinbox
   chmod 777 "$D"
   mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
   printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_HOME/.config/claude-airlock/config"
