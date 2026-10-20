@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 #
 # Install the claude-airlock launcher and build the base image.
+#   bin/install.sh                     from this checkout: export HEAD, build, go live
+#   bin/install.sh --from-bundle DIR   from a bundle another account wrote (make bundle):
+#                                      its images are loaded, nothing is built or fetched.
+#                                      Run by the bundle's install-bundle.sh, from the
+#                                      bundle's own source tree.
 set -euo pipefail
+
+FROM_BUNDLE=""
+case "${1:-}" in
+  --from-bundle) FROM_BUNDLE="${2:?usage: install.sh --from-bundle DIR}"; FROM_BUNDLE="$(cd "$FROM_BUNDLE" && pwd)" ;;
+  "") ;;
+  *) echo "usage: install.sh [--from-bundle DIR]" >&2; exit 1 ;;
+esac
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_TARGET="$HOME/.local/bin"
@@ -77,7 +89,16 @@ _cleanup() {
 trap _cleanup EXIT
 # Stage dirs left by a hard kill (the trap never ran).
 find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d -name '.stage.*' -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
-if [ "$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$REPO_DIR" && pwd -P)" ]; then
+if [ -n "$FROM_BUNDLE" ]; then
+  # The commit the bundle names, and a source tree that is that commit's install.
+  REV="$(sed -n 's/^commit \([0-9a-f]\{12\}\)$/\1/p' "$FROM_BUNDLE/MANIFEST" 2>/dev/null | head -1)"
+  [ -n "$REV" ] || { echo "claude-airlock: $FROM_BUNDLE/MANIFEST names no commit; nothing was changed." >&2; exit 1; }
+  if ! grep -qx "commit $REV" "$REPO_DIR/VERSION" 2>/dev/null; then
+    echo "claude-airlock: this source tree is not commit $REV's (the bundle's); nothing was changed." >&2; exit 1
+  fi
+  BRANCH="$(sed -n 's/^branch //p' "$REPO_DIR/VERSION" | head -1)"
+  _export() { tar -C "$REPO_DIR" -cf - . | tar -x -C "$1"; }
+elif [ "$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$REPO_DIR" && pwd -P)" ]; then
   REV="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)"
   BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)"
   if [ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no)" ]; then
@@ -106,8 +127,8 @@ if [ ! -d "$DEST" ]; then
     echo "claude-airlock: the export of $REPO_DIR has no launcher or Dockerfile; nothing was changed." >&2
     exit 1
   fi
-  printf 'commit %s\nbranch %s\ninstalled %s\nfrom %s\n' "$REV" "$BRANCH" "$(date -u +%FT%TZ)" "$REPO_DIR" \
-    > "$_stage/VERSION"
+  printf 'commit %s\nbranch %s\ninstalled %s\nfrom %s\n' "$REV" "$BRANCH" "$(date -u +%FT%TZ)" \
+    "${FROM_BUNDLE:+bundle }${FROM_BUNDLE:-$REPO_DIR}" > "$_stage/VERSION"
   chmod -R go-w "$_stage"
   chmod 755 "$_stage"
   # Another install of the same commit may have won the race; theirs is identical.
@@ -159,7 +180,7 @@ fi
 # terminal is free, so keying it off $PWD would silently write pastes into a directory
 # the running box never mounts. Ask once, here, rather than failing at first use.
 # Skipped when stdin is not a TTY, so CI and scripted installs stay non-interactive.
-if [ -t 0 ] && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
+if [ -z "$FROM_BUNDLE" ] && [ -t 0 ] && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
   echo
   echo "==> Which project should 'airlock paste' write clipboard images into?"
   echo "    They land in that project's \$AIRLOCK_TMP/pastes/, where its box can read them."
@@ -201,124 +222,155 @@ if [ -t 0 ] && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_PROJE
   fi
 fi
 
-# Claude Code must be CURRENT after every install run, not whatever version the
-# image happened to cache. The install layer sits at the end of the base image
-# with no changing inputs of its own, so a plain rebuild always hits the cache.
-# Resolving the concrete current version here and passing it as a build arg makes
-# the version itself the cache key: unchanged upstream -> instant cache hit;
-# new release -> the layer (and the dev image on top of it) rebuilds.
-#
-# 'latest' is the channel the upstream installer uses when given no target, so
-# resolving it keeps the image on exactly the version it has always tracked.
-# Override with CLAUDE_CODE_VERSION=stable, or a specific x.y.z, to pin.
-CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-}"
-if [ -z "$CLAUDE_CODE_VERSION" ]; then
-  CLAUDE_CODE_VERSION="$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest || true)"
-  if [[ ! "$CLAUDE_CODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-    echo "    WARNING: could not resolve the current Claude Code version from" >&2
-    echo "             downloads.claude.ai - falling back to the 'latest' channel." >&2
-    echo "             The build may reuse a cached (older) Claude Code layer." >&2
-    CLAUDE_CODE_VERSION=latest
-  fi
-fi
-
-# The Claude Code arg keeps that ONE layer current. Nothing kept the layers below it
-# current: `build` never re-pulls a base tag it already has, and never re-runs an
-# unchanged apt RUN, so the Debian packages in the box were frozen at the first build
-# (measured: an apt layer from July inside an image built in September, 17 security
-# updates behind, while SECURITY.md promised a rebuild would pick them up).
-#
-# Two things fix that. The base tag is re-pulled so an upstream rebuild is picked up -
-# as its own step, not `build --pull`, because a bare `--pull` is "always" on both
-# engines and turns an offline `make install` (a launcher update, every layer cached)
-# into a hard failure; here it degrades to a warning, like the version lookup above.
-# APT_REFRESH is the cache key of the base apt layer (see image/Dockerfile): the current
-# ISO week, so the base is rebuilt at most weekly and `make install` is a cache hit the
-# rest of the week. Everything above the apt layer rebuilds with it, which is why the
-# default is a week and not a day.
-#
-# `make refresh` forces a rebuild now by passing "<week>.<timestamp>". The key that was
-# used is remembered in the config dir, and a later `make install` in the SAME week reuses
-# it: with the bare week key it would re-tag :base onto the cached, older week layer and
-# silently undo the refresh, with doctor reporting the week as if nothing had happened.
-# The image of the first FROM, without its `AS <stage>` suffix.
-BASE_IMAGE="$(awk '$1 == "FROM" { print $2; exit }' "$SRC_DIR/image/Dockerfile")"
-REFRESH_STAMP="$CONFIG_DIR/apt-refresh"
-APT_WEEK="$(date +%G-W%V)"
-APT_REFRESH="${AIRLOCK_APT_REFRESH:-}"
-if [ -z "$APT_REFRESH" ]; then
-  APT_REFRESH="$(cat "$REFRESH_STAMP" 2>/dev/null || true)"
-  case "$APT_REFRESH" in
-    "$APT_WEEK"|"$APT_WEEK".*) ;;          # this week's key, possibly a forced refresh
-    *) APT_REFRESH="$APT_WEEK" ;;          # a new week, or no record yet
-  esac
-fi
-
-# The Claude Code installer is VENDORED (image/claude-install.sh): the build runs the
-# copy in the repo, never a script piped from the network, so a build is deterministic
-# and an upstream change is something you read before you take it. The price is that
-# the copy goes stale, and stale means it may one day stop matching the release layout
-# it fetches. So every build compares it with upstream and says so, loudly, when they
-# differ. It does not fail the build: drift is a review item, not a broken image, and
-# an offline install must still work. Update with `make claude-installer-update` after
-# reading the diff (`make claude-installer-diff`).
-echo "==> Checking the vendored Claude Code installer against upstream"
-if upstream="$(curl -fsSL --max-time 20 https://claude.ai/install.sh 2>/dev/null)" && [ -n "$upstream" ]; then
-  if [ "$upstream" = "$(cat "$SRC_DIR/image/claude-install.sh")" ]; then
-    echo "    image/claude-install.sh matches upstream"
-  else
-    # `|| true` twice over: diff exits 1 when the files differ (always, here) and grep -c
-    # exits 1 on zero matches; under pipefail + errexit either would end the install
-    # silently at the very line that exists to make the drift loud.
-    drift="$(diff <(printf '%s\n' "$upstream") "$SRC_DIR/image/claude-install.sh" 2>/dev/null | grep -c '^[<>]' || true)"
-    echo >&2
-    echo "    !!! INSTALLER DRIFT: image/claude-install.sh no longer matches https://claude.ai/install.sh" >&2
-    echo "    !!! ($drift changed line(s)). This build still uses the vendored copy. Review and update:" >&2
-    echo "    !!!     make claude-installer-diff      # read what changed" >&2
-    echo "    !!!     make claude-installer-update    # take it, then commit image/claude-install.sh" >&2
-    echo >&2
-  fi
-else
-  echo "    WARNING: could not fetch https://claude.ai/install.sh to compare - drift unknown." >&2
-fi
-
-echo "==> Refreshing the base tag ($BASE_IMAGE)"
-if ! "$AIRLOCK_ENGINE" pull -q "$BASE_IMAGE" >/dev/null; then
-  echo "    WARNING: could not pull $BASE_IMAGE - building from the cached copy." >&2
-  echo "             Debian's own rebuilds of the tag are missed until a pull succeeds;" >&2
-  echo "             the apt layer below still upgrades what the cached tag carries." >&2
-fi
-
-echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_VERSION, packages as of $APT_REFRESH"
-# Built under this commit's own tags; :base and :dev move only when both builds succeed.
-"$AIRLOCK_ENGINE" build \
-  --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
-  --build-arg "APT_REFRESH=$APT_REFRESH" \
-  -t "claude-airlock:base-$REV" "$SRC_DIR/image"
-# The base's `os` stage (everything but Claude Code) under its own tag: the dev image
-# builds on it and copies Claude Code from the base last. A cache hit - the build above
-# just produced every one of its layers.
-"$AIRLOCK_ENGINE" build --target os \
-  --build-arg "APT_REFRESH=$APT_REFRESH" \
-  -t "claude-airlock:os-$REV" "$SRC_DIR/image"
-# That cache hit is what makes dev's OS layers the ones the base (and doctor) has. A pull
-# of the Debian tag by a concurrent install, or cache eviction, would quietly break it,
-# so check it: the os image's layers must be exactly the base image's lowest layers.
+# The os image's layers must be exactly the base image's lowest layers: that is what makes
+# dev's OS layers the ones the base (and doctor) has. A pull of the Debian tag by a
+# concurrent install, or cache eviction, would quietly break it in a build, and a bundle
+# must hold the same relationship.
 _layers() { "$AIRLOCK_ENGINE" image inspect --format '{{range .RootFS.Layers}}{{.}} {{end}}' "$1"; }
-_os_layers="$(_layers "claude-airlock:os-$REV")"
-_base_layers="$(_layers "claude-airlock:base-$REV")"
-if [ -z "$_os_layers" ] || [ "${_base_layers#"$_os_layers"}" = "$_base_layers" ]; then
-  echo "claude-airlock: the os image built for the dev image is not the base image's os stage" >&2
-  echo "  (another build moved its inputs in between?). Nothing went live; run make install again." >&2
-  exit 1
+_check_os_layers() {
+  local os base
+  os="$(_layers "claude-airlock:os-$REV")"
+  base="$(_layers "claude-airlock:base-$REV")"
+  if [ -z "$os" ] || [ "${base#"$os"}" = "$base" ]; then
+    echo "claude-airlock: the os image for the dev image is not the base image's os stage" >&2
+    echo "  (another build moved its inputs in between?). Nothing went live; run make install again." >&2
+    exit 1
+  fi
+}
+_id() { "$AIRLOCK_ENGINE" image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
+
+if [ -n "$FROM_BUNDLE" ]; then
+  # A bundle: the images were built by whoever wrote it, from this same commit. Load them
+  # under this commit's own tags and require exactly the image IDs its manifest names.
+  _imgs="$FROM_BUNDLE/images-$REV.tar"
+  [ -f "$_imgs" ] || { echo "claude-airlock: the bundle has no images-$REV.tar; nothing went live." >&2; exit 1; }
+  echo "==> Loading the bundle's images ($(du -h "$_imgs" | cut -f1))"
+  "$AIRLOCK_ENGINE" load -q -i "$_imgs" >/dev/null
+  for _t in base os dev; do
+    _want="$(awk -v t="$_t" '$1 == "image" && $2 == t { print $3 }' "$FROM_BUNDLE/MANIFEST")"
+    _have="$(_id "claude-airlock:$_t-$REV")"
+    if [ -z "$_want" ] || [ "$_have" != "$_want" ]; then
+      echo "claude-airlock: the bundle's $_t image is ${_have:-missing}, not the ${_want:-unnamed} its manifest names; nothing went live." >&2
+      exit 1
+    fi
+  done
+  _check_os_layers
+else
+  # Claude Code must be CURRENT after every install run, not whatever version the
+  # image happened to cache. The install layer sits at the end of the base image
+  # with no changing inputs of its own, so a plain rebuild always hits the cache.
+  # Resolving the concrete current version here and passing it as a build arg makes
+  # the version itself the cache key: unchanged upstream -> instant cache hit;
+  # new release -> the layer (and the dev image on top of it) rebuilds.
+  #
+  # 'latest' is the channel the upstream installer uses when given no target, so
+  # resolving it keeps the image on exactly the version it has always tracked.
+  # Override with CLAUDE_CODE_VERSION=stable, or a specific x.y.z, to pin.
+  CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-}"
+  if [ -z "$CLAUDE_CODE_VERSION" ]; then
+    CLAUDE_CODE_VERSION="$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest || true)"
+    if [[ ! "$CLAUDE_CODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+      echo "    WARNING: could not resolve the current Claude Code version from" >&2
+      echo "             downloads.claude.ai - falling back to the 'latest' channel." >&2
+      echo "             The build may reuse a cached (older) Claude Code layer." >&2
+      CLAUDE_CODE_VERSION=latest
+    fi
+  fi
+
+  # The Claude Code arg keeps that ONE layer current. Nothing kept the layers below it
+  # current: `build` never re-pulls a base tag it already has, and never re-runs an
+  # unchanged apt RUN, so the Debian packages in the box were frozen at the first build
+  # (measured: an apt layer from July inside an image built in September, 17 security
+  # updates behind, while SECURITY.md promised a rebuild would pick them up).
+  #
+  # Two things fix that. The base tag is re-pulled so an upstream rebuild is picked up -
+  # as its own step, not `build --pull`, because a bare `--pull` is "always" on both
+  # engines and turns an offline `make install` (a launcher update, every layer cached)
+  # into a hard failure; here it degrades to a warning, like the version lookup above.
+  # APT_REFRESH is the cache key of the base apt layer (see image/Dockerfile): the current
+  # ISO week, so the base is rebuilt at most weekly and `make install` is a cache hit the
+  # rest of the week. Everything above the apt layer rebuilds with it, which is why the
+  # default is a week and not a day.
+  #
+  # `make refresh` forces a rebuild now by passing "<week>.<timestamp>". The key that was
+  # used is remembered in the config dir, and a later `make install` in the SAME week reuses
+  # it: with the bare week key it would re-tag :base onto the cached, older week layer and
+  # silently undo the refresh, with doctor reporting the week as if nothing had happened.
+  # The image of the first FROM, without its `AS <stage>` suffix.
+  BASE_IMAGE="$(awk '$1 == "FROM" { print $2; exit }' "$SRC_DIR/image/Dockerfile")"
+  REFRESH_STAMP="$CONFIG_DIR/apt-refresh"
+  APT_WEEK="$(date +%G-W%V)"
+  APT_REFRESH="${AIRLOCK_APT_REFRESH:-}"
+  if [ -z "$APT_REFRESH" ]; then
+    APT_REFRESH="$(cat "$REFRESH_STAMP" 2>/dev/null || true)"
+    case "$APT_REFRESH" in
+      "$APT_WEEK"|"$APT_WEEK".*) ;;          # this week's key, possibly a forced refresh
+      *) APT_REFRESH="$APT_WEEK" ;;          # a new week, or no record yet
+    esac
+  fi
+
+  # The Claude Code installer is VENDORED (image/claude-install.sh): the build runs the
+  # copy in the repo, never a script piped from the network, so a build is deterministic
+  # and an upstream change is something you read before you take it. The price is that
+  # the copy goes stale, and stale means it may one day stop matching the release layout
+  # it fetches. So every build compares it with upstream and says so, loudly, when they
+  # differ. It does not fail the build: drift is a review item, not a broken image, and
+  # an offline install must still work. Update with `make claude-installer-update` after
+  # reading the diff (`make claude-installer-diff`).
+  echo "==> Checking the vendored Claude Code installer against upstream"
+  if upstream="$(curl -fsSL --max-time 20 https://claude.ai/install.sh 2>/dev/null)" && [ -n "$upstream" ]; then
+    if [ "$upstream" = "$(cat "$SRC_DIR/image/claude-install.sh")" ]; then
+      echo "    image/claude-install.sh matches upstream"
+    else
+      # `|| true` twice over: diff exits 1 when the files differ (always, here) and grep -c
+      # exits 1 on zero matches; under pipefail + errexit either would end the install
+      # silently at the very line that exists to make the drift loud.
+      drift="$(diff <(printf '%s\n' "$upstream") "$SRC_DIR/image/claude-install.sh" 2>/dev/null | grep -c '^[<>]' || true)"
+      echo >&2
+      echo "    !!! INSTALLER DRIFT: image/claude-install.sh no longer matches https://claude.ai/install.sh" >&2
+      echo "    !!! ($drift changed line(s)). This build still uses the vendored copy. Review and update:" >&2
+      echo "    !!!     make claude-installer-diff      # read what changed" >&2
+      echo "    !!!     make claude-installer-update    # take it, then commit image/claude-install.sh" >&2
+      echo >&2
+    fi
+  else
+    echo "    WARNING: could not fetch https://claude.ai/install.sh to compare - drift unknown." >&2
+  fi
+
+  echo "==> Refreshing the base tag ($BASE_IMAGE)"
+  if ! "$AIRLOCK_ENGINE" pull -q "$BASE_IMAGE" >/dev/null; then
+    echo "    WARNING: could not pull $BASE_IMAGE - building from the cached copy." >&2
+    echo "             Debian's own rebuilds of the tag are missed until a pull succeeds;" >&2
+    echo "             the apt layer below still upgrades what the cached tag carries." >&2
+  fi
+
+  echo "==> Building base image (claude-airlock:base) - Claude Code $CLAUDE_CODE_VERSION, packages as of $APT_REFRESH"
+  # Built under this commit's own tags; :base and :dev move only when both builds succeed.
+  "$AIRLOCK_ENGINE" build \
+    --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION" \
+    --build-arg "APT_REFRESH=$APT_REFRESH" \
+    -t "claude-airlock:base-$REV" "$SRC_DIR/image"
+  # The base's `os` stage (everything but Claude Code) under its own tag: the dev image
+  # builds on it and copies Claude Code from the base last. A cache hit - the build above
+  # just produced every one of its layers.
+  "$AIRLOCK_ENGINE" build --target os \
+    --build-arg "APT_REFRESH=$APT_REFRESH" \
+    -t "claude-airlock:os-$REV" "$SRC_DIR/image"
+  _check_os_layers
+  echo "==> Building dev image (claude-airlock:dev) — Python, Node 24, build tools"
+  echo "    (a package refresh rebuilds it; a new Claude Code version only replaces its last layer)"
+  "$AIRLOCK_ENGINE" build --build-arg "BASE_IMAGE=claude-airlock:base-$REV" \
+    --build-arg "OS_IMAGE=claude-airlock:os-$REV" \
+    -t "claude-airlock:dev-$REV" "$SRC_DIR/image/dev"
+  echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
+  echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
 fi
-echo "==> Building dev image (claude-airlock:dev) — Python, Node 24, build tools"
-echo "    (a package refresh rebuilds it; a new Claude Code version only replaces its last layer)"
-"$AIRLOCK_ENGINE" build --build-arg "BASE_IMAGE=claude-airlock:base-$REV" \
-  --build-arg "OS_IMAGE=claude-airlock:os-$REV" \
-  -t "claude-airlock:dev-$REV" "$SRC_DIR/image/dev"
-echo "==> (optional) Playwright stack for browser E2E (~3GB) — build if you need it:"
-echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
+
+# Which images this version is (a bundle carries the list), and, for an account that only
+# loads bundles, the ones it replaces.
+for _t in base os dev; do printf '%s %s\n' "$_t" "$(_id "claude-airlock:$_t-$REV")"; done > "$DEST/IMAGES"
+_old_ids=""
+[ -z "$FROM_BUNDLE" ] || _old_ids="$(_id claude-airlock:base) $(_id claude-airlock:os) $(_id claude-airlock:dev)"
 
 # Both images built: make this version live. The image tags and `current` move together;
 # `current` flips in one rename (a unique temp name, so concurrent installs cannot trip over
@@ -328,7 +380,7 @@ echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/
 "$AIRLOCK_ENGINE" tag "claude-airlock:os-$REV" claude-airlock:os
 "$AIRLOCK_ENGINE" tag "claude-airlock:dev-$REV" claude-airlock:dev
 "$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
-printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
+[ -n "$FROM_BUNDLE" ] || printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
 touch "$DEST"
 _cur_tmp="$INSTALL_ROOT/.current.$$"
 ln -sfn "versions/$REV" "$_cur_tmp"
@@ -342,6 +394,19 @@ find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage.*'
     -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2- | while IFS= read -r _old; do
   rm -rf -- "$_old"
 done
+# Images no tag needs any more. An account that loads bundles keeps one version: the images
+# it just replaced go (one a running box still uses stays until it is gone). A build keeps a
+# week of its own untagged layers, the cache a rebuild in the same week reuses, and drops
+# older ones of its own (the label is on every claude-airlock image, so nothing else goes).
+if [ -n "$FROM_BUNDLE" ]; then
+  _new_ids=" $(cut -d' ' -f2 "$DEST/IMAGES" | tr '\n' ' ')"
+  for _o in $_old_ids; do
+    case "$_new_ids" in *" $_o "*) continue ;; esac
+    "$AIRLOCK_ENGINE" rmi "$_o" >/dev/null 2>&1 || true
+  done
+else
+  "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh --filter until=168h >/dev/null 2>&1 || true
+fi
 
 # An rc file that still sources the zsh file (or calls the launcher) from this checkout
 # keeps the live launcher in the working tree: its alias beats the ~/.local/bin link.
