@@ -2748,6 +2748,7 @@ if grep -q ' yes$' <<< "$_CLIENT_HOSTS"; then
 fi
 
 [ -n "$AIRLOCK_MODEL" ] && args+=( -e "ANTHROPIC_MODEL=$AIRLOCK_MODEL" )
+args+=( -e "AIRLOCK_HOST_USER=$(id -un)" )   # whose box this is, for the status line (the box user is always dev)
 [ -n "${AIRLOCK_EXTRA_EGRESS:-}" ] && args+=( -e "AIRLOCK_EXTRA_EGRESS=$AIRLOCK_EXTRA_EGRESS" )
 args+=( -e "AIRLOCK_EGRESS_GROUPS=$AIRLOCK_EGRESS_GROUPS" )   # host-set egress posture (minimal / dev / group subset)
 

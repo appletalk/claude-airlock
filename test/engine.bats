@@ -443,3 +443,12 @@ S
   [[ "$output" == *"could not resolve api.anthropic.com"* && "$output" == *"Claude may not work"* ]]
   [[ "$output" != *"no network of its own"* ]]
 }
+
+@test "the host user is passed to the box for the status line, under BOTH engines" {
+  for e in podman docker; do
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "enguser-$e")"
+    AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
+    grep -qx "AIRLOCK_HOST_USER=$(id -un)" "$ENGINE_ARGS_FILE" || { echo "$e: host user not passed"; false; }
+  done
+}

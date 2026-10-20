@@ -398,6 +398,22 @@ echo "==> Live: $INSTALL_ROOT/current -> versions/$REV"
 echo "==> Installing launcher -> $BIN_TARGET/airlock (and $BIN_TARGET/claude-airlock)"
 ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/airlock"
 ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
+# Host Claude's status line runs this copy (README: Statusline), never the checkout's: a branch
+# or an uncommitted edit there would otherwise run on the host at every refresh. A box can't
+# write it (boxes get their own .claude). Replaced in one rename, so a refresh never reads half.
+_sl="$HOME/.claude/airlock-statusline.sh"
+mkdir -p "$HOME/.claude"
+if cp "$INSTALL_ROOT/current/config/airlock-statusline.sh" "$_sl.tmp.$$" && chmod 0644 "$_sl.tmp.$$" \
+   && mv -f "$_sl.tmp.$$" "$_sl"; then
+  echo "==> Status line -> $_sl"
+  if grep -q 'airlock-statusline\.sh' "$HOME/.claude/settings.json" 2>/dev/null \
+     && ! grep -q '\.claude/airlock-statusline\.sh' "$HOME/.claude/settings.json"; then
+    echo "    NOTE: ~/.claude/settings.json runs another copy of the status line; point it at $_sl (README: Statusline)" >&2
+  fi
+else
+  rm -f "$_sl.tmp.$$"
+  echo "    WARNING: could not install the status line to $_sl" >&2
+fi
 # Keep the live version and the two most recently activated others.
 find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage.*' ! -name "$REV" \
     -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2- | while IFS= read -r _old; do
