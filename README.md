@@ -133,8 +133,9 @@ fix is the same two commands.
 leaves the previous ones (about 4 GB a rebuild, and the weekly package refresh rebuilds
 everything) untagged. Once the new version is live and has passed the containment check and
 the image smoke test, the install removes the dangling images that carry claude-airlock's
-label, with the layer chain only they used, and says how many (`==> Pruned 3 superseded
-claude-airlock image(s) (7.2GB)`). Other projects' images are never touched, dangling or
+label, with the layer chain only they used, and says what it freed (`==> Pruned superseded
+claude-airlock images: 7.2GB, 61 images and layers`; the count includes each build step's
+layer). Other projects' images are never touched, dangling or
 not. The layers under the live images are not dangling, so an unchanged rebuild is still a
 cache hit. An image a running box uses stays until the next install. With docker's BuildKit
 the build cache is kept apart from images and is not covered (`docker builder prune`).

@@ -462,17 +462,20 @@ _img_bytes() {  # podman only (docker's df gives no raw bytes)
   [ "$AIRLOCK_ENGINE" = podman ] || return 0
   podman system df --format json 2>/dev/null | tr -d ' \n' | sed -n 's/.*"Type":"Images"[^}]*"RawSize":\([0-9][0-9]*\).*/\1/p'
 }
-_n0="$(_img_count)" _b0="$(_img_bytes)"
-if "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh >/dev/null 2>&1; then
-  _n1="$(_img_count)" _b1="$(_img_bytes)"
-  if [ "$_n0" -gt "$_n1" ]; then
-    _sz=""
-    if [ -n "$_b0" ] && [ -n "$_b1" ] && [ "$_b0" -gt "$_b1" ]; then
-      _sz=" ($(numfmt --to=si --suffix=B "$((_b0 - _b1))" 2>/dev/null || echo "$((_b0 - _b1)) bytes"))"
-    fi
-    echo "==> Pruned $((_n0 - _n1)) superseded claude-airlock image(s)$_sz"
+# The prune stops with an error at an image a container uses (a box on :os, the parent of the
+# others), after removing what it could: what it freed is counted either way.
+_n0="$(_img_count)" _b0="$(_img_bytes)" _prc=0
+"$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh >/dev/null 2>&1 || _prc=$?
+_n1="$(_img_count)" _b1="$(_img_bytes)"
+if [ "$_n0" -gt "$_n1" ]; then
+  _sz=""
+  if [ -n "$_b0" ] && [ -n "$_b1" ] && [ "$_b0" -gt "$_b1" ]; then
+    _sz="$(numfmt --to=si --suffix=B "$((_b0 - _b1))" 2>/dev/null || echo "$((_b0 - _b1)) bytes"), "
   fi
-else
+  _note=""
+  [ "$_prc" = 0 ] || _note="; some are in use by a box, the next install takes them"
+  echo "==> Pruned superseded claude-airlock images: $_sz$((_n0 - _n1)) images and layers$_note"
+elif [ "$_prc" != 0 ]; then
   echo "    WARNING: could not prune superseded claude-airlock images ($AIRLOCK_ENGINE image prune); the next install tries again" >&2
 fi
 
