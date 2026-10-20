@@ -476,8 +476,8 @@ proxy checks the request, adds the credential and does the TLS (airlock-envoy's 
 If the proxy writes a client manifest next to its socket (`<name>.clients` beside
 `<name>.sock`; airlock-envoy does), each launch points the box's clients at those hosts:
 
-- **git**: in the box's own `~/.gitconfig`, remotes on each git host (rules `git`, `git-read`
-  or `any`) are rewritten to `http://<host>/`: `https://<host>/`, `https://<host>:443/`,
+- **git**: in the box's own `~/.gitconfig`, remotes on each git host (rules `git`, `git-read`,
+  `forgejo` or `any`) are rewritten to `http://<host>/`: `https://<host>/`, `https://<host>:443/`,
   `git@<host>:`, `<host>:`, `ssh://git@<host>/`, `ssh://git@<host>:22/`, `ssh://<host>/`,
   `git+ssh://git@<host>/` and `git://<host>/`, plus `ssh://git@<host>:PORT/` for each port in
   `AIRLOCK_GIT_SSH_PORTS` (host config, e.g. `AIRLOCK_GIT_SSH_PORTS=2222`). The repo's own
@@ -502,6 +502,11 @@ If the proxy writes a client manifest next to its socket (`<name>.clients` besid
   posture never changes what a running box's git does. If the launcher is killed while its box
   runs on, the next launch sweeps that copy: the box keeps its git config but its gh config
   empties, so gh fails closed (no network) until the box is relaunched.
+- **tea**: for each Forgejo host (rules `forgejo`) the proxy has a credential for, a box tea
+  login at `http://<host>` with a placeholder token the proxy replaces with the bot's. tea
+  matches a repo's ssh or https remote to it by host. The launcher mounts it read-only and the
+  entrypoint copies it to `~/.config/tea` (tea reads nothing else), so an image built before
+  this has no tea login. Your own tea config is never mounted (`.config/tea` is on the deny list).
 - **curl and the rest**: use `http://<host>/` URLs; the proxy variables already point there.
 
 `airlock egress show` lists the hosts. The manifest ends up in git config, so it is used only

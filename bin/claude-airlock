@@ -340,7 +340,7 @@ _airlock_client_manifest() {
   _CLIENT_HOSTS="$out"
 }
 # The plain-HTTP hosts git goes to (rules that serve git), one per line.
-_airlock_client_git_hosts() { awk '$2 == "git" || $2 == "git-read" || $2 == "any" { print $1 }' <<< "$_CLIENT_HOSTS"; }
+_airlock_client_git_hosts() { awk '$2 == "git" || $2 == "git-read" || $2 == "forgejo" || $2 == "any" { print $1 }' <<< "$_CLIENT_HOSTS"; }
 
 # True if directory $1 is, contains, or sits inside path $2 (both canonical).
 _airlock_overlaps() {
@@ -2593,6 +2593,33 @@ elif [ -n "$_gh_line" ]; then
     echo "claude-airlock: gh: api.github.com has the $_gh_rules rules on this proxy, so writes beyond them (PR create or edit, for github-issues) get 403" >&2
   fi
 fi
+# tea, for each Forgejo host the proxy serves (forgejo rules) with a credential: a box-only login
+# at http://<host>, through the proxy, which replaces the placeholder token with the bot's. tea
+# matches a repo's remote to a login by host (ssh_host covers ssh remotes on any port). tea has
+# no config-path option and reads only ~/.config/tea, which the image doesn't have: mounted
+# read-only here, the entrypoint copies it into place for dev (an image without that step just
+# has no tea login).
+_fj_hosts=()
+while IFS= read -r _h; do [ -n "$_h" ] && _fj_hosts+=( "$_h" ); done \
+  < <(awk '$2 == "forgejo" && $3 == "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
+while IFS= read -r _h; do
+  [ -n "$_h" ] && echo "claude-airlock: the proxy has no credential for $_h, so tea is not set up for it" >&2
+done < <(awk '$2 == "forgejo" && $3 != "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
+if [ "${#_fj_hosts[@]}" -gt 0 ]; then
+  (umask 077; mkdir -p "$BOX_CFG/tea")
+  { echo "# Written by claude-airlock for this box: tea speaks plain HTTP through the proxy, which"
+    echo "# adds the credential (the token here is a placeholder)."
+    echo "logins:"
+    _fj_def=true
+    for _h in "${_fj_hosts[@]}"; do
+      printf -- '- name: %s\n  url: http://%s\n  token: airlock-proxy-adds-the-credential\n  default: %s\n  ssh_host: %s\n' \
+        "$_h" "$_h" "$_fj_def" "$_h"
+      _fj_def=false
+    done
+  } > "$BOX_CFG/tea/config.yml"
+  args+=( -v "$BOX_CFG/tea:/etc/airlock-box/tea:ro" )
+fi
+
 # With the proxy holding credentials, a GitHub token among the secrets puts one in the box
 # anyway: named by key (GitHub-ish names) or by value (GitHub's token prefixes), never shown.
 if grep -q ' yes$' <<< "$_CLIENT_HOSTS"; then

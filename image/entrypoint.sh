@@ -47,6 +47,13 @@ else
   /usr/local/bin/init-firewall.sh
 fi
 
+# A tea login the launcher wrote for this box (a Forgejo host behind the proxy): tea reads only
+# ~/.config/tea, so it goes there, owned by dev. Its token is a placeholder the proxy replaces.
+if [ -f /etc/airlock-box/tea/config.yml ]; then
+  install -d -o dev -g dev -m 0700 /home/dev/.config /home/dev/.config/tea
+  install -o dev -g dev -m 0600 /etc/airlock-box/tea/config.yml /home/dev/.config/tea/config.yml
+fi
+
 export HOME=/home/dev
 export PATH="$AGENT_PATH"
 exec gosu dev "$@"
