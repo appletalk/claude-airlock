@@ -48,11 +48,14 @@ else
 fi
 
 # A tea login the launcher wrote for this box (a Forgejo host behind the proxy): tea reads only
-# ~/.config/tea, so it goes there, owned by dev. Its token is a placeholder the proxy replaces.
-if [ -f /etc/airlock-box/tea/config.yml ]; then
-  install -d -o dev -g dev -m 0700 /home/dev/.config /home/dev/.config/tea
-  install -o dev -g dev -m 0600 /etc/airlock-box/tea/config.yml /home/dev/.config/tea/config.yml
-fi
+# ~/.config/tea, so it goes there. Its token is a placeholder the proxy replaces. Done as dev:
+# the mount is the launching user's (dev here) and 0700, which root without capabilities can't
+# even look into, and dev writing its own home never follows a link anywhere dev couldn't write.
+# shellcheck disable=SC2016  # expanded by dev's shell, not here
+HOME=/home/dev gosu dev sh -c 'f=/etc/airlock-box/tea/config.yml
+  [ -f "$f" ] || exit 0
+  mkdir -p -m 0700 "$HOME/.config/tea" && install -m 0600 "$f" "$HOME/.config/tea/config.yml"' \
+  || echo "[airlock] WARNING: could not install the box tea login (tea will have no login)" >&2
 
 export HOME=/home/dev
 export PATH="$AGENT_PATH"
