@@ -277,6 +277,7 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   [[ "$output" == *"plain HTTP through the proxy"* ]]
   [[ "$output" == *"git.example.org (rules git, credential yes)"* ]]
   [[ "$output" == *"metrics.example.org (rules victoria-metrics, credential no)"* ]]
+  [[ "$output" != *"(rules , credential )"* ]]       # no empty entry after the last host
   manifest 'Bad.example.org 443 git yes\n'
   run _launch "$P" egress show
   [[ "$output" == *"plain HTTP through the proxy: not set up (ignoring $M: line 2 is not"* ]]

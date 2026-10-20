@@ -992,7 +992,7 @@ if [ "${1:-}" = "egress" ]; then
             echo "  plain HTTP through the proxy: not set up (${_egwhy#claude-airlock: })"
           elif _airlock_client_manifest "$_egp" 2>/dev/null && [ -n "$_CLIENT_HOSTS" ]; then
             echo "  plain HTTP through the proxy (it adds any credential; box git and gh use http:// for these):"
-            awk '{ printf "    %s (rules %s, credential %s)\n", $1, $2, $3 }' <<< "$_CLIENT_HOSTS"
+            awk 'NF { printf "    %s (rules %s, credential %s)\n", $1, $2, $3 }' <<< "$_CLIENT_HOSTS"
           fi
         fi
         if [ -s "$_egdir/sockets" ] && grep -qvxF "$_egp" "$_egdir/sockets"; then
