@@ -8,33 +8,52 @@
 
 load helper
 
-# A fake engine with a store: "<tag> <id>" lines in $FE_STATE/tags (one store per account).
-# build gives the tag a fresh id, tag copies one, rmi drops a tag (or every tag of an id),
-# save writes the tags' lines to the archive and load reads them back (FE_LOAD_ID=<id>
-# replaces every id it loads, as a damaged or foreign archive would).
+# A fake engine with a store, one per account ($FE_STATE): "<tag> <id>" lines in tags, and
+# "<id> <label>" lines in images (every image, tagged or not; label L is claude-airlock's,
+# - none). build gives the tag a fresh labelled image, tag points one at another's, rmi drops
+# a tag (the image too once nothing tags it) or an id, save writes the tags' lines to the
+# archive and load reads them back (FE_LOAD_ID=<id> replaces every id, as a foreign archive
+# would). image prune with the label removes untagged labelled images, except FE_INUSE (an
+# id a running box holds); FE_PRUNE_FAIL=1 makes it fail, FE_BUILD_FAIL=<tag> fails that build.
 fake_engine() {
   cat > "$STUBBIN/$ENGINE" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "${ENGINE_ARGS_FILE:-/dev/null}"
-st="${FE_STATE:?}/tags"; touch "$st"
+st="${FE_STATE:?}/tags" im="${FE_STATE:?}/images"; touch "$st" "$im"
 norm() { local t="${1#localhost/}"; printf '%s' "$t"; }
 get() { awk -v t="$(norm "$1")" '$1 == t { print $2 }' "$st"; }
-put() { grep -v "^$(norm "$1") " "$st" > "$st.n" || true; printf '%s %s\n' "$(norm "$1")" "$2" >> "$st.n"; mv "$st.n" "$st"; }
+tagged() { awk -v i="$1" '$2 == i { f = 1 } END { exit !f }' "$st"; }
+put() {
+  grep -v "^$(norm "$1") " "$st" > "$st.n" || true; printf '%s %s\n' "$(norm "$1")" "$2" >> "$st.n"; mv "$st.n" "$st"
+  grep -q "^$2 " "$im" || printf '%s %s\n' "$2" "${3:-L}" >> "$im"
+}
+drop_image() { grep -v "^$1 " "$im" > "$im.n" || true; mv "$im.n" "$im"; }
 case "$1" in
   image)
-    [ "$2" = inspect ] || exit 0
-    t="${*: -1}"; id="$(get "$t")"; [ -n "$id" ] || exit 1
-    case "$4" in
-      *RootFS*) case "$t" in *os*) echo "sha256:a sha256:b " ;; *) echo "sha256:a sha256:b sha256:c " ;; esac ;;
-      *) echo "$id" ;;
+    case "$2" in
+      inspect)
+        t="${*: -1}"; id="$(get "$t")"; [ -n "$id" ] || exit 1
+        case "$4" in
+          *RootFS*) case "$t" in *os*) echo "sha256:a sha256:b " ;; *) echo "sha256:a sha256:b sha256:c " ;; esac ;;
+          *) echo "$id" ;;
+        esac ;;
+      prune)
+        [ -z "${FE_PRUNE_FAIL:-}" ] || exit 1
+        [[ "$*" == *"label=org.claude-airlock.apt-refresh"* ]] || exit 0
+        while read -r id lab; do
+          [ "$lab" = L ] && ! tagged "$id" && [ "$id" != "${FE_INUSE:-}" ] && drop_image "$id"
+        done < <(cat "$im") ;;
     esac ;;
-  build) shift; while [ $# -gt 0 ]; do [ "$1" = -t ] && { put "$2" "sha256:built-$RANDOM$RANDOM"; }; shift; done ;;
+  images) cut -d' ' -f1 "$im" ;;
+  build) shift; t=""; while [ $# -gt 0 ]; do [ "$1" = -t ] && t="$2"; shift; done
+         [ -z "${FE_BUILD_FAIL:-}" ] || [[ "$t" != *"$FE_BUILD_FAIL"* ]] || exit 1
+         [ -z "$t" ] || put "$t" "sha256:built-$RANDOM$RANDOM" ;;
   tag) id="$(get "$2")"; [ -n "$id" ] || exit 1; put "$3" "$id" ;;
   rmi) shift; for a in "$@"; do
          case "$a" in -*) continue ;; esac
-         if [ -n "$(get "$a")" ]; then grep -v "^$(norm "$a") " "$st" > "$st.n" || true
-         else grep -v " $a$" "$st" > "$st.n" || true; fi
-         mv "$st.n" "$st"
+         id="$(get "$a")"
+         if [ -n "$id" ]; then grep -v "^$(norm "$a") " "$st" > "$st.n" || true; mv "$st.n" "$st"; tagged "$id" || drop_image "$id"
+         else grep -v " $a$" "$st" > "$st.n" || true; mv "$st.n" "$st"; drop_image "$a"; fi
        done ;;
   save) out=""; tags=(); shift
         while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; -q|-m) ;; --format) shift ;; *) tags+=("$1") ;; esac; shift; done
@@ -67,8 +86,10 @@ writer_install() {
   for t in base os dev; do
     printf '%s sha256:%s-%s\n' "$t" "$p" "$t" >> "$v/IMAGES"
     FE_STATE="$W/fe" "$STUBBIN/$ENGINE" build -t "claude-airlock:$t" >/dev/null
+    FE_STATE="$W/fe" "$STUBBIN/$ENGINE" tag "claude-airlock:$t" "claude-airlock:$t" >/dev/null   # (no-op: built above)
     grep -v "^claude-airlock:$t " "$W/fe/tags" > "$W/fe/t" || true
     printf 'claude-airlock:%s sha256:%s-%s\n' "$t" "$p" "$t" >> "$W/fe/t"; mv "$W/fe/t" "$W/fe/tags"
+    grep -q "^sha256:$p-$t " "$W/fe/images" || printf 'sha256:%s-%s L\n' "$p" "$t" >> "$W/fe/images"
   done
   ln -sfn "versions/$rev" "$W/root/current"
 }
@@ -180,8 +201,8 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(readlink "$(RROOT)/current")" = "versions/$REV2" ]
   [ "$(cut -d' ' -f2 "$R/fe/tags" | sort -u | tr '\n' ' ')" = "sha256:w2-base sha256:w2-dev sha256:w2-os " ]
-  engine_args | grep -qx sha256:w1-dev            # removed by id
-  engine_args | grep -qx -- label=org.claude-airlock.apt-refresh   # and leftovers a box kept, collected
+  [ "$(cut -d' ' -f1 "$R/fe/images" | sort | tr '\n' ' ')" = "sha256:w2-base sha256:w2-dev sha256:w2-os " ]
+  [[ "$output" == *"Pruned 3 superseded claude-airlock image(s)"* ]]
 }
 
 @test "install-bundle: the same bundle (or one whose images did not change) twice: the live images stay" {
@@ -190,7 +211,8 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   : > "$ENGINE_ARGS_FILE"
   run reader_install; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(cut -d' ' -f2 "$R/fe/tags" | sort -u | tr '\n' ' ')" = "sha256:w1-base sha256:w1-dev sha256:w1-os " ]
-  ! engine_args | grep -qx 'sha256:w1-dev' || false
+  [ "$(cut -d' ' -f1 "$R/fe/images" | sort | tr '\n' ' ')" = "sha256:w1-base sha256:w1-dev sha256:w1-os " ]
+  [[ "$output" != *"Pruned"* ]]                   # nothing to prune: no line
 }
 
 @test "install-bundle: a failed containment check or smoke test keeps the images it replaced, and says how back" {
@@ -202,7 +224,8 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
     : > "$ENGINE_ARGS_FILE"
     FAIL_CHECK=$c run reader_install
     [ "$status" -ne 0 ] && [[ "$output" == *"ask for a bundle of the previous commit ($REV1)"* ]] || { echo "$c: $output"; return 1; }
-    ! engine_args | grep -qxE 'sha256:w1-(base|os|dev)|label=org.claude-airlock.apt-refresh' || false
+    ! engine_args | grep -qx 'label=org.claude-airlock.apt-refresh' || false
+    grep -q '^sha256:w1-dev ' "$R/fe/images"     # the replaced images stay, a way back
   done
 }
 
@@ -234,21 +257,76 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   [ -f "$B/MANIFEST" ]
 }
 
-@test "a build install records its images and prunes only its own week-old untagged ones" {
+build_clone() {  # a clone of this tree (with passing host checks) and a commit on it
   unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
   CLONE="$BATS_TEST_TMPDIR/clone"
   git clone -q "$REPO" "$CLONE"
   tar -C "$REPO" --exclude=.git --exclude=.tooling --exclude='image/certs/*.crt' -cf - . | tar -x -C "$CLONE"
   pass_checks "$CLONE"
-  git -C "$CLONE" -c user.name=t -c user.email=t@example.com add -A
-  git -C "$CLONE" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m t
+  gitb add -A; gitb commit -q --allow-empty -m t
+}
+gitb() { git -C "$CLONE" -c user.name=t -c user.email=t@example.com "$@"; }
+build_install() {
   env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$W" FE_STATE="$W/fe" AIRLOCK_ENGINE="$ENGINE" \
-    CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" bash "$CLONE/bin/install.sh" </dev/null >/dev/null 2>&1 || true
+    CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" ${FE_INUSE:+FE_INUSE="$FE_INUSE"} \
+    ${FE_PRUNE_FAIL:+FE_PRUNE_FAIL=1} ${FE_BUILD_FAIL:+FE_BUILD_FAIL="$FE_BUILD_FAIL"} \
+    bash "$CLONE/bin/install.sh" </dev/null
+}
+live_ids() { awk '$1 ~ /^claude-airlock:(base|os|dev)$/ { print $2 }' "$W/fe/tags" | sort | tr '\n' ' '; }
+all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
+
+@test "a build install records its images; the next prunes the ones it superseded and nothing else" {
+  build_clone
+  printf 'sha256:someone-elses -\n' >> "$W/fe/images"     # another project's dangling image
+  run build_install; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   r="$(git -C "$CLONE" rev-parse --short=12 HEAD)"
   v="$W/.local/share/claude-airlock/versions/$r"
   [ "$(cut -d' ' -f1 "$v/IMAGES" | tr '\n' ' ')" = "base os dev " ]
   [ "$(awk '$1 == "dev" { print $2 }' "$v/IMAGES")" = "$(awk '$1 == "claude-airlock:dev" { print $2 }' "$W/fe/tags")" ]
+  [[ "$output" != *"Pruned"* ]]                              # a first install: nothing superseded
+  gitb commit -q --allow-empty -m t2
+  : > "$ENGINE_ARGS_FILE"
+  run build_install; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"==> Pruned 3 superseded claude-airlock image(s)"* ]]
+  [ "$(all_ids)" = "$(printf '%s\n' $(live_ids) sha256:someone-elses | sort | tr '\n' ' ')" ]
   engine_args | grep -qx -- label=org.claude-airlock.apt-refresh
-  engine_args | grep -qx -- until=168h
-  ! engine_args | grep -qx -- --all || false
+  ! engine_args | grep -qxE -- '--all|until=.*' || false     # dangling only, no age window
+}
+
+@test "an image a running box holds stays, and the next install collects it" {
+  build_clone
+  build_install >/dev/null 2>&1
+  held="$(awk '$1 == "claude-airlock:dev" { print $2 }' "$W/fe/tags")"
+  gitb commit -q --allow-empty -m t2
+  FE_INUSE="$held" run build_install; [ "$status" -eq 0 ]
+  [[ "$output" == *"Pruned 2 superseded"* ]]
+  grep -q "^$held " "$W/fe/images"
+  gitb commit -q --allow-empty -m t3
+  run build_install; [ "$status" -eq 0 ]
+  ! grep -q "^$held " "$W/fe/images" || false
+}
+
+@test "a prune that fails warns and the install still succeeds" {
+  build_clone
+  build_install >/dev/null 2>&1
+  gitb commit -q --allow-empty -m t2
+  FE_PRUNE_FAIL=1 run build_install
+  [ "$status" -eq 0 ]; [[ "$output" == *"WARNING: could not prune superseded claude-airlock images"* ]]
+}
+
+@test "a failed build or failed host check prunes nothing" {
+  build_clone
+  build_install >/dev/null 2>&1
+  before="$(all_ids)"
+  gitb commit -q --allow-empty -m t2
+  : > "$ENGINE_ARGS_FILE"
+  FE_BUILD_FAIL=claude-airlock:dev- run build_install
+  [ "$status" -ne 0 ]
+  ! engine_args | grep -qx -- label=org.claude-airlock.apt-refresh || false
+  for id in $before; do grep -q "^$id " "$W/fe/images" || { echo "removed: $id"; return 1; }; done
+  printf '#!/bin/sh\nexit 1\n' > "$CLONE/scripts/airlock-doctor.sh"; gitb add -A; gitb commit -q -m t3
+  : > "$ENGINE_ARGS_FILE"
+  run build_install
+  [ "$status" -ne 0 ]
+  ! engine_args | grep -qx -- label=org.claude-airlock.apt-refresh || false
 }

@@ -129,6 +129,18 @@ fix is the same two commands.
 
 ### 3. Shell integration
 
+**Old images.** Every install moves `:base`, `:os` and `:dev` to the images it built, which
+leaves the previous ones (about 4 GB a rebuild, and the weekly package refresh rebuilds
+everything) untagged. Once the new version is live and has passed the containment check and
+the image smoke test, the install removes the dangling images that carry claude-airlock's
+label, with the layer chain only they used, and says how many (`==> Pruned 3 superseded
+claude-airlock image(s) (7.2GB)`). Other projects' images are never touched, dangling or
+not. The layers under the live images are not dangling, so an unchanged rebuild is still a
+cache hit. An image a running box uses stays until the next install. With docker's BuildKit
+the build cache is kept apart from images and is not covered (`docker builder prune`).
+A WSL disk image does not shrink by itself when space is freed inside it; this keeps it from
+growing, compacting it is still a Windows-side job.
+
 `make install` exports the checked-out **commit** (never uncommitted edits) to
 `~/.local/share/claude-airlock/versions/<commit>/`, builds the images from that copy,
 and only when the build succeeds points `~/.local/share/claude-airlock/current` at it.
@@ -699,11 +711,8 @@ make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has instal
   only the writer can write (its directory owned by the writer, every directory above it
   root's).
 - **Space:** a bundle is a handoff, not an archive: `make bundle` replaces an earlier one in
-  the same directory, and `bundle-clean` removes it. A reader keeps one version of the
-  images: once an install passes its checks, the images it replaced go, and any a running
-  box kept go at the next install after that box is gone. A build (`make install`) keeps a
-  week of its own untagged layers as build cache and removes older ones. Only claude-airlock's
-  images go, and the unlabelled parents only they use (an older Debian base, say).
+  the same directory, and `bundle-clean` removes it. Each account keeps one version of the
+  images (see *Old images* under the install section).
 - **Same engine on both sides:** podman and docker name and number images differently, so a
   bundle records its engine and a reader on the other refuses it.
 - **Several readers:** each account has its own store, so each holds a copy (about 4 GB).
