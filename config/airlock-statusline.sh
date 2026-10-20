@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
 # claude-airlock statusline. Shows the project folder, git branch, model,
-# context %, and subscription rate limits. In the box it leads with a bold
-# (airlock) badge so it's always obvious the session is sandboxed/firewalled.
+# context %, and subscription rate limits. In the box it leads with user@ and a bold
+# green airlock badge so it's always obvious the session is sandboxed/firewalled.
 # The host points its own statusLine at this file with --host, which swaps in a
-# bold red (host) badge, so host and box lines are identical apart from it.
-# Left of the badge, plain (user@(airlock), user@(host)): whose session it is. In the box the user is always `dev`, so
+# bold red host badge, so host and box lines are identical apart from it.
+# Left of the badge, plain (user@airlock, user@host, read like a shell prompt): whose session it is. In the box the user is always `dev`, so
 # the launcher passes the host user in (AIRLOCK_HOST_USER); with several accounts running
 # boxes (an agent's own user beside yours) the lines would otherwise look the same. A
 # convenience, not a security marker: the box can change its own status line.
-badge="\033[1;38;5;28m(airlock)"
+badge="\033[1;38;5;28mairlock"
 # Standard red (SGR 31), not a fixed 256-colour index: it follows the terminal theme, so
 # the badge matches the existing host statusline's red exactly instead of coming out a
 # harder shade next to it.
-[ "${1:-}" = "--host" ] && badge="\033[1;31m(host)"
+[ "${1:-}" = "--host" ] && badge="\033[1;31mhost"
 who="${AIRLOCK_HOST_USER:-$(id -un 2>/dev/null)}"
 who="${who//[^A-Za-z0-9._-]/}"
 input=$(cat)
@@ -31,7 +31,7 @@ if git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
              || git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
 fi
 
-# (airlock) / (host) badge, so which side of the sandbox you're on is
+# airlock / host badge, so which side of the sandbox you're on is
 # unmistakable, plus a dim separator so it doesn't blur into the folder name
 [ -n "$who" ] && printf "%s@" "$who"
 printf "%b\033[0m \033[90m-\033[0m " "$badge"

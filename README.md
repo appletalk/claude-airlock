@@ -542,8 +542,8 @@ it off).
 
 ## Statusline — `config/airlock-statusline.sh`
 
-Boxes get it automatically, with a green `(airlock)` badge. To use the same line for
-**host** Claude, so both sides look identical apart from a red `(host)` badge, point your
+Boxes get it automatically, with a green `airlock` badge. To use the same line for
+**host** Claude, so both sides look identical apart from a red `host` badge, point your
 host `~/.claude/settings.json` at the copy `make install` puts in `~/.claude`, with `--host`:
 
 ```json
@@ -556,7 +556,7 @@ host `~/.claude/settings.json` at the copy `make install` puts in `~/.claude`, w
 Not the checkout's `config/airlock-statusline.sh`: host Claude runs the status line at every
 refresh, so a branch or an uncommitted edit there would run on your host. The install warns
 when `settings.json` still points elsewhere. The badge names whose session it is
-(`keith@(host)`, `otto@(airlock)`; in a box, the host user the launcher passes in), so boxes of
+(`keith@host`, `otto@airlock`, like a shell prompt; in a box, the host user the launcher passes in), so boxes of
 different accounts, such as an agent's own user beside yours, are told apart.
 
 ## Scratch files — `$AIRLOCK_TMP`
