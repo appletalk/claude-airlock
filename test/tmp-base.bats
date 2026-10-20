@@ -43,6 +43,40 @@ tmp_fns() {
   [ "$status" -ne 0 ]; [[ "$output" == *"is not yours alone"* ]]
 }
 
+@test "special bits alone (setgid, sticky) on our own 0700 base are fine" {
+  b="$BATS_TEST_TMPDIR/tbase"; mkdir -m 2700 "$b"
+  run bash -c "$(tmp_fns)"'; _AIRLOCK_TMP_DEFAULT="$1"; _airlock_tmp_base_ready "$1"' _ "$b"
+  [ "$status" -eq 0 ]
+}
+
+@test "a launch with the default base refuses one someone else owns, and starts nothing" {
+  b="/tmp/airlock-$ME"
+  [ ! -e "$b" ] || [ "$(stat -c %u:%a "$b")" = "$(id -u):700" ] || skip "$b exists and is not ours alone"
+  printf '#!/usr/bin/env bash\n[ "$1 $2 $3" = "-c %%u %s" ] && { echo 4242; exit 0; }\nexec /usr/bin/stat "$@"\n' "$b" > "$STUBBIN/stat"
+  chmod +x "$STUBBIN/stat"
+  p="$(mkproj sq)"
+  unset AIRLOCK_TMP_BASE          # _launch passes it only when set: the launcher's default
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"is not yours alone"* ]]
+  ! engine_args | grep -q '^ENGINE_INVOKED=' || false
+}
+
+@test "the host wrapper refuses a default base open to others, as the launcher does" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  b="/tmp/airlock-$ME"
+  [ ! -e "$b" ] || [ "$(stat -c %u:%a "$b")" = "$(id -u):700" ] || skip "$b exists and is not ours alone"
+  printf '#!/usr/bin/env bash\n[ "$1 $2 $3" = "-c %%a %s" ] && { echo 755; exit 0; }\nexec /usr/bin/stat "$@"\n' "$b" > "$STUBBIN/stat"
+  chmod +x "$STUBBIN/stat"
+  printf '#!/usr/bin/env bash\necho CLAUDE-RAN\n' > "$STUBBIN/claude"; chmod +x "$STUBBIN/claude"
+  p="$(mkproj tbw)"
+  run env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" TERM=xterm \
+    zsh -c "source '$BATS_TEST_DIRNAME/../shell/claude-airlock.zsh' >/dev/null 2>&1; cd '$p' || exit 1; claude" </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"is not yours alone"* ]]
+  [[ "$output" != *CLAUDE-RAN* ]]
+}
+
 @test "a base set in the environment is the user's choice: not checked" {
   b="$BATS_TEST_TMPDIR/custom"; mkdir -m 0777 "$b"
   run bash -c "$(tmp_fns)"'; _airlock_tmp_base_ready "$1"' _ "$b"

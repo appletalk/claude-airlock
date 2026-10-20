@@ -67,20 +67,25 @@ _AIRLOCK_TMP_BASE_ENV="${AIRLOCK_TMP_BASE:-}"
 # The default scratch base is per user: one shared /tmp/airlock belonged to whoever
 # launched first, and another account on the host (an agent's own user, say) could not
 # make its project dirs in it.
-_AIRLOCK_TMP_DEFAULT="/tmp/airlock-$(id -un)"
+_AIRLOCK_TMP_DEFAULT="/tmp/airlock-$(id -un 2>/dev/null || id -u)"
 # Make the default scratch base, or refuse one that is not ours alone: in a shared /tmp
 # anyone can make /tmp/airlock-<you> first, and whoever owns it (or can write to it) can
-# read, swap or plant what every one of your boxes mounts. A base set in the environment
-# is the user's own choice and is not checked here.
+# read, swap or plant what every one of your boxes mounts. The rule (the zsh wrapper's too):
+# not a symlink, owned by you, no group or other bits (an ACL shows in the group bits). A
+# base set in the environment to anything else is the user's own choice and is not checked.
+# The default base is never removed once made (it costs nothing, and removing it would give
+# anyone a new chance to make it first).
 _airlock_tmp_base_ready() {
-  local b="$1"
+  local b="$1" m
   [ "$b" = "$_AIRLOCK_TMP_DEFAULT" ] || return 0
   mkdir -m 0700 "$b" 2>/dev/null || true
+  m="$(stat -c %a "$b" 2>/dev/null)" || m=777
   if [ -L "$b" ] || [ ! -d "$b" ] || [ "$(stat -c %u "$b")" != "$(id -u)" ] \
-     || [ -n "$(find "$b" -maxdepth 0 -perm /077 -print)" ]; then
+     || ! [[ "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#077 )); then
     echo "claude-airlock: $b is not yours alone (a symlink, another owner, or open to others)." >&2
-    echo "  Someone else may have made it to read or swap your scratch: remove it (or set" >&2
-    echo "  AIRLOCK_TMP_BASE in your environment to a directory of your own)." >&2
+    echo "  Someone else may have made it to read or swap your scratch. Only its owner or root" >&2
+    echo "  can remove it from /tmp: ask root to, or set AIRLOCK_TMP_BASE in your environment" >&2
+    echo "  to a directory of your own." >&2
     return 1
   fi
 }
@@ -225,9 +230,6 @@ if [ "${1:-}" = "session" ]; then
         # .venv behind permanently (measured against real containers).
         _airlock_release_artifacts "$HOME/.config/claude-airlock/state/$_xslug"
         rmdir "$_xtmp" 2>/dev/null || true
-        if [ -z "$_AIRLOCK_TMP_BASE_ENV" ]; then
-          rmdir "$_AIRLOCK_TMP_DEFAULT" 2>/dev/null || true
-        fi
         rmdir "$_xdir" 2>/dev/null || true
       fi ;;
     peers)   # diagnostic: does anyone else hold this project's shared dirs?
@@ -720,12 +722,18 @@ _airlock_mount_check() {
 # The paste drop box (AIRLOCK_PASTE_DIR): canonical path on stdout if it may be mounted
 # read-only into the box; otherwise the reason on stderr and 1. Unlike `mount`, it may be
 # another account's directory (whoever hands you pastes owns it and writes it; you only read
-# it), so the rule is about who can write there: its owner, or root, controls every
-# directory from / down to it, and no one else can write to any of them (a sticky /tmp
-# included: anyone could have made a directory there).
+# it), so the rule is about who can change it: only its owner may write in it, and every
+# directory above it is root's and writable by root alone (a sticky /tmp is not: anyone could
+# have made a directory there), so not even its owner can swap it for a symlink to somewhere
+# else between this check and the mount. Hard links and mount points are refused as found
+# here; what the owner adds later is bounded by the kernel (fs.protected_hardlinks lets them
+# link only files they own or may write; a FUSE mount of theirs is closed to other users).
 _airlock_paste_dir_check() {
-  local want="$1" c home d o u m
+  local want="$1" c home d u m
   case "$want" in /*) ;; *) echo "'$want' must be an absolute path" >&2; return 1 ;; esac
+  case "$want" in
+    *:*|*,*|*[[:cntrl:]]*) echo "'$want' contains ':', ',' or a control character" >&2; return 1 ;;
+  esac
   home="$(readlink -f "$HOME" 2>/dev/null)" || { echo "cannot resolve \$HOME" >&2; return 1; }
   c="$(readlink -e "$want" 2>/dev/null)" || { echo "'$want' does not exist" >&2; return 1; }
   [ "$c" = "$want" ] || { echo "'$want' is not its real path ($c): name that" >&2; return 1; }
@@ -736,11 +744,11 @@ _airlock_paste_dir_check() {
     "$WORKSPACE"|"$WORKSPACE"/*) echo "'$c' is inside the workspace, which is already mounted" >&2; return 1 ;;
   esac
   case "$WORKSPACE" in "$c"/*) echo "'$c' contains the workspace" >&2; return 1 ;; esac
-  o="$(stat -c %u "$c")" d="$c"
+  d="$c"
   while :; do
     u="$(stat -c %u "$d")" m="$(stat -c %a "$d")"
-    if [ "$u" != 0 ] && [ "$u" != "$o" ]; then
-      echo "'$d' (holding '$c') belongs to neither root nor the paste dir's owner" >&2; return 1
+    if [ "$d" != "$c" ] && [ "$u" != 0 ]; then
+      echo "'$d' (above '$c') must be root's, so the paste dir's owner cannot swap it" >&2; return 1
     fi
     if [[ ! "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#022 )); then
       echo "'$d' (holding or being '$c') is group/world-writable: only its owner may write there" >&2; return 1
@@ -1197,8 +1205,8 @@ if [ "${1:-}" = "paste" ]; then
     _pdir="$(_airlock_paste_dir_check "$AIRLOCK_PASTE_DIR" 2>&1)" \
       || { echo "claude-airlock: AIRLOCK_PASTE_DIR: $_pdir" >&2; exit 1; }
     if [ "$_plist" = 0 ] && [ ! -w "$_pdir" ]; then
-      echo "claude-airlock: $_pdir is not writable by you: its owner pastes there (with their own" >&2
-      echo "  tool), and your boxes read it. Nothing to do here." >&2
+      echo "claude-airlock: $_pdir is not writable by you: its owner pastes there, and your boxes" >&2
+      echo "  read it. Nothing to do here." >&2
       exit 1
     fi
   elif [ -z "$_pproj" ]; then
@@ -1343,6 +1351,9 @@ Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pwork" || _pfail "
   [ "$(head -c 4 "$_pwork" | od -An -tx1 | tr -d ' \n')" = "89504e47" ] \
     || _pfail "conversion produced a file that is not a PNG"
 
+  # A drop box is read by another account (through the directory's group): mktemp's 0600
+  # would keep it out.
+  [ -z "${AIRLOCK_PASTE_DIR:-}" ] || chmod 0640 "$_pwork" || _pfail "could not make the paste group-readable"
   # Atomic publish: same filesystem, so nothing ever observes a partial *.png.
   mv -f "$_pwork" "$_pout" || _pfail "could not move the image into $_pdir"
 
@@ -1619,6 +1630,12 @@ if ! mkdir -p "$AIRLOCK_TMP" 2>/dev/null; then
   exit 1
 fi
 chmod 700 "$AIRLOCK_TMP"
+# Again now that the project dir is in it: the base must still be ours alone, and the project
+# dir ours (a base swapped in between would have made it someone else's child).
+_airlock_tmp_base_ready "$AIRLOCK_TMP_BASE" || exit 1
+if [ -L "$AIRLOCK_TMP" ] || [ "$(stat -c %u "$AIRLOCK_TMP")" != "$(id -u)" ]; then
+  echo "claude-airlock: the scratch dir $AIRLOCK_TMP is not yours; not launching" >&2; exit 1
+fi
 
 # --- Shared-mount refcount: who else has this project's dirs mounted right now? ---
 # $AIRLOCK_TMP and the shadowed artifact dirs are each ONE host directory bind-mounted
@@ -1716,9 +1733,8 @@ _airlock_cleanup() {
   # Drop the scratch dir only if the session left it empty (rmdir refuses otherwise),
   # so we don't litter /tmp with empties but never delete a kept artifact.
   rmdir "$AIRLOCK_TMP" 2>/dev/null || true
-  # Only ever tidy up the tool's OWN default base. With a custom base this would be
-  # removing a directory the user made for their own reasons.
-  if [ "$AIRLOCK_TMP_BASE" = "$_AIRLOCK_TMP_DEFAULT" ]; then rmdir "$AIRLOCK_TMP_BASE" 2>/dev/null || true; fi
+  # Never the base: a custom one is the user's, and the default stays so that no one else
+  # can make it first (see _airlock_tmp_base_ready).
   rmdir "$SESS_DIR" 2>/dev/null || true
 }
 # A signal handler in bash runs and then the script CONTINUES. On the old
@@ -2227,9 +2243,10 @@ done
 # someone else hands this account (it only reads them). The box finds pastes at
 # $AIRLOCK_PASTES: that directory, or else this project's $AIRLOCK_TMP/pastes.
 _pastes="$AIRLOCK_TMP/pastes"
+_paste_pin=""
 if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then
   if _pc="$(_airlock_paste_dir_check "$AIRLOCK_PASTE_DIR" 2>&1)"; then
-    args+=( -v "$_pc:$_pc:ro" ); _pastes="$_pc"
+    args+=( -v "$_pc:$_pc:ro" ); _pastes="$_pc"; _paste_pin="$(stat -c %d:%i "$_pc") $_pc"
   else
     echo "claude-airlock: NOT mounting AIRLOCK_PASTE_DIR: $_pc" >&2; _pastes=""
   fi
@@ -2849,6 +2866,16 @@ for _kp in "${SHARE_PINS[@]}"; do
     exit 1
   fi
 done
+
+# The paste dir the same way.
+if [ -n "$_paste_pin" ]; then
+  _kpath="${_paste_pin#* }"
+  if ! _airlock_paste_dir_check "$_kpath" >/dev/null 2>&1 \
+      || [ "$(stat -c %d:%i "$_kpath" 2>/dev/null)" != "${_paste_pin%% *}" ]; then
+    echo "claude-airlock: the paste dir $_kpath changed after it was checked; not launching" >&2
+    exit 1
+  fi
+fi
 
 MOUNTED=1
 if [ "$AIRLOCK_SHELL" = 1 ]; then

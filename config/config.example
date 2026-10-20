@@ -60,8 +60,9 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 # Or a paste drop box instead, for every project: `airlock paste` writes there (if you can),
 # and every box mounts it READ-ONLY at the same path, as $AIRLOCK_PASTES. Meant for an
 # account that runs boxes but gets its pastes from another user (an agent's own account:
-# you paste, it only reads). Absolute, its real path; its owner (or root) must own every
-# directory down to it, and nothing on the way may be group/world-writable.
+# you paste, it only reads). Absolute, its real path, writable only by its owner (the writer),
+# and every directory above it root's and writable by root alone. Make it setgid with the
+# reading account's group (chmod 2750 writer:reader-group) so pastes are readable there.
 # AIRLOCK_PASTE_DIR="/srv/agent-inbox/pastes"
 
 # Broad read-only roots mounted at /roots/<name> for cross-project inspection.

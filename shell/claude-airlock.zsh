@@ -104,15 +104,19 @@ claude() {
   # lives — otherwise host Claude writes to bare /tmp and the box can't see it.
   # AIRLOCK_TMP_BASE mirrors the launcher's own default (per user); both read it from the
   # environment so an override cannot make the two sides disagree.
-  local tmpdef="/tmp/airlock-$(id -un)"
-  export AIRLOCK_TMP="${AIRLOCK_TMP_BASE:-$tmpdef}/$slug"
-  # The default base must be ours alone, as the launcher requires: anyone can make it first
-  # in a shared /tmp.
-  if [[ -z "${AIRLOCK_TMP_BASE:-}" ]]; then
+  local tmpdef="/tmp/airlock-$(id -un 2>/dev/null || id -u)" tbase tmode
+  tbase="${AIRLOCK_TMP_BASE:-$tmpdef}"
+  export AIRLOCK_TMP="$tbase/$slug"
+  # The default base must be ours alone, by the launcher's rule (not a symlink, ours, no group
+  # or other bits): anyone can make it first in a shared /tmp.
+  if [[ "$tbase" == "$tmpdef" ]]; then
     mkdir -m 0700 "$tmpdef" 2>/dev/null
-    if [[ -L "$tmpdef" || ! -d "$tmpdef" || ! -O "$tmpdef" || "$(stat -c %a "$tmpdef")" != 700 ]]; then
+    tmode="$(stat -c %a "$tmpdef" 2>/dev/null)"
+    if [[ -L "$tmpdef" || ! -d "$tmpdef" || "$(stat -c %u "$tmpdef" 2>/dev/null)" != "$(id -u)" \
+          || "$tmode" != <-> ]] || (( 8#$tmode & 8#077 )); then
       print -u2 "claude: $tmpdef is not yours alone (a symlink, another owner, or open to others)."
-      print -u2 "  Someone else may have made it to read or swap your scratch: remove it."
+      print -u2 "  Someone else may have made it to read or swap your scratch. Only its owner or root"
+      print -u2 "  can remove it from /tmp: ask root to, or set AIRLOCK_TMP_BASE to a directory of your own."
       return 1
     fi
   fi

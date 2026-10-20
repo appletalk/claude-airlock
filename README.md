@@ -556,9 +556,13 @@ on where scratch lives.
 - **Per-user base.** `/tmp/airlock-<user>` (`0700`), so two accounts on one host (you and an
   agent's own user, say) never share it. Anyone can create a name in a shared `/tmp` first,
   so the launcher and the `claude` wrapper refuse a default base that is a symlink, someone
-  else's, or open to others. `AIRLOCK_TMP_BASE` (environment only) moves it. After an
-  upgrade from `/tmp/airlock`, re-source the wrapper in open terminals (or open new ones),
-  or host and box name different scratch dirs until then.
+  else's, or open to others (only root can then remove it; `AIRLOCK_TMP_BASE` works around
+  it). Once made it is never removed, so no one gets a second chance at the name.
+  `AIRLOCK_TMP_BASE` (environment only) moves it.
+- **Upgrading from `/tmp/airlock`.** Re-source the wrapper in open terminals (or open new
+  ones), and let running boxes exit: until then old and new sessions name different scratch
+  dirs. What is in `/tmp/airlock/<slug>` (caches, pastes) is not moved; copy what you need
+  into the new dir, and remove `/tmp/airlock` when no session uses it (or let a reboot).
 - **An inter-session cache, not durable storage.** It lives on the host's `tmpfs`: it
   survives sessions but is cleared on reboot, so it never becomes an unmanaged junk
   drawer. Anything that must truly persist belongs in the project (gitignored if it
@@ -621,12 +625,19 @@ never *here is an older image you are about to mistake for the new one*.
 pastes from someone else (an agent with a Unix user of its own: you paste, it reads), set
 `AIRLOCK_PASTE_DIR` in that account's host config to a directory the other user writes. Every
 box mounts it **read-only** at the same path, and the box finds pastes at `$AIRLOCK_PASTES`
-(otherwise `$AIRLOCK_TMP/pastes`). `airlock paste` writes there instead of a project's
-scratch, for every project, if you can write it (`--project` does not apply). The directory
-must be named by its real path, and its owner (or root) must own every directory from `/`
-down to it with none of them group/world-writable (so not under `/tmp`); it may not be your
-home, inside the workspace or a protected path, nor hold hard links or mount points. A paste
-dir that fails the check is not mounted (the launch warns and goes on).
+(otherwise `$AIRLOCK_TMP/pastes`; unset if the check failed). The directory must be named by
+its real path and writable only by its owner (the writer), and every directory above it must
+be root's and writable by root alone (so not under `/tmp`): the writer can change what is in
+it, never swap it for a link to somewhere else. It is checked again, and must be the same
+directory, right before the engine starts. It may not be your home, inside the workspace or
+a protected path, nor hold hard links or mount points when checked (what the writer adds
+later is bounded by the kernel: `fs.protected_hardlinks` lets them link only files they own or
+may write, and their FUSE mounts are closed to other users). A paste dir that fails the check
+is not mounted (the launch warns and goes on). Make it setgid with the reader's group
+(`install -d -m 2750 -o <writer> -g <reader's group> DIR`) so new files carry that group.
+The writer pastes with their own tool, or with `airlock paste` and `AIRLOCK_PASTE_DIR` set
+in *their* config, which writes the file group-readable (0640) but also mounts the drop box
+into the writer's own boxes.
 
 ## Running boxes as a dedicated user
 
