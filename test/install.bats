@@ -195,6 +195,7 @@ _install_clone() {
   [ "$(readlink "$(IROOT)/current")" = "versions/$r" ]
   [ -x "$(IROOT)/versions/$r/bin/claude-airlock" ]
   [ "$(readlink "$AIRLOCK_HOME/.local/bin/claude-airlock")" = "$(IROOT)/current/bin/claude-airlock" ]
+  [ "$(readlink "$AIRLOCK_HOME/.local/bin/airlock")" = "$(IROOT)/current/bin/claude-airlock" ]   # the command's name
   grep -qx "commit $r" "$(IROOT)/versions/$r/VERSION"
   [ ! -e "$(IROOT)/versions/$r/.git" ]
   ! readlink -f "$AIRLOCK_HOME/.local/bin/claude-airlock" | grep -q "^$CLONE" || false
@@ -428,6 +429,7 @@ STUB
   grep -q '"$SRC_DIR/scripts/airlock-doctor.sh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
   grep -q 'source "$INSTALL_ROOT/current/shell/claude-airlock.zsh"' "$BATS_TEST_DIRNAME/../bin/install.sh"
   grep -q 'ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"' "$BATS_TEST_DIRNAME/../bin/install.sh"
+  grep -q 'ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/airlock"' "$BATS_TEST_DIRNAME/../bin/install.sh"
 }
 
 # --- dev image layering: Claude Code last (a release must not rebuild the toolchain) ----

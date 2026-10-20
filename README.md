@@ -145,7 +145,8 @@ growing, compacting it is still a Windows-side job.
 `make install` exports the checked-out **commit** (never uncommitted edits) to
 `~/.local/share/claude-airlock/versions/<commit>/`, builds the images from that copy,
 and only when the build succeeds points `~/.local/share/claude-airlock/current` at it.
-`~/.local/bin/claude-airlock` and the shell integration go through `current`, so the
+`~/.local/bin/airlock` (the command; `~/.local/bin/claude-airlock` is the same, kept as a
+second name) and the shell integration go through `current`, so the
 launcher never runs from this working tree: switching branches or editing files here
 changes nothing until the next `make install`, and a failed build leaves the previous
 version live. Local CA certs in `image/certs/` (untracked by design) are copied into each

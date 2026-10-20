@@ -393,7 +393,10 @@ ln -sfn "versions/$REV" "$_cur_tmp"
 mv -Tf "$_cur_tmp" "$INSTALL_ROOT/current"
 _live=1
 echo "==> Live: $INSTALL_ROOT/current -> versions/$REV"
-echo "==> Installing launcher -> $BIN_TARGET/claude-airlock"
+# The command is `airlock`, on PATH for scripts and units too, not only for an interactive
+# shell's alias; `claude-airlock` stays as a second name so nothing that calls it breaks.
+echo "==> Installing launcher -> $BIN_TARGET/airlock (and $BIN_TARGET/claude-airlock)"
+ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/airlock"
 ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
 # Keep the live version and the two most recently activated others.
 find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage.*' ! -name "$REV" \
@@ -409,7 +412,7 @@ for _rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.zshenv" "$HOME/.zprofile"
   [ -f "$_rc" ] || continue
   _old="$(grep -nE '(shell/claude-airlock\.zsh|bin/claude-airlock)' "$_rc" \
     | grep -vE '^[0-9]+:[[:space:]]*#' \
-    | grep -vF -e "$INSTALL_ROOT/current" -e 'claude-airlock/current/' -e '.local/bin/claude-airlock' || true)"
+    | grep -vF -e "$INSTALL_ROOT/current" -e 'claude-airlock/current/' -e '.local/bin/claude-airlock' -e '.local/bin/airlock' || true)"
   if [ -n "$_old" ]; then
     echo "" >&2
     echo "claude-airlock: WARNING: $_rc runs the launcher from somewhere other than the install:" >&2
