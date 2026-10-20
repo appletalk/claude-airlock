@@ -410,3 +410,36 @@ _doctor_out() {
     [[ "$(engine_args)" == *"AIRLOCK_EGRESS_GROUPS="* ]] || { echo "$e: no egress groups passed"; false; }
   done
 }
+
+# An account with no network of its own (an agent's user; boxes only through its proxy): the
+# firewall-posture test can't resolve anything there, which is not a fault. A host with a
+# default route keeps the warnings.
+_doctor_nonet() {  # _doctor_nonet <ip route output>
+  mv "$STUBBIN/$ENGINE" "$STUBBIN/$ENGINE.real"
+  cat > "$STUBBIN/$ENGINE" <<S
+#!/usr/bin/env bash
+if [ "\$1" = run ]; then
+  printf '%s\n' "WARN: could not resolve api.anthropic.com" "OK: example.com blocked (IPv4)" "WARN: api.anthropic.com unreachable — Claude may not work"
+  exit 0
+fi
+exec "$STUBBIN/$ENGINE.real" "\$@"
+S
+  printf '#!/bin/sh\nprintf "%%s" "%s"\n' "$1" > "$STUBBIN/ip"
+  chmod +x "$STUBBIN/$ENGINE" "$STUBBIN/ip"
+  sock="$BATS_TEST_TMPDIR/p.sock"
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock"
+  run _doctor_out "$ENGINE" AIRLOCK_EGRESS_MODE=proxy AIRLOCK_EGRESS_PROXY="$sock"
+}
+
+@test "doctor, proxy default with no network of its own: reachability warnings become one note; blocking still shown" {
+  _doctor_nonet ""
+  [[ "$output" == *"example.com blocked (IPv4)"* ]]
+  [[ "$output" == *"no network of its own"* ]]
+  [[ "$output" != *"could not resolve api.anthropic.com"* && "$output" != *"Claude may not work"* ]]
+}
+
+@test "doctor, proxy default on a host with a default route: the warnings stay" {
+  _doctor_nonet "default via 192.0.2.1 dev eth0"
+  [[ "$output" == *"could not resolve api.anthropic.com"* && "$output" == *"Claude may not work"* ]]
+  [[ "$output" != *"no network of its own"* ]]
+}
