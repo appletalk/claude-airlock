@@ -372,11 +372,8 @@ else
   echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
 fi
 
-# Which images this version is (a bundle carries the list), and, for an account that only
-# loads bundles, the ones it replaces.
+# Which images this version is (a bundle carries the list).
 for _t in base os dev; do printf '%s %s\n' "$_t" "$(_id "claude-airlock:$_t-$REV")"; done > "$DEST/IMAGES"
-_old_ids=""
-[ -z "$FROM_BUNDLE" ] || _old_ids="$(_id claude-airlock:base) $(_id claude-airlock:os) $(_id claude-airlock:dev)"
 
 # Both images built: make this version live. The image tags and `current` move together;
 # `current` flips in one rename (a unique temp name, so concurrent installs cannot trip over
@@ -451,22 +448,32 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:dev "$SRC_DIR
   exit 1
 fi
 
-# Images no tag needs any more, only now that this version passed both checks (until then
-# the ones it replaced stay, for a way back). An account that loads bundles keeps one
-# version: the images it replaced go, and any earlier ones a running box kept are collected
-# once that box is gone (a reader builds nothing, so no build cache is lost). A build keeps a
-# week of its own untagged layers, the cache a rebuild in the same week reuses, and drops
-# older ones. Only claude-airlock's images (the label is on every one) and the unlabelled
-# parents only they use (an older Debian base, say) go.
-if [ -n "$FROM_BUNDLE" ]; then
-  _new_ids=" $(cut -d' ' -f2 "$DEST/IMAGES" | tr '\n' ' ')"
-  for _o in $_old_ids; do
-    case "$_new_ids" in *" $_o "*) continue ;; esac   # the live images, when only the launcher changed
-    "$AIRLOCK_ENGINE" rmi "$_o" >/dev/null 2>&1 || true
-  done
-  "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh >/dev/null 2>&1 || true
+# Images no tag points to any more: what each install's re-tag leaves behind (about 4 GB a
+# rebuild, and the weekly package refresh rebuilds everything), with the layer chain only they
+# used. Removed only now, with this version live and through both checks (until then they
+# are a way back; a failed install leaves them for the next one to collect). Only dangling
+# images carrying claude-airlock's label (image/Dockerfile, os stage, inherited by every
+# image) go: other projects' images stay, dangling or not, and the unlabelled parents (an
+# older Debian base) only once nothing else uses them. The layers under the live tags are not
+# dangling, so they stay and an unchanged rebuild still hits them. One a running box uses
+# stays until the next install. A failure here warns; the install has already succeeded.
+_img_count() { "$AIRLOCK_ENGINE" images -a -q 2>/dev/null | wc -l; }
+_img_bytes() {  # podman only (docker's df gives no raw bytes)
+  [ "$AIRLOCK_ENGINE" = podman ] || return 0
+  podman system df --format json 2>/dev/null | tr -d ' \n' | sed -n 's/.*"Type":"Images"[^}]*"RawSize":\([0-9][0-9]*\).*/\1/p'
+}
+_n0="$(_img_count)" _b0="$(_img_bytes)"
+if "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh >/dev/null 2>&1; then
+  _n1="$(_img_count)" _b1="$(_img_bytes)"
+  if [ "$_n0" -gt "$_n1" ]; then
+    _sz=""
+    if [ -n "$_b0" ] && [ -n "$_b1" ] && [ "$_b0" -gt "$_b1" ]; then
+      _sz=" ($(numfmt --to=si --suffix=B "$((_b0 - _b1))" 2>/dev/null || echo "$((_b0 - _b1)) bytes"))"
+    fi
+    echo "==> Pruned $((_n0 - _n1)) superseded claude-airlock image(s)$_sz"
+  fi
 else
-  "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh --filter until=168h >/dev/null 2>&1 || true
+  echo "    WARNING: could not prune superseded claude-airlock images ($AIRLOCK_ENGINE image prune); the next install tries again" >&2
 fi
 
 # The closing steps, minus the ones already done. Shell integration counts as done when an
