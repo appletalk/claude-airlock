@@ -102,9 +102,20 @@ claude() {
   # Same per-project scratch dir the box gets, at the same path, exported the same way.
   # Sessions are shared host<->box, so both sides must agree on where persistent scratch
   # lives — otherwise host Claude writes to bare /tmp and the box can't see it.
-  # AIRLOCK_TMP_BASE mirrors the launcher's own default; both read it from the
+  # AIRLOCK_TMP_BASE mirrors the launcher's own default (per user); both read it from the
   # environment so an override cannot make the two sides disagree.
-  export AIRLOCK_TMP="${AIRLOCK_TMP_BASE:-/tmp/airlock}/$slug"
+  local tmpdef="/tmp/airlock-$(id -un)"
+  export AIRLOCK_TMP="${AIRLOCK_TMP_BASE:-$tmpdef}/$slug"
+  # The default base must be ours alone, as the launcher requires: anyone can make it first
+  # in a shared /tmp.
+  if [[ -z "${AIRLOCK_TMP_BASE:-}" ]]; then
+    mkdir -m 0700 "$tmpdef" 2>/dev/null
+    if [[ -L "$tmpdef" || ! -d "$tmpdef" || ! -O "$tmpdef" || "$(stat -c %a "$tmpdef")" != 700 ]]; then
+      print -u2 "claude: $tmpdef is not yours alone (a symlink, another owner, or open to others)."
+      print -u2 "  Someone else may have made it to read or swap your scratch: remove it."
+      return 1
+    fi
+  fi
   # This check comes BEFORE the lock is written, and the order is load-bearing: it returns
   # early, ahead of the `always` block that would otherwise clean up, so a lock taken above
   # it survives - recording this interactive shell, which lives for days with a matching
@@ -113,7 +124,7 @@ claude() {
   # session then ran with a scratch path that does not exist.
   if ! mkdir -p "$AIRLOCK_TMP" 2>/dev/null; then
     print -u2 "claude: cannot create the per-project scratch dir $AIRLOCK_TMP"
-    print -u2 "  Check ownership of ${AIRLOCK_TMP_BASE:-/tmp/airlock}."
+    print -u2 "  Check ownership of ${AIRLOCK_TMP_BASE:-$tmpdef}."
     return 1
   fi
   chmod 700 "$AIRLOCK_TMP"

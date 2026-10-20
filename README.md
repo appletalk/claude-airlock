@@ -521,6 +521,7 @@ Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
 `AIRLOCK_EGRESS_PROXY` (the socket for the proxy posture),
 `AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`,
 `AIRLOCK_PROTECTED_PATHS` (extra paths no share or mount may overlap),
+`AIRLOCK_PASTE_PROJECT` or `AIRLOCK_PASTE_DIR` (where pastes go; see `airlock paste`),
 `AIRLOCK_SECRET_DENY` (pass entries never injected) and `AIRLOCK_GIT_RO` (default `1`:
 read-write repos get their git config and hooks bound read-only, see SECURITY.md; `0` turns
 it off).
@@ -544,14 +545,20 @@ The box's `/tmp` is destroyed with the container (`--rm`, including on Ctrl+C) a
 never shared with the host, so anything written there is silently lost between sessions —
 and a host-written `/tmp` file is invisible to the box.
 
-Each project instead gets `/tmp/airlock/<slug>`, bind-mounted into its box at the **same
+Each project instead gets `/tmp/airlock-<user>/<slug>`, bind-mounted into its box at the **same
 path** and exported as `$AIRLOCK_TMP` by *both* the `airlock` launcher and the host
 `claude` wrapper. Host and box therefore name the same file identically (`airlock tmp`
 prints and creates it). Sessions are shared across the boundary, so both sides must agree
 on where scratch lives.
 
 - **Per-project.** Only that project's own directory is mounted (mode `0700`) — never
-  `/tmp/airlock`, never bare `/tmp` — so nothing leaks between projects.
+  the base, never bare `/tmp` — so nothing leaks between projects.
+- **Per-user base.** `/tmp/airlock-<user>` (`0700`), so two accounts on one host (you and an
+  agent's own user, say) never share it. Anyone can create a name in a shared `/tmp` first,
+  so the launcher and the `claude` wrapper refuse a default base that is a symlink, someone
+  else's, or open to others. `AIRLOCK_TMP_BASE` (environment only) moves it. After an
+  upgrade from `/tmp/airlock`, re-source the wrapper in open terminals (or open new ones),
+  or host and box name different scratch dirs until then.
 - **An inter-session cache, not durable storage.** It lives on the host's `tmpfs`: it
   survives sessions but is cleared on reboot, so it never becomes an unmanaged junk
   drawer. Anything that must truly persist belongs in the project (gitignored if it
@@ -609,6 +616,45 @@ file.
 
 **Every failure removes the output file.** A missing paste always means *the grab failed*,
 never *here is an older image you are about to mistake for the new one*.
+
+**A drop box instead: `AIRLOCK_PASTE_DIR`.** For an account that runs boxes but gets its
+pastes from someone else (an agent with a Unix user of its own: you paste, it reads), set
+`AIRLOCK_PASTE_DIR` in that account's host config to a directory the other user writes. Every
+box mounts it **read-only** at the same path, and the box finds pastes at `$AIRLOCK_PASTES`
+(otherwise `$AIRLOCK_TMP/pastes`). `airlock paste` writes there instead of a project's
+scratch, for every project, if you can write it (`--project` does not apply). The directory
+must be named by its real path, and its owner (or root) must own every directory from `/`
+down to it with none of them group/world-writable (so not under `/tmp`); it may not be your
+home, inside the workspace or a protected path, nor hold hard links or mount points. A paste
+dir that fails the check is not mounted (the launch warns and goes on).
+
+## Running boxes as a dedicated user
+
+The box is the inner wall. A Unix account of its own for the agent is an outer one: a
+container or runtime escape then lands as a user who can read none of your files, keys or
+sessions, and the agent's work comes back to you only through what you choose to pull (git
+branches, say). Nothing in the launcher assumes it runs as you:
+
+- **Install per account.** As the agent's user: `bin/install.sh` (its own rootless images,
+  in its own store), its own `~/.config/claude-airlock/config`, its own Claude login. The
+  account needs subuid/subgid ranges (`usermod --add-subuids ... --add-subgids ...`) and a
+  user manager (`loginctl enable-linger <user>`) for rootless Podman. Give it no `sudo`,
+  none of your groups, a locked password, and its home `0700` (and yours).
+- **Scratch is per user.** `/tmp/airlock-<user>`, refused if anyone else made it first (see
+  *Scratch files*). A polyinstantiated `/tmp` for that account is better still.
+- **Egress is per user.** With [airlock-envoy](https://github.com/appletalk/airlock-envoy),
+  give each account its own listeners (`client <listener> <user>`): its sockets are in
+  `/run/airlock-envoy/<user>/`, which no other account may enter, and a credential belongs
+  to one user's listeners only. Point the account's config at its own socket
+  (`AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/<user>/<listener>.sock`); the socket check
+  accepts that path (root-owned directories, a service account's socket).
+- **Pastes through a drop box.** The account has no clipboard of yours; set
+  `AIRLOCK_PASTE_DIR` to a directory you write and it only reads (see *Pasting images*).
+- **Files the other way: git only.** Clone the repos it works on into its own home and have
+  it push branches; you review and merge. Don't share a checkout you later run.
+- **Get to its sessions without its password:** `machinectl shell <user>@.host` (with a
+  polkit rule allowing you exactly that); a terminal multiplexer run in its user manager keeps
+  sessions alive across your logouts.
 
 ## Security model
 
