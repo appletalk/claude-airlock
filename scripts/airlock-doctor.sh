@@ -199,6 +199,16 @@ case "$EGRESS_MODE" in
 esac
 
 hdr "live containment test (throwaway box)"
+# An account with no network of its own (only its proxy sockets: an agent's own user, say)
+# can't resolve or reach anything from a box on the firewall postures. That is the point, not a
+# fault: its boxes run on the proxy. What the test blocks still holds.
+_nonet=0
+case "$EGRESS_MODE" in
+  proxy|"proxy "*)
+    if command -v ip >/dev/null 2>&1 && [ -z "$(ip route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ]; then
+      _nonet=1
+    fi ;;
+esac
 net_args=()
 if [ "$ENGINE" = podman ]; then
   case "$PODMAN_NETWORK" in pasta|pasta:*|'') airlock_podman_probe ;; esac
@@ -228,9 +238,11 @@ if fw_out="$("$ENGINE" run --rm \
   while IFS= read -r line; do
     case "$line" in
       *"OK: "*)   ok   "${line#*OK: }" ;;
+      *"WARN: could not resolve "*|*"WARN: "*" unreachable"*) [ "$_nonet" = 1 ] || warn "${line#*WARN: }" ;;
       *"WARN: "*) warn "${line#*WARN: }" ;;
     esac
   done <<< "$fw_out"
+  [ "$_nonet" = 0 ] || ok "this account has no network of its own (no default route) and boxes use the proxy: the firewall postures' reachability checks don't apply here; what they block still holds"
 else
   bad "the box FAILED its containment check — it is NOT safe to run the agent in it"
   echo

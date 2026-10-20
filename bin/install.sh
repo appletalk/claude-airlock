@@ -22,9 +22,12 @@ CONFIG_DIR="$HOME/.config/claude-airlock"
 # Build with the SAME engine the launcher will run with — images live in the engine's
 # own store, so building under Docker and launching under podman would "lose" them.
 # Honor an existing config so a re-run doesn't silently switch engines.
+# The config the launcher reads: AIRLOCK_CONFIG if set (a config kept elsewhere, say one root
+# owns for an agent's account), else the usual one.
+CONFIG_FILE="${AIRLOCK_CONFIG:-$CONFIG_DIR/config}"
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-}"
-if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_DIR/config" ]; then
-  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_DIR/config" | tr -d '"'\''[:space:]' | tail -1)"
+if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_FILE" ]; then
+  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_FILE" | tr -d '"'\''[:space:]' | tail -1)"
 fi
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
 
@@ -170,7 +173,7 @@ for _m in "$CONFIG_DIR"/state/*/telemetry-on; do
 done
 [ "$_tel" -eq 0 ] || echo "    (running boxes keep it until they restart)" >&2
 
-if [ ! -f "$CONFIG_DIR/config" ]; then
+if [ -z "${AIRLOCK_CONFIG:-}" ] && [ ! -f "$CONFIG_DIR/config" ]; then
   cp "$SRC_DIR/config/config.example" "$CONFIG_DIR/config"
   echo "    wrote default config -> $CONFIG_DIR/config"
 fi
@@ -180,7 +183,7 @@ fi
 # terminal is free, so keying it off $PWD would silently write pastes into a directory
 # the running box never mounts. Ask once, here, rather than failing at first use.
 # Skipped when stdin is not a TTY, so CI and scripted installs stay non-interactive.
-if [ -z "$FROM_BUNDLE" ] && [ -t 0 ] && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
+if [ -z "$FROM_BUNDLE" ] && [ -z "${AIRLOCK_CONFIG:-}" ] && [ -t 0 ] && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
   echo
   echo "==> Which project should 'airlock paste' write clipboard images into?"
   echo "    They land in that project's \$AIRLOCK_TMP/pastes/, where its box can read them."
@@ -494,6 +497,15 @@ for _rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.zshenv" "$HOME/.zprofile"
 done
 _token_file="${AIRLOCK_TOKEN_FILE:-$CONFIG_DIR/token}"
 
+# From a bundle: an account that may have no shell of its own to integrate, and no host Claude
+# to mint a token with (no network). It logs in from a box instead.
+if [ -n "$FROM_BUNDLE" ]; then
+  echo
+  echo "==> Done (from a bundle). Shell integration and the Claude login are this account's own: with no"
+  echo "    network of its own, set AIRLOCK_PERSIST_LOGIN=1 and /login inside a box (README: Running boxes"
+  echo "    as a dedicated user)."
+  exit 0
+fi
 echo
 if [ -z "$_rc_done" ]; then
   cat <<EOF

@@ -665,8 +665,10 @@ branches, say). Nothing in the launcher assumes it runs as you:
 
 - **Install per account.** Each account has its own rootless image store, so each installs
   its own copy: as the agent's user, `bin/install.sh`, or, without giving it build-time
-  network, a bundle you wrote (below). It has its own `~/.config/claude-airlock/config` and
-  its own Claude login. The
+  network, a bundle you wrote (below). It has its own config (`~/.config/claude-airlock/config`,
+  or one root owns, named by `AIRLOCK_CONFIG` in its user manager's environment) and its own
+  Claude login: with no network of its own, `AIRLOCK_PERSIST_LOGIN=1` and `/login` inside a box,
+  through its proxy. The
   account needs subuid/subgid ranges (`usermod --add-subuids ... --add-subgids ...`) and a
   user manager (`loginctl enable-linger <user>`) for rootless Podman. Give it no `sudo`,
   none of your groups, a locked password, and its home `0700` (and yours).
