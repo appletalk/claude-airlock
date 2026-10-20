@@ -61,6 +61,8 @@ writer_install() {
   mkdir -p "$v"
   tar -C "$REPO" --exclude=.git --exclude=.tooling -cf - . | tar -x -C "$v"
   printf 'commit %s\nbranch main\ninstalled now\nfrom test\n' "$rev" > "$v/VERSION"
+  # The bundle's own host checks pass (they need a real engine): the install runs to the end.
+  [ -n "${REAL_CHECKS:-}" ] || pass_checks "$v"
   : > "$v/IMAGES"
   for t in base os dev; do
     printf '%s sha256:%s-%s\n' "$t" "$p" "$t" >> "$v/IMAGES"
@@ -77,9 +79,15 @@ bundle() {  # bundle [--clean]: as the writer
 reader_install() {  # as the reader: the bundle's own install-bundle.sh
   env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$R/home" FE_STATE="$R/fe" AIRLOCK_ENGINE="$ENGINE" \
     ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" ${FE_LOAD_ID:+FE_LOAD_ID="$FE_LOAD_ID"} \
+    ${FAIL_CHECK:+FAIL_CHECK="$FAIL_CHECK"} ${R_ENGINE:+AIRLOCK_ENGINE="$R_ENGINE"} \
     bash "$B/install-bundle.sh" </dev/null
 }
 RROOT() { printf '%s' "$R/home/.local/share/claude-airlock"; }
+pass_checks() {  # pass_checks <tree>: its doctor and image smoke succeed (FAIL_CHECK=doctor|smoke fails one)
+  printf '#!/bin/sh\n[ "${FAIL_CHECK:-}" = doctor ] && exit 1; exit 0\n' > "$1/scripts/airlock-doctor.sh"
+  printf '#!/bin/sh\n[ "${FAIL_CHECK:-}" = smoke ] && exit 1; exit 0\n' > "$1/scripts/image-smoke.sh"
+  chmod +x "$1/scripts/airlock-doctor.sh" "$1/scripts/image-smoke.sh"
+}
 REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
 
 @test "bundle: the installed version's source and images, a manifest naming both, files 0640, no tags left behind" {
@@ -120,7 +128,8 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
 @test "install-bundle: goes live with the bundle's images, loads them, builds and fetches nothing" {
   writer_install "$REV1"; bundle "$B" >/dev/null
   : > "$ENGINE_ARGS_FILE"
-  reader_install >/dev/null 2>&1 || true        # the trailing doctor fails against the fake engine
+  run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(readlink "$(RROOT)/current")" = "versions/$REV1" ]
   grep -qx "from bundle $B" "$(RROOT)/versions/$REV1/VERSION"
   [ "$(awk '$1 == "claude-airlock:dev" { print $2 }' "$R/fe/tags")" = sha256:w1-dev ]
@@ -132,9 +141,12 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
 
 @test "install-bundle: a file that does not match the manifest, or no manifest, installs nothing" {
   writer_install "$REV1"; bundle "$B" >/dev/null
-  printf x >> "$B/images-$REV1.tar"
-  run reader_install
-  [ "$status" -ne 0 ]; [[ "$output" == *"does not match the manifest"* ]]
+  for f in "images-$REV1.tar" "claude-airlock-$REV1.tar" install-bundle.sh; do
+    cp "$B/$f" "$BATS_TEST_TMPDIR/keep"; printf x >> "$B/$f"
+    run env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$R/home" FE_STATE="$R/fe" AIRLOCK_ENGINE="$ENGINE" bash "$REPO/bin/install-bundle.sh" "$B"
+    [ "$status" -ne 0 ] && [[ "$output" == *"$f does not match the manifest"* ]] || { echo "$f: $output"; return 1; }
+    cp "$BATS_TEST_TMPDIR/keep" "$B/$f"
+  done
   [ ! -e "$(RROOT)/current" ]
   rm "$B/MANIFEST"
   run reader_install
@@ -164,10 +176,62 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   reader_install >/dev/null 2>&1 || true
   writer_install "$REV2" w2; bundle "$B" >/dev/null
   : > "$ENGINE_ARGS_FILE"
-  reader_install >/dev/null 2>&1 || true
+  run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(readlink "$(RROOT)/current")" = "versions/$REV2" ]
   [ "$(cut -d' ' -f2 "$R/fe/tags" | sort -u | tr '\n' ' ')" = "sha256:w2-base sha256:w2-dev sha256:w2-os " ]
   engine_args | grep -qx sha256:w1-dev            # removed by id
+  engine_args | grep -qx -- label=org.claude-airlock.apt-refresh   # and leftovers a box kept, collected
+}
+
+@test "install-bundle: the same bundle (or one whose images did not change) twice: the live images stay" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  run reader_install; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  : > "$ENGINE_ARGS_FILE"
+  run reader_install; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cut -d' ' -f2 "$R/fe/tags" | sort -u | tr '\n' ' ')" = "sha256:w1-base sha256:w1-dev sha256:w1-os " ]
+  ! engine_args | grep -qx 'sha256:w1-dev' || false
+}
+
+@test "install-bundle: a failed containment check or smoke test keeps the images it replaced, and says how back" {
+  for c in doctor smoke; do
+    rm -rf "$R" "$W/root"; mkdir -p "$R/home" "$R/fe"; : > "$W/fe/tags"
+    writer_install "$REV1"; bundle "$B" >/dev/null
+    run reader_install; [ "$status" -eq 0 ]
+    writer_install "$REV2" w2; bundle "$B" >/dev/null
+    : > "$ENGINE_ARGS_FILE"
+    FAIL_CHECK=$c run reader_install
+    [ "$status" -ne 0 ] && [[ "$output" == *"ask for a bundle of the previous commit ($REV1)"* ]] || { echo "$c: $output"; return 1; }
+    ! engine_args | grep -qxE 'sha256:w1-(base|os|dev)|label=org.claude-airlock.apt-refresh' || false
+  done
+}
+
+@test "install-bundle: a bundle of the other engine is refused, clearly" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  other=docker; [ "$ENGINE" = docker ] && other=podman
+  cp "$STUBBIN/$ENGINE" "$STUBBIN/$other"
+  R_ENGINE=$other run reader_install
+  [ "$status" -ne 0 ]; [[ "$output" == *"the bundle's images are $ENGINE's and this account uses $other"* ]]
+  [ ! -e "$(RROOT)/current" ]
+}
+
+@test "install-bundle: an os image that is not the base's own os stage is refused" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  sed -i 's/\*os\*) echo "sha256:a sha256:b " ;;/*os*) echo "sha256:x " ;;/' "$STUBBIN/$ENGINE"
+  run reader_install
+  [ "$status" -ne 0 ]; [[ "$output" == *"is not the base image's os stage"* ]]
+  [ ! -e "$(RROOT)/current" ]
+}
+
+@test "bundle waits for an install running in the writer's account (the install lock)" {
+  writer_install "$REV1"
+  ( exec 9>"$W/root/.lock"; flock 9; sleep 2 ) &
+  sleep 0.3
+  run bundle "$B"
+  wait
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"An install is running; waiting"* ]]
+  [ -f "$B/MANIFEST" ]
 }
 
 @test "a build install records its images and prunes only its own week-old untagged ones" {
@@ -175,6 +239,7 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   CLONE="$BATS_TEST_TMPDIR/clone"
   git clone -q "$REPO" "$CLONE"
   tar -C "$REPO" --exclude=.git --exclude=.tooling --exclude='image/certs/*.crt' -cf - . | tar -x -C "$CLONE"
+  pass_checks "$CLONE"
   git -C "$CLONE" -c user.name=t -c user.email=t@example.com add -A
   git -C "$CLONE" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m t
   env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$W" FE_STATE="$W/fe" AIRLOCK_ENGINE="$ENGINE" \

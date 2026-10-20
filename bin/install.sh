@@ -242,6 +242,12 @@ _id() { "$AIRLOCK_ENGINE" image inspect --format '{{.Id}}' "$1" 2>/dev/null || t
 if [ -n "$FROM_BUNDLE" ]; then
   # A bundle: the images were built by whoever wrote it, from this same commit. Load them
   # under this commit's own tags and require exactly the image IDs its manifest names.
+  _eng="$(awk '$1 == "engine" { print $2; exit }' "$FROM_BUNDLE/MANIFEST")"
+  if [ "$_eng" != "$AIRLOCK_ENGINE" ]; then
+    echo "claude-airlock: the bundle's images are ${_eng:-of an unnamed engine}'s and this account uses $AIRLOCK_ENGINE" >&2
+    echo "  (their image IDs and names differ); ask for a bundle written with $AIRLOCK_ENGINE. Nothing went live." >&2
+    exit 1
+  fi
   _imgs="$FROM_BUNDLE/images-$REV.tar"
   [ -f "$_imgs" ] || { echo "claude-airlock: the bundle has no images-$REV.tar; nothing went live." >&2; exit 1; }
   echo "==> Loading the bundle's images ($(du -h "$_imgs" | cut -f1))"
@@ -394,19 +400,6 @@ find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d ! -name '.stage.*'
     -printf '%T@ %p\n' | sort -rn | tail -n +3 | cut -d' ' -f2- | while IFS= read -r _old; do
   rm -rf -- "$_old"
 done
-# Images no tag needs any more. An account that loads bundles keeps one version: the images
-# it just replaced go (one a running box still uses stays until it is gone). A build keeps a
-# week of its own untagged layers, the cache a rebuild in the same week reuses, and drops
-# older ones of its own (the label is on every claude-airlock image, so nothing else goes).
-if [ -n "$FROM_BUNDLE" ]; then
-  _new_ids=" $(cut -d' ' -f2 "$DEST/IMAGES" | tr '\n' ' ')"
-  for _o in $_old_ids; do
-    case "$_new_ids" in *" $_o "*) continue ;; esac
-    "$AIRLOCK_ENGINE" rmi "$_o" >/dev/null 2>&1 || true
-  done
-else
-  "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh --filter until=168h >/dev/null 2>&1 || true
-fi
 
 # An rc file that still sources the zsh file (or calls the launcher) from this checkout
 # keeps the live launcher in the working tree: its alias beats the ~/.local/bin link.
@@ -425,6 +418,14 @@ for _rc in "$HOME/.zshrc" "$HOME/.zshrc.local" "$HOME/.zshenv" "$HOME/.zprofile"
   fi
 done
 
+_rollback_hint() {
+  if [ -n "$FROM_BUNDLE" ]; then
+    echo "  To roll back, ask for a bundle of the previous commit (${_prev#versions/}); its images are" >&2
+    echo "  kept until an install passes these checks, so loading it again is quick." >&2
+  else
+    echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install" >&2
+  fi
+}
 echo "==> Verifying the host can actually contain a box (airlock doctor)"
 if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DIR/scripts/airlock-doctor.sh"; then
   echo
@@ -433,7 +434,7 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DI
   echo "  prerequisites') or this version (its seccomp profile and image are what ran)." >&2
   if [ -n "$_prev" ] && [ "$_prev" != "versions/$REV" ] && [ -d "$INSTALL_ROOT/$_prev" ] \
       && [ "${_prev#versions/nogit-}" = "$_prev" ]; then
-    echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install" >&2
+    _rollback_hint
   fi
   exit 1
 fi
@@ -445,9 +446,27 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:dev "$SRC_DIR
   echo "  Boxes still start; a tool listed as FAIL will not work inside them." >&2
   if [ -n "$_prev" ] && [ "$_prev" != "versions/$REV" ] && [ -d "$INSTALL_ROOT/$_prev" ] \
       && [ "${_prev#versions/nogit-}" = "$_prev" ]; then
-    echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install" >&2
+    _rollback_hint
   fi
   exit 1
+fi
+
+# Images no tag needs any more, only now that this version passed both checks (until then
+# the ones it replaced stay, for a way back). An account that loads bundles keeps one
+# version: the images it replaced go, and any earlier ones a running box kept are collected
+# once that box is gone (a reader builds nothing, so no build cache is lost). A build keeps a
+# week of its own untagged layers, the cache a rebuild in the same week reuses, and drops
+# older ones. Only claude-airlock's images (the label is on every one) and the unlabelled
+# parents only they use (an older Debian base, say) go.
+if [ -n "$FROM_BUNDLE" ]; then
+  _new_ids=" $(cut -d' ' -f2 "$DEST/IMAGES" | tr '\n' ' ')"
+  for _o in $_old_ids; do
+    case "$_new_ids" in *" $_o "*) continue ;; esac   # the live images, when only the launcher changed
+    "$AIRLOCK_ENGINE" rmi "$_o" >/dev/null 2>&1 || true
+  done
+  "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh >/dev/null 2>&1 || true
+else
+  "$AIRLOCK_ENGINE" image prune -f --filter label=org.claude-airlock.apt-refresh --filter until=168h >/dev/null 2>&1 || true
 fi
 
 # The closing steps, minus the ones already done. Shell integration counts as done when an
