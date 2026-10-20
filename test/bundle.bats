@@ -42,7 +42,9 @@ case "$1" in
         [[ "$*" == *"label=org.claude-airlock.apt-refresh"* ]] || exit 0
         while read -r id lab; do
           [ "$lab" = L ] && ! tagged "$id" && [ "$id" != "${FE_INUSE:-}" ] && drop_image "$id"
-        done < <(cat "$im") ;;
+        done < <(cat "$im")
+        # podman stops at an in-use parent after removing the rest: exit 125 then.
+        [ -z "${FE_PRUNE_PARTIAL:-}" ] || exit 125 ;;
     esac ;;
   images) cut -d' ' -f1 "$im" ;;
   build) shift; t=""; while [ $# -gt 0 ]; do [ "$1" = -t ] && t="$2"; shift; done
@@ -202,7 +204,7 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   [ "$(readlink "$(RROOT)/current")" = "versions/$REV2" ]
   [ "$(cut -d' ' -f2 "$R/fe/tags" | sort -u | tr '\n' ' ')" = "sha256:w2-base sha256:w2-dev sha256:w2-os " ]
   [ "$(cut -d' ' -f1 "$R/fe/images" | sort | tr '\n' ' ')" = "sha256:w2-base sha256:w2-dev sha256:w2-os " ]
-  [[ "$output" == *"Pruned 3 superseded claude-airlock image(s)"* ]]
+  [[ "$output" == *"Pruned superseded claude-airlock images: 3 images and layers"* ]]
 }
 
 @test "install-bundle: the same bundle (or one whose images did not change) twice: the live images stay" {
@@ -269,7 +271,7 @@ gitb() { git -C "$CLONE" -c user.name=t -c user.email=t@example.com "$@"; }
 build_install() {
   env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$W" FE_STATE="$W/fe" AIRLOCK_ENGINE="$ENGINE" \
     CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" ${FE_INUSE:+FE_INUSE="$FE_INUSE"} \
-    ${FE_PRUNE_FAIL:+FE_PRUNE_FAIL=1} ${FE_BUILD_FAIL:+FE_BUILD_FAIL="$FE_BUILD_FAIL"} \
+    ${FE_PRUNE_FAIL:+FE_PRUNE_FAIL=1} ${FE_PRUNE_PARTIAL:+FE_PRUNE_PARTIAL=1} ${FE_BUILD_FAIL:+FE_BUILD_FAIL="$FE_BUILD_FAIL"} \
     bash "$CLONE/bin/install.sh" </dev/null
 }
 live_ids() { awk '$1 ~ /^claude-airlock:(base|os|dev)$/ { print $2 }' "$W/fe/tags" | sort | tr '\n' ' '; }
@@ -287,7 +289,7 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
   gitb commit -q --allow-empty -m t2
   : > "$ENGINE_ARGS_FILE"
   run build_install; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"==> Pruned 3 superseded claude-airlock image(s)"* ]]
+  [[ "$output" == *"==> Pruned superseded claude-airlock images: 3 images and layers"* ]]
   [ "$(all_ids)" = "$(printf '%s\n' $(live_ids) sha256:someone-elses | sort | tr '\n' ' ')" ]
   engine_args | grep -qx -- label=org.claude-airlock.apt-refresh
   ! engine_args | grep -qxE -- '--all|until=.*' || false     # dangling only, no age window
@@ -299,11 +301,21 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
   held="$(awk '$1 == "claude-airlock:dev" { print $2 }' "$W/fe/tags")"
   gitb commit -q --allow-empty -m t2
   FE_INUSE="$held" run build_install; [ "$status" -eq 0 ]
-  [[ "$output" == *"Pruned 2 superseded"* ]]
+  [[ "$output" == *"Pruned superseded claude-airlock images: 2 images and layers"* ]]
   grep -q "^$held " "$W/fe/images"
   gitb commit -q --allow-empty -m t3
   run build_install; [ "$status" -eq 0 ]
   ! grep -q "^$held " "$W/fe/images" || false
+}
+
+@test "a prune that stops at an image in use after removing the rest: what it freed is reported, no warning" {
+  build_clone
+  build_install >/dev/null 2>&1
+  gitb commit -q --allow-empty -m t2
+  FE_PRUNE_PARTIAL=1 run build_install
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Pruned superseded claude-airlock images: 3 images and layers; some are in use by a box"* ]]
+  [[ "$output" != *"WARNING: could not prune"* ]]
 }
 
 @test "a prune that fails warns and the install still succeeds" {
