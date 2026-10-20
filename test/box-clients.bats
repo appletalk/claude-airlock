@@ -46,6 +46,7 @@ if [ "\${1:-}" = run ]; then
     case "\$a" in
       *:/home/dev/.gitconfig:rw) cp "\${a%%:*}" "$SNAP/gitconfig"; echo "\${a%%:*}" > "$SNAP/gitconfig.src" ;;
       *:/etc/airlock-box/gh:ro) cp -r "\${a%%:*}" "$SNAP/gh"; echo "\${a%%:*}" > "$SNAP/gh.src" ;;
+      *:/etc/airlock-box/tea:ro) cp -r "\${a%%:*}" "$SNAP/tea"; echo "\${a%%:*}" > "$SNAP/tea.src" ;;
     esac
   done
 fi
@@ -81,6 +82,7 @@ no_clients() {
   refute arg_matches '^GH_TOKEN='
   refute arg_matches '^GH_CONFIG_DIR='
   refute arg_matches 'airlock-box/gh'
+  refute arg_matches 'airlock-box/tea'
 }
 
 @test "no manifest: the box's git and gh are left alone" {
@@ -320,4 +322,42 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   chmod 755 "$SD"
   sed -i "\\# $SD\$#d" "$FAKE_OWNERS"; owns 1000 "$SD"
   [[ "$(check)" == *"it and its directory must be root's"* ]]
+}
+
+@test "a Forgejo host (forgejo rules) with a credential: a box tea login and its git remotes on the ssh port" {
+  host_config 'AIRLOCK_GIT_SSH_PORTS=2222'
+  manifest 'git.example.org 443 forgejo yes\nmetrics.example.org 443 victoria-metrics no\n'
+  run _launch "$P"
+  launched
+  arg_matches '/box-config\.[0-9]*\.[0-9]*/tea:/etc/airlock-box/tea:ro$'
+  [ "$(box_url ssh://git@git.example.org:2222/o/r.git)" = http://git.example.org/o/r.git ]
+  [ "$(box_url git@git.example.org:o/r.git)" = http://git.example.org/o/r.git ]
+  grep -qx '  url: http://git.example.org' "$SNAP/tea/config.yml"
+  grep -qx '  token: airlock-proxy-adds-the-credential' "$SNAP/tea/config.yml"
+  grep -qx '  ssh_host: git.example.org' "$SNAP/tea/config.yml"
+  grep -qx '  default: true' "$SNAP/tea/config.yml"
+  refute arg_matches 'airlock-box/gh'               # no api.github.com: no gh
+  # tea itself reads it that way (and matches an ssh remote on 2222 to it).
+  if command -v tea >/dev/null; then
+    mkdir -p "$BATS_TEST_TMPDIR/xdg/tea" && cp "$SNAP/tea/config.yml" "$BATS_TEST_TMPDIR/xdg/tea/"
+    out="$(XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg" HOME="$BATS_TEST_TMPDIR" tea login list)"
+    [[ "$out" == *"http://git.example.org"* ]]
+  fi
+}
+
+@test "two Forgejo hosts: one login each, only the first default" {
+  manifest 'a.example.org 443 forgejo yes\nb.example.org 443 forgejo yes\n'
+  _launch "$P" >/dev/null 2>&1 || true
+  [ "$(grep -c '^- name: ' "$SNAP/tea/config.yml")" = 2 ]
+  [ "$(grep -c '  default: true' "$SNAP/tea/config.yml")" = 1 ]
+  grep -A2 '^- name: a.example.org' "$SNAP/tea/config.yml" | grep -q 'url: http://a.example.org'
+}
+
+@test "a Forgejo host without a credential: no tea login (said), git still rewritten" {
+  manifest 'git.example.org 443 forgejo no\n'
+  run _launch "$P"
+  launched
+  [[ "$output" == *"no credential for git.example.org, so tea is not set up"* ]]
+  refute arg_matches 'airlock-box/tea'
+  [ "$(box_url git@git.example.org:o/r.git)" = http://git.example.org/o/r.git ]
 }
