@@ -8,5 +8,6 @@
   "statusLine": {
     "type": "command",
     "command": "bash /etc/airlock/statusline.sh"
-  }
+  },
+  "crossSessionInbound": "refuse"
 }

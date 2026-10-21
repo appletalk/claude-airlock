@@ -269,6 +269,12 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
   grep -q '^COPY managed-settings.json /etc/claude-code/managed-settings.json$' "$BATS_TEST_DIRNAME/../image/Dockerfile"
 }
 
+# Claude Code's cross-session messaging rides Remote Control between machines, so a box
+# session on one account could be steered by any other session on it (and the other way).
+@test "the image's managed settings refuse messages from other Claude sessions" {
+  [ "$(jq -r '.crossSessionInbound' "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = refuse ]
+}
+
 # The box can write its settings.json. Valid JSON that is not an object used to make every
 # filter fail silently, leaving the baseline and the telemetry keys out.
 @test "a non-object settings.json is reset and telemetry asserted" {

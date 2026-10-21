@@ -208,7 +208,10 @@ so it survives restarts with no extra plumbing.
 **Telemetry** and error reporting are **always off in every box**, and there is no way to
 turn them on: a sandbox has no need to phone home. What holds against the box is Claude
 Code's managed settings, `/etc/claude-code/managed-settings.json`, which also keep the
-auto-updater and claude.ai connectors off. The launcher mounts the file read-only from the
+auto-updater and claude.ai connectors off, and refuse messages from your other Claude sessions
+(`crossSessionInbound`: cross-session messaging reaches across machines over Remote Control, so
+any session on the account could otherwise steer a box; driving the box yourself from the app
+over Remote Control is unaffected). The launcher mounts the file read-only from the
 install into every box (the image carries a copy too), and Claude applies it after every
 settings file the box can write (its `~/.claude`, or the workspace's `.claude/`). An empty
 read-only directory covers `managed-settings.d`, so no drop-in shipped in an image can
