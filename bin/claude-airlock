@@ -733,6 +733,7 @@ _airlock_kind() {   # what a path is, for the message below
   if [ -L "$1" ]; then echo "a symlink"
   elif [ -d "$1" ]; then echo "a folder"
   elif [ -p "$1" ]; then echo "a FIFO"
+  elif [ -f "$1" ]; then echo "a regular file"
   elif [ -e "$1" ]; then echo "not a regular file"
   else echo "missing"; fi
 }
@@ -742,11 +743,16 @@ _airlock_planted() {   # $1 = path, $2 = what it is, $3 = what it should be
   echo "  it, then launch again." >&2
 }
 _airlock_place() {   # $1 = private temp file, $2 = destination in a box-writable folder
+  local err
   if [ -d "$2" ] && [ ! -L "$2" ]; then
     rm -f "$1"; _airlock_planted "$2" "a folder" "a regular file"; exit 1
   fi
-  if ! mv -fT -- "$1" "$2"; then
-    rm -f "$1"; _airlock_planted "$2" "$(_airlock_kind "$2")" "a regular file"; exit 1
+  # -T is load-bearing: plain `mv` onto a link to a folder moves the file INTO that folder.
+  if ! err="$(mv -fT -- "$1" "$2" 2>&1)"; then
+    rm -f "$1"
+    if [ -d "$2" ] && [ ! -L "$2" ]; then _airlock_planted "$2" "a folder" "a regular file"
+    else echo "claude-airlock: could not place $2: ${err:-mv failed}; not launching" >&2; fi
+    exit 1
   fi
 }
 # The paste drop box (AIRLOCK_PASTE_DIR): canonical path on stdout if it may be mounted
@@ -1282,7 +1288,17 @@ if [ "${1:-}" = "paste" ]; then
     if [ -L "$_pdir" ] || [ ! -d "$_pdir" ]; then
       _airlock_planted "$_pdir" "$(_airlock_kind "$_pdir")" "a folder"; exit 1
     fi
+    _pexpect="$(cd -P -- "$AIRLOCK_TMP_BASE" && pwd -P)/$_pslug/pastes"
+  else
+    _pexpect="$_pdir"   # canonical already (_airlock_paste_dir_check)
   fi
+  # Work INSIDE the checked folder from here on, by relative names only: the box can swap
+  # the name `pastes` for a link at any moment (the clipboard read and the conversion sit in
+  # that window), but this shell's working directory stays the folder that was checked. Its
+  # real path and owner are checked once more after entering it.
+  cd -P -- "$_pdir" 2>/dev/null && [ "$(pwd -P)" = "$_pexpect" ] && [ "$(stat -c %u .)" = "$(id -u)" ] \
+    || { echo "claude-airlock: $_pdir changed while it was being checked (was this planted?); not pasting" >&2; exit 1; }
+  _pdisp="$_pexpect"
 
   # Collect only files this tool created: `YYYYMMDD-HHMMSSmmm.png`, one fixed shape, so
   # the shell's lexical glob order IS chronological order (no `ls -t`/SC2012, no GNU-only
@@ -1292,12 +1308,12 @@ if [ "${1:-}" = "paste" ]; then
   _collect_pastes() {
     _pfiles=()
     local f b
-    for f in "$_pdir"/*.png; do
+    for f in ./*.png; do
       [ -e "$f" ] || continue
       b="${f##*/}"
       case "$b" in
         [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].png)
-          _pfiles+=("$f") ;;
+          _pfiles+=("$b") ;;
       esac
     done
   }
@@ -1307,7 +1323,7 @@ if [ "${1:-}" = "paste" ]; then
     [ "${#_pfiles[@]}" -gt 0 ] || exit 0
     _pcount=${#_pfiles[@]}
     _pstart=$(( _pcount > _pn ? _pcount - _pn : 0 ))
-    for (( _pj=_pcount-1; _pj>=_pstart; _pj-- )); do printf '%s\n' "${_pfiles[_pj]}"; done
+    for (( _pj=_pcount-1; _pj>=_pstart; _pj-- )); do printf '%s\n' "$_pdisp/${_pfiles[_pj]}"; done
     exit 0
   fi
 
@@ -1345,16 +1361,18 @@ if [ "${1:-}" = "paste" ]; then
   # Work file has no .png suffix, so the *.png glob (list, retention) cannot see a
   # half-written paste. The finished image is moved into place at the very end.
   _ptmp="$(mktemp "${TMPDIR:-/tmp}/airlock-paste.XXXXXX")" || exit 1
+  _pwork=""
+  trap 'rm -f -- "$_ptmp" ${_pwork:+"$_pwork"}' EXIT INT TERM HUP
   # The work file is never a name in the box-writable pastes dir: the box could plant a link
   # at a guessable name there and have the converter write through it (pentest O22). In the
   # project mode it goes in the private scratch base (same filesystem, not mounted into any
   # box) and is renamed in; a drop box (AIRLOCK_PASTE_DIR) no box can write, so mktemp there.
+  # (So the project mode needs the scratch base writable, which the default base always is.)
   if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then
-    _pwork="$(mktemp --suffix=.work "$_pdir/.paste.XXXXXX")" || exit 1
+    _pwork="$(mktemp --suffix=.work "$PWD/.paste.XXXXXX")" || exit 1
   else
     _pwork="$(mktemp --suffix=.work "$AIRLOCK_TMP_BASE/.paste.XXXXXX")" || exit 1
   fi
-  trap 'rm -f "$_ptmp" "$_pwork"' EXIT INT TERM HUP
 
   # `|| true` is load-bearing under `set -e`: an assignment takes the substitution's
   # exit status, so a failing wl-paste/xclip would kill the script HERE, silently,
@@ -1377,7 +1395,7 @@ if [ "${1:-}" = "paste" ]; then
   # two pastes in one second would be listed backwards.
   _pout=""
   for _pi in 1 2 3 4 5; do
-    _pcand="$_pdir/$(date +%Y%m%d-%H%M%S%3N).png"
+    _pcand="$(date +%Y%m%d-%H%M%S%3N).png"
     if [ ! -e "$_pcand" ]; then _pout="$_pcand"; break; fi
   done
   [ -n "$_pout" ] || { echo "claude-airlock: could not find a free filename in $_pdir." >&2; exit 1; }
@@ -1413,7 +1431,7 @@ Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pwork" || _pfail "
   # would keep it out.
   [ -z "${AIRLOCK_PASTE_DIR:-}" ] || chmod 0640 "$_pwork" || _pfail "could not make the paste group-readable"
   # Atomic publish: same filesystem, so nothing ever observes a partial *.png.
-  mv -fT -- "$_pwork" "$_pout" || _pfail "could not move the image into $_pdir"
+  mv -fT -- "$_pwork" "./$_pout" || _pfail "could not move the image into $_pdir"
 
   # Retain the newest 20. EXCLUDES the file just written - it is not always the
   # lexically-last entry (a clock moved backwards, or hand-copied files whose names
@@ -1424,7 +1442,7 @@ Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pwork" || _pfail "
     [ "$_pf" = "$_pout" ] || _pkeep+=("$_pf")
   done
   if [ "${#_pkeep[@]}" -gt 19 ]; then
-    rm -f "${_pkeep[@]:0:$(( ${#_pkeep[@]} - 19 ))}"
+    rm -f -- "${_pkeep[@]:0:$(( ${#_pkeep[@]} - 19 ))}"
   fi
 
   # Redirect the clipboard writer's stdout: xclip -i and wl-copy fork a selection
@@ -1432,14 +1450,14 @@ Image.open(sys.argv[1]).save(sys.argv[2], "PNG")' "$_ptmp" "$_pwork" || _pfail "
   # `out=$(airlock paste --copy)` indefinitely.
   if [ "$_pcopy" = 1 ]; then
     case "$_pclip" in
-      wayland) command -v wl-copy >/dev/null 2>&1 && printf '%s' "$_pout" | wl-copy >/dev/null 2>&1 \
+      wayland) command -v wl-copy >/dev/null 2>&1 && printf '%s' "$_pdisp/$_pout" | wl-copy >/dev/null 2>&1 \
                  || echo "claude-airlock: --copy needs wl-copy (wl-clipboard); path printed only." >&2 ;;
-      x11)     printf '%s' "$_pout" | xclip -selection clipboard -i >/dev/null 2>&1 \
+      x11)     printf '%s' "$_pdisp/$_pout" | xclip -selection clipboard -i >/dev/null 2>&1 \
                  || echo "claude-airlock: --copy failed; path printed only." >&2 ;;
     esac
   fi
 
-  printf '%s\n' "$_pout"
+  printf '%s\n' "$_pdisp/$_pout"
   exit 0
 fi
 
@@ -2037,8 +2055,16 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
     _airlock_planted "$_bs" "a folder" "a regular file"; exit 1
   fi
   _bsd="$(mktemp -d "$STATE_DIR/.write.$$.XXXXXX")"
+  # Race-only defences, kept although no static test can see them: the -L precheck and
+  # `cp -P` (a link swapped in after the test is copied as a link and rejected below) and
+  # the timeout (a FIFO swapped in by a sibling box would block cp forever).
   if [ -f "$_bs" ] && [ ! -L "$_bs" ]; then
     timeout 10 cp -P -- "$_bs" "$_bsd/in" 2>/dev/null || true
+    if [ -L "$_bsd/in" ] || [ ! -f "$_bsd/in" ] || [ "$(stat -c %s "$_bsd/in")" -gt 1048576 ]; then
+      echo "airlock: WARNING: could not read the box's own $_bs (changed while copied, too slow, or over 1 MiB); it starts from the airlock baseline" >&2
+    fi
+  elif [ -e "$_bs" ] || [ -L "$_bs" ]; then
+    echo "airlock: WARNING: $_bs was $(_airlock_kind "$_bs"), not a regular file (was this planted?); replaced with the airlock baseline" >&2
   fi
   if [ -L "$_bsd/in" ] || [ ! -f "$_bsd/in" ] || [ "$(stat -c %s "$_bsd/in")" -gt 1048576 ] \
      || ! jq -e 'type == "object"' "$_bsd/in" >/dev/null 2>&1; then
@@ -2438,7 +2464,13 @@ _git_guard_path() {
   # Outside every root, also once symlinks are followed: nothing the box can write.
   _git_root_of "$p" || _git_root_of "$(realpath -m -- "$p")" || return 0
   if [ ! -e "$p" ] && [ ! -L "$p" ]; then
-    if [ "$3" = dir ]; then mkdir -p -- "$p" || return 1; else { mkdir -p -- "$(dirname -- "$p")" && : > "$p"; } || return 1; fi
+    # Created inside a read-write root, so the box decides what its parents are: a parent
+    # that is a symlink would make mkdir create (and `: >` truncate) outside it. Refuse
+    # unless the path resolves to itself; create the file with O_EXCL (noclobber).
+    if [ "$(realpath -m -- "$p")" != "$p" ]; then
+      echo "$p goes through a symlink (the box could have put it there); not creating it" >&2; return 1
+    fi
+    if [ "$3" = dir ]; then mkdir -p -- "$p" || return 1; else { mkdir -p -- "$(dirname -- "$p")" && ( set -C; : > "$p" ); } || return 1; fi
   fi
   _git_bind "$p" ro
 }
@@ -2461,7 +2493,7 @@ _git_guard_config() {
 _git_wtcfg=0   # extensions.worktreeConfig of the repo being guarded
 _git_guard_wtconfig() {   # config.worktree $1 for worktree $2, when the extension is on
   [ "$_git_wtcfg" = true ] || return 0
-  if [ ! -e "$1" ] && [ ! -L "$1" ]; then : > "$1" || return 1; fi
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then ( set -C; : > "$1" ) || return 1; fi
   _git_guard_config "$1" "$2"
 }
 _git_pointer_target() {   # the gitdir a .git pointer file $1 names, canonical-ish (no symlinks resolved)
@@ -2500,7 +2532,7 @@ _git_guard_common() {
   if [ -e "$c/commondir" ] || [ -L "$c/commondir" ]; then
     [ -f "$c/commondir" ] && [ ! -L "$c/commondir" ] && [ "$(cat -- "$c/commondir")" = . ] \
       || { echo "$c/commondir points git somewhere else" >&2; return 1; }
-  else printf '.\n' > "$c/commondir" || return 1; fi
+  else ( set -C; printf '.\n' > "$c/commondir" ) || return 1; fi
   _git_bind "$c/commondir" ro || return 1
   _git_wtcfg="$(_git_cfg --file "$c/config" --bool --get extensions.worktreeConfig)" || return 1
   _git_guard_config "$c/config" "$wt" || return 1

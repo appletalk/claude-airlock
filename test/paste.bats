@@ -608,3 +608,14 @@ _plant_paste_work() { mkdir -p "$(pastes_dir "$P")"; ln -s "$VICTIM" "$(pastes_d
   [[ "$output" == *"was this planted?"* ]]
   [ -z "$(ls -A "$elsewhere")" ]
 }
+
+@test "a scratch dir that is a link is refused (P7)" {
+  P="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$P" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  elsewhere="$BATS_TEST_TMPDIR/elsewhere2"; mkdir -p "$elsewhere" "$TMP_BASE"; chmod 700 "$TMP_BASE"
+  ln -s "$elsewhere" "$TMP_BASE/$(_slug "$P")"
+  run _paste "$P"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"is not a folder of yours"* ]]
+  [ -z "$(ls -A "$elsewhere")" ]
+}
