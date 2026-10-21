@@ -4,5 +4,9 @@
     "DISABLE_ERROR_REPORTING": "1",
     "DISABLE_AUTOUPDATER": "1",
     "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash /etc/airlock/statusline.sh"
   }
 }

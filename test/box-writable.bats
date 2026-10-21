@@ -31,7 +31,7 @@ _plant_tmp_links() {
   _launch_planted _plant_tmp_links "$P" >/dev/null 2>&1 || true
   [ "$(cat "$VICTIM")" = VICTIM-UNCHANGED ]
   # the launch still produced the box's files, as regular files
-  for n in settings.json CLAUDE.md airlock-statusline.sh; do
+  for n in settings.json CLAUDE.md; do
     [ -f "$(dc "$P")/$n" ] && [ ! -L "$(dc "$P")/$n" ] || { echo "$n not a regular file"; false; }
   done
   jq -e '.env.DISABLE_TELEMETRY == "1"' "$(dc "$P")/settings.json" >/dev/null
@@ -104,7 +104,7 @@ _log_mv_cp() {
   # every mv into dot-claude/ comes from the private .write.* dir and names the final file
   grep -E "^mv .* $d/" "$BATS_TEST_TMPDIR/mvcp.log" | while read -r _ _ _ src dst; do
     case "$src" in "$sd"/.write.*) ;; *) echo "mv from $src"; exit 1 ;; esac
-    case "${dst##*/}" in settings.json|CLAUDE.md|airlock-statusline.sh) ;; *) echo "mv to $dst"; exit 1 ;; esac
+    case "${dst##*/}" in settings.json|CLAUDE.md) ;; *) echo "mv to $dst"; exit 1 ;; esac
   done
 }
 
@@ -164,4 +164,14 @@ EOF
   run _launch "$P"
   [ "$status" -ne 0 ]
   [ "$(cat "$VICTIM")" = VICTIM-UNCHANGED ]
+}
+
+@test "the box's status line is the installed script, read-only, run through managed settings" {
+  P="$(mkproj sl)"
+  _launch "$P" >/dev/null 2>&1 || true
+  grep -qE '/config/airlock-statusline\.sh:/etc/airlock/statusline\.sh:ro$' "$ENGINE_ARGS_FILE"
+  [ "$(jq -r .statusLine.command "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = "bash /etc/airlock/statusline.sh" ]
+  [ "$(jq 'has("statusLine")' "$BATS_TEST_DIRNAME/../config/box-settings.json")" = false ]
+  [ ! -e "$(dc "$P")/airlock-statusline.sh" ]                 # nothing seeded into the box's ~/.claude
+  jq -e 'has("statusLine") | not' "$(dc "$P")/settings.json" >/dev/null
 }

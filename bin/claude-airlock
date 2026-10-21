@@ -2041,7 +2041,6 @@ _seed() {
   fi
 }
 _seed "$_repo/config/box-CLAUDE.md" "$STATE_DIR/dot-claude/CLAUDE.md"
-_seed "$_repo/config/airlock-statusline.sh" "$STATE_DIR/dot-claude/airlock-statusline.sh"
 
 # Merge the airlock default settings.json baseline (env, attribution, permissions,
 # ...) into the box's settings each launch, so every session shares the same
@@ -2209,6 +2208,10 @@ args=(
   # carried this file. Only this layer holds against the box; the -e flags above and the
   # asserted settings.json are overridden by a workspace .claude/settings.local.json.
   -v "$_repo/image/managed-settings.json:/etc/claude-code/managed-settings.json:ro"
+  # The status line Claude runs (managed `statusLine`), from the installed version and
+  # read-only: a copy in the box-writable ~/.claude could be rewritten by the box mid-session,
+  # and Claude prints its output to the terminal.
+  -v "$_repo/config/airlock-statusline.sh:/etc/airlock/statusline.sh:ro"
   # Drop-ins in managed-settings.d outrank that file, and an image could ship some: cover
   # the directory with an empty read-only one. (An empty bind, not a tmpfs: podman copies
   # the image's files into a tmpfs by default.)
