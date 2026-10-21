@@ -285,8 +285,11 @@ command claude                  raw host Claude (bypasses the airlock guard)
 
 A box asks the engine for a terminal only when the launcher has one (stdin and stdout), so
 `airlock -p` and `airlock exec` run from a script or a service unit; the box's stdout is the
-command's own (the firewall logs to stderr). The launcher's own prompts read its stdin, so a
-run with stdin from `/dev/null` declines them.
+command's own (the firewall logs to stderr). The launcher asks its questions (a share or an
+egress grant the project's config requests, a second session on the project) only of a
+terminal: without one on stdin the answer is no and stdin is left for the command, so piped
+input can't approve anything. An `exec` box runs its command under the engine's init
+(catatonit under podman), so stopping a unit that runs one stops the box.
 
 `airlock doctor` is the one to run after changing engines or rebooting: it checks the
 rootless prerequisites and then makes a real throwaway box prove containment — an allowed

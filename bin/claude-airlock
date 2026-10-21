@@ -516,7 +516,7 @@ _gate_shares() {
         echo "claude-airlock: .airlock/config requests read access to '$_s' — not yet approved." >&2
         printf 'Share %s with the sandbox (read-only)? [y/N] ' "$_abs" >&2
       fi
-      read -r _ans || _ans=""
+      _ans=""; _airlock_answer _ans
       case "$_ans" in
         y|Y|yes|YES) _ok=1; echo "  approved (remembered for this project)." >&2 ;;
         *) echo "  skipped '$_s' — not shared." >&2 ;;
@@ -565,6 +565,13 @@ _airlock_is_host_address() {
   local have
   have="$(ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr 'A-F' 'a-f')"
   [ -n "$have" ] && grep -qxF -- "$ip" <<< "$have"
+}
+
+# A prompt's answer, from a person only: with no terminal on stdin (a script, a service unit,
+# `airlock -p < input`) the answer is no and stdin is left unread, so piped input can never
+# approve a share, an egress grant or a second session, and the command gets all of it.
+_airlock_answer() {  # _airlock_answer VAR
+  if [ -t 0 ]; then read -r "$1" || printf -v "$1" ''; else printf -v "$1" ''; echo "(no terminal: no)" >&2; fi
 }
 
 # `airlock shell` opens an interactive shell in the box instead of Claude — same
@@ -1944,7 +1951,7 @@ if [ -n "${_REQ_EGRESS:-}" ]; then
     else
       echo "claude-airlock: .airlock/config requests egress to '$_dom' — not yet approved." >&2
       printf 'Allow the sandbox to reach %s? [y/N] ' "$_dom" >&2
-      read -r _ans || _ans=""
+      _ans=""; _airlock_answer _ans
       case "$_ans" in
         y|Y|yes|YES)
           printf '%s\n' "$_dom" >> "$_APPROVED"
@@ -2187,7 +2194,7 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
     echo "claude-airlock: another session for this project is already open (pid(s): ${_peers% })." >&2
     echo "Two live sessions on one project can corrupt shared --resume history." >&2
     printf "Open another anyway? [y/N] " >&2
-    read -r ans || ans=""
+    ans=""; _airlock_answer ans
     case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted." >&2; exit 1 ;; esac
   fi
   # Atomic, same reason as the owner file: a plain redirect truncates at open, and a peer
@@ -3014,6 +3021,10 @@ fi
 # A terminal only when there is one: a run from a script or a service unit (`claude -p`,
 # `airlock exec`) has none, and the engine refuses -t then.
 if [ -t 0 ] && [ -t 1 ]; then args+=( -t ); fi
+# An exec'd command is the box's PID 1, where a signal with no handler is ignored: stopping
+# the unit that ran it would wait out its timeout and leave the box running. An init (the
+# engine's own: catatonit under podman, docker-init under docker) passes signals on and reaps.
+[ ${#AIRLOCK_EXEC[@]} -eq 0 ] || args+=( --init )
 
 # --- Network and DNS (shared with the doctor's box: lib/host-dns.sh) ---------------
 # Assembled here, after every prompt and guard, because it asks podman and pasta what
