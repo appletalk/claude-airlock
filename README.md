@@ -783,8 +783,8 @@ make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has instal
   keyrings (`keyctl`, `add_key`, `request_key`) and `memfd_secret` answer ENOSYS; `socket`
   takes only unix, inet, inet6 and netlink, each matched by exact value (so a family with
   high bits set doesn't slip past), and `socketpair` only unix, so `AF_ALG` (the kernel
-  crypto API), `AF_VSOCK`, `AF_PACKET` and the rest answer ENOSYS; on x86_64, i386 and x32
-  syscalls kill the process (`socketcall` hides its arguments from seccomp, and the compat
+  crypto API), `AF_VSOCK`, `AF_PACKET` and the rest answer ENOSYS; on x86_64 (the only
+  architecture this is checked on), i386 and x32 syscalls kill the process (`socketcall` hides its arguments from seccomp, and the compat
   layer is attack surface of its own). The doctor and the image smoke test run under the
   same profile, and the smoke test checks each of these by behaviour as `dev`.
 - **The host is not on the box's network.** Under pasta the launcher passes

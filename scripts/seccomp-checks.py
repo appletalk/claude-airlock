@@ -1,6 +1,6 @@
 """The box's seccomp profile, by behaviour: run as dev inside a box (image-smoke.sh).
 
-Each refused call must fail, whichever way it is asked (high bits in an argument, a 32-bit
+Each refused call must get the profile's own answer (ENOSYS, EPERM for unshare), whichever way it is asked (high bits in an argument, a 32-bit
 or x32 syscall), and the everyday ones must still work. Exits 1 if any check fails.
 """
 import ctypes, errno, os, platform, signal, socket, mmap
@@ -21,11 +21,12 @@ def sc(nr, *args):
     return r, ctypes.get_errno()
 
 
-def refused(what, nr, *args):
+def refused(what, nr, *args, want=errno.ENOSYS):
+    """Refused by the profile itself: its errno, not one the kernel gave an allowed call."""
     r, e = sc(nr, *args)
-    if r >= 0:
-        os.close(r) if nr in (41, 53) else None
-    report(r < 0, what + " refused", f"rc={r} {errno.errorcode.get(e, e) if r < 0 else 'allowed'}")
+    if r >= 0 and nr == 41:
+        os.close(r)
+    report(r < 0 and e == want, what + " refused", f"rc={r} {errno.errorcode.get(e, e) if r < 0 else 'allowed'}")
 
 
 def killed(what, fn):
@@ -50,7 +51,7 @@ refused("keyctl", 250, 0, -3, 0)
 refused("add_key", 248, 0, 0, 0, 0, 0)
 refused("request_key", 249, 0, 0, 0, 0)
 refused("memfd_secret", 447, 0)
-refused("unshare(CLONE_NEWUSER)", 272, 0x10000000)
+refused("unshare(CLONE_NEWUSER)", 272, 0x10000000, want=errno.EPERM)
 refused("socket(AF_ALG)", 41, AF_ALG, SEQPACKET, 0)
 refused("socket(AF_ALG | 1<<32)", 41, AF_ALG | (1 << 32), SEQPACKET, 0)
 refused("socket(AF_INET | 1<<32)", 41, socket.AF_INET | (1 << 32), STREAM, 0)

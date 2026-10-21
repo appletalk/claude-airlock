@@ -59,15 +59,19 @@ setup() { setup_airlock_env; }
     [ "$(jq --arg s "$s" '[.syscalls[] | select(.action == "SCMP_ACT_ALLOW" and (.args // [] | length) == 0) | .names[] | select(. == $s)] | length' "$prof")" = 0 ] \
       || { echo "$s allowed unconditionally"; false; }
   done
-  [ "$(jq '[.syscalls[] | select(.action != "SCMP_ACT_ERRNO") | .names[] | select(. == "keyctl" or . == "memfd_secret" or . == "socketcall")] | length' "$prof")" = 0 ]
-  # socket: every allow names its family with an exact match (a NE or a mask lets high bits
-  # through), and only unix, inet, inet6 and netlink.
+  # Nor in any other rule but an ERRNO one (an allow with conditions, a LOG).
+  [ "$(jq '[.syscalls[] | select(.action != "SCMP_ACT_ERRNO") | .names[] | select(. == "keyctl" or . == "add_key" or . == "request_key" or . == "memfd_secret" or . == "socketcall")] | length' "$prof")" = 0 ]
+  # socket: every rule naming it (alone or with others) that isn't an ERRNO allows one family
+  # by exact match (a NE or a mask lets high bits through): unix, inet, inet6, netlink.
+  [ "$(jq '[.syscalls[] | select((.names | index("socket")) and .action != "SCMP_ACT_ALLOW" and .action != "SCMP_ACT_ERRNO")] | length' "$prof")" = 0 ]
+  [ "$(jq '[.syscalls[] | select((.names | index("socket")) and .names != ["socket"])] | length' "$prof")" = 0 ]
   [ "$(jq -c '[.syscalls[] | select(.names == ["socket"] and .action == "SCMP_ACT_ALLOW") | .args[] | select(.index == 0) | "\(.op) \(.value)"] | unique' "$prof")" \
     = '["SCMP_CMP_EQ 1","SCMP_CMP_EQ 10","SCMP_CMP_EQ 16","SCMP_CMP_EQ 2"]' ]
   [ "$(jq '[.syscalls[] | select(.names == ["socket"] and .action == "SCMP_ACT_ALLOW") | select(([.args[] | select(.index == 0)] | length) != 1)] | length' "$prof")" = 0 ]
   [ "$(jq -c '[.syscalls[] | select(.names | index("socketpair")) | [.action, (.args | map("\(.index) \(.op) \(.value)"))]]' "$prof")" = '[["SCMP_ACT_ALLOW",["0 SCMP_CMP_EQ 1"]]]' ]
   # x86_64 takes no i386 or x32 syscalls (socketcall, and the compat surface): they kill.
   [ "$(jq -c '.archMap[] | select(.architecture == "SCMP_ARCH_X86_64") | .subArchitectures' "$prof")" = '[]' ]
+  [ "$(jq '[.archMap[] | .architecture, (.subArchitectures // [])[] | select(. == "SCMP_ARCH_X86" or . == "SCMP_ARCH_X32")] | length' "$prof")" = 0 ]
   # The behaviour itself is checked in a real box by the image smoke test.
   grep -q 'seccomp-checks.py' "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh"
 }
