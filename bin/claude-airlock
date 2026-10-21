@@ -2898,7 +2898,7 @@ if [ -f "$SECRETS_FILE" ]; then
           echo "  refusing to start. Remove it: airlock secret rm $_skey" >&2
           exit 1
         fi
-        _resolved="$(pass show "${_sval#pass:}" 2>/dev/null | head -n1)"
+        _resolved="$(pass show "${_sval#pass:}" </dev/null 2>/dev/null | head -n1)"
         if [ -z "$_resolved" ]; then
           echo "claude-airlock: could not resolve secret $_skey via 'pass show ${_sval#pass:}'." >&2
           echo "  Unlock your password store first (run: pass show ${_sval#pass:}), then relaunch." >&2
