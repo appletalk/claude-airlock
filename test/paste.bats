@@ -619,3 +619,34 @@ _plant_paste_work() { mkdir -p "$(pastes_dir "$P")"; ln -s "$VICTIM" "$(pastes_d
   [[ "$output" == *"is not a folder of yours"* ]]
   [ -z "$(ls -A "$elsewhere")" ]
 }
+
+@test "a reader of another account's drop box can still list it (R1)" {
+  p="$(mkproj)"; stub_stat; stub_clipboard; mkinbox
+  printf '4242 %s\n' "$D" . >> "$FO"     # the drop box is the writer's (uid 4242), not ours
+  : > "$D/20261021-000000000.png"
+  chmod 555 "$D"
+  run _paste "$p" list
+  chmod 755 "$D"
+  [ "$status" -eq 0 ]; [[ "$output" == "$D/20261021-000000000.png" ]]
+}
+
+@test "pastes/ swapped for a link during the clipboard read: nothing lands or is deleted there (P1)" {
+  P="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$P" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  pd="$(pastes_dir "$P")"; else3="$BATS_TEST_TMPDIR/elsewhere3"; mkdir -p "$pd" "$else3"
+  chmod 700 "$TMP_BASE" "$TMP_BASE/$(_slug "$P")"
+  for i in $(seq -w 10 29); do : > "$else3/20200101-0000${i}000.png"; done   # 20: one past retention
+  before="$(ls "$else3")"
+  # A sibling box's move, staged at the clipboard read: the real pastes/ renamed away, a link
+  # in its place.
+  cat > "$STUBBIN/wl-paste" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = --list-types ] && { echo image/png; exit 0; }
+mv "$pd" "$pd.real" && ln -s "$else3" "$pd"
+base64 -d <<<"\$PNG_B64"
+EOF
+  chmod +x "$STUBBIN/wl-paste"
+  run _paste "$P"
+  [ "$status" -eq 0 ]
+  [ "$(ls "$else3")" = "$before" ] || { echo "the link target changed"; false; }
+  [ -n "$(ls "$pd.real"/*.png 2>/dev/null)" ]                  # it landed in the checked folder
+}

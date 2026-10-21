@@ -1295,9 +1295,14 @@ if [ "${1:-}" = "paste" ]; then
   # Work INSIDE the checked folder from here on, by relative names only: the box can swap
   # the name `pastes` for a link at any moment (the clipboard read and the conversion sit in
   # that window), but this shell's working directory stays the folder that was checked. Its
-  # real path and owner are checked once more after entering it.
-  cd -P -- "$_pdir" 2>/dev/null && [ "$(pwd -P)" = "$_pexpect" ] && [ "$(stat -c %u .)" = "$(id -u)" ] \
-    || { echo "claude-airlock: $_pdir changed while it was being checked (was this planted?); not pasting" >&2; exit 1; }
+  # real path (and in the project mode its owner) are checked once more after entering it.
+  # A drop box is its writer's by design, and a reader lists it; no box can write it, and
+  # _airlock_paste_dir_check has pinned it, so there the path alone is compared.
+  if ! { cd -P -- "$_pdir" 2>/dev/null && [ "$(pwd -P)" = "$_pexpect" ] \
+         && { [ -n "${AIRLOCK_PASTE_DIR:-}" ] || [ "$(stat -c %u .)" = "$(id -u)" ]; }; }; then
+    echo "claude-airlock: $_pdir changed while it was being checked (was this planted?); not pasting" >&2
+    exit 1
+  fi
   _pdisp="$_pexpect"
 
   # Collect only files this tool created: `YYYYMMDD-HHMMSSmmm.png`, one fixed shape, so

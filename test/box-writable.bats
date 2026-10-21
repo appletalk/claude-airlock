@@ -149,3 +149,19 @@ _log_mv_cp() {
   _launch "$P" >/dev/null 2>&1 || true
   [ -z "$(find "$(state_dir "$P")" -maxdepth 1 -name '.write.*' 2>/dev/null)" ]
 }
+
+@test "the git guard never truncates a file linked in after its check (P2 noclobber)" {
+  P="$(mkproj gn)"; git -C "$P" init -q
+  git -C "$P" config include.path inc/extra.cfg
+  # The box's move, staged right after the guard creates the missing parent: a link at the
+  # file name, to a file that must survive.
+  cat > "$STUBBIN/mkdir" <<EOF
+#!/usr/bin/env bash
+/usr/bin/mkdir "\$@" || exit
+for a in "\$@"; do case "\$a" in */.git/inc) ln -s "$VICTIM" "\$a/extra.cfg" ;; esac; done
+EOF
+  chmod +x "$STUBBIN/mkdir"
+  run _launch "$P"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$VICTIM")" = VICTIM-UNCHANGED ]
+}
