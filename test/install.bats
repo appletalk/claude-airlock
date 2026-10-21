@@ -691,7 +691,7 @@ _install_to_end() {
 # --- airlock paste: never a prompt, a note while it isn't set up ----------------------------
 
 @test "an install on a terminal never asks for a paste project; it ends with a note while none is set" {
-  command -v script >/dev/null && command -v timeout >/dev/null || skip "needs util-linux script and timeout"
+  script --version 2>&1 | grep -q util-linux && command -v timeout >/dev/null || skip "needs util-linux script and timeout"
   mkclone
   _install_to_end   # writes the stubs, and the install itself must not need them on a tty
   w="$BATS_TEST_TMPDIR/tty-install.sh"
@@ -739,4 +739,7 @@ W
   printf 'AIRLOCK_PASTE_PROJECTS=/x\n' > "$c"
   CONFIG_ENV="$c" _install_to_end
   grep -qF "(or AIRLOCK_PASTE_DIR) in $c." "$out"
+  # a config not made yet, where it can be: the user's to set
+  CONFIG_ENV="$BATS_TEST_TMPDIR/new/agent.conf" _install_to_end
+  grep -qF "(or AIRLOCK_PASTE_DIR) in $BATS_TEST_TMPDIR/new/agent.conf." "$out"
 }

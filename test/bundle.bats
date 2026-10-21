@@ -356,6 +356,7 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
 }
 
 @test "install-bundle: the paste note too, pointing whoever can't edit the config at its manager; silent once it names a paste dir" {
+  [ "$(id -u)" != 0 ] || skip "root can write a 0444 file"
   writer_install "$REV1"; bundle "$B" >/dev/null
   c="$BATS_TEST_TMPDIR/agent.conf"
   printf 'AIRLOCK_EGRESS_MODE=proxy\n' > "$c"; chmod 0444 "$c"

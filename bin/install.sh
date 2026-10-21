@@ -181,9 +181,10 @@ fi
 # `airlock paste` needs ONE project (or a shared paste dir) to write clipboard images into:
 # see README ("Pasting images into a box"). There is no safe default: it is typed from whatever
 # terminal is free, so keying it off $PWD would silently write pastes into a directory the
-# running box never mounts. An install never stops to ask: if the config names neither (an
-# empty line counts as a choice), a note at the end says how, and `airlock paste` says it again
-# when it is run.
+# running box never mounts. An install never stops to ask: if neither the environment nor the
+# config names one (an empty line in the config counts as a choice), a note at the end says
+# how, and `airlock paste` says it again when it is run. The config check reads plain
+# assignments only: a value set some other way gets a needless note, nothing worse.
 _paste_note=""
 if [ -z "${AIRLOCK_PASTE_PROJECT:-}${AIRLOCK_PASTE_DIR:-}" ] \
     && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_(PROJECT|DIR)=' "$CONFIG_FILE" 2>/dev/null; then
@@ -192,7 +193,10 @@ fi
 _print_paste_note() {
   [ -n "$_paste_note" ] || return 0
   echo "==> Note: 'airlock paste' (clipboard images into a box) is not set up. To use it, set"
-  if [ -w "$CONFIG_FILE" ] || { [ ! -e "$CONFIG_FILE" ] && [ -w "$(dirname "$CONFIG_FILE")" ]; }; then
+  # The installing user's to edit: a writable file, or none yet where one can be made.
+  _pd="$(dirname "$CONFIG_FILE")"
+  if { [ -f "$CONFIG_FILE" ] && [ -w "$CONFIG_FILE" ]; } \
+      || { [ ! -e "$CONFIG_FILE" ] && { [ -w "$_pd" ] || [ ! -e "$_pd" ]; }; }; then
     echo "    AIRLOCK_PASTE_PROJECT=\"\$HOME/development/myproject\" (or AIRLOCK_PASTE_DIR) in $CONFIG_FILE."
   else
     echo "    AIRLOCK_PASTE_DIR (a shared drop box) or AIRLOCK_PASTE_PROJECT in $CONFIG_FILE: ask whoever manages it."
