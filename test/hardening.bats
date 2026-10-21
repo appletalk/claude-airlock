@@ -22,7 +22,7 @@ setup() { setup_airlock_env; }
 # The engine's default seccomp profile lets the agent create user namespaces and become
 # root with a full cap set inside one (measured) - the precondition for most
 # container-to-host kernel exploits. The box runs with the repo's own profile instead:
-# podman's default with new namespaces (and a few unused kernel interfaces) refused. Both
+# podman's default with new namespaces and some unused kernel interfaces refused. Both
 # engines take the same flag.
 @test "passes the repo's seccomp profile, under BOTH engines" {
   for e in podman docker; do
@@ -51,17 +51,25 @@ setup() { setup_airlock_env; }
   done
 }
 
-@test "the seccomp profile refuses keyrings, memfd_secret and AF_ALG sockets" {
+@test "the seccomp profile: keyrings and memfd_secret out, socket families by exact value, no 32-bit syscalls" {
   prof="$BATS_TEST_DIRNAME/../image/seccomp.json"
-  # Not allowed by any rule (so the default ENOSYS answers), and refused explicitly.
-  for s in keyctl add_key request_key memfd_secret; do
-    [ "$(jq --arg s "$s" '[.syscalls[] | select(.action == "SCMP_ACT_ALLOW") | .names[] | select(. == $s)] | length' "$prof")" = 0 ] \
-      || { echo "$s allowed"; false; }
+  # Not in the unconditional allow list (the default answers ENOSYS); socket and socketpair
+  # only through their argument rules, and socketcall (arguments in memory, unfilterable) not at all.
+  for s in keyctl add_key request_key memfd_secret socketcall socket socketpair; do
+    [ "$(jq --arg s "$s" '[.syscalls[] | select(.action == "SCMP_ACT_ALLOW" and (.args // [] | length) == 0) | .names[] | select(. == $s)] | length' "$prof")" = 0 ] \
+      || { echo "$s allowed unconditionally"; false; }
   done
-  [ "$(jq -r '.syscalls[] | select(.names == ["keyctl","memfd_secret"]) | "\(.action) \(.errnoRet)"' "$prof")" = "SCMP_ACT_ERRNO 38" ]
-  # socket(AF_ALG = 38): EAFNOSUPPORT, whatever the caps (an argument rule; the ERRNO wins
-  # over the allow rules for other families, as the AF_VSOCK rule already relies on).
-  [ "$(jq -r '.syscalls[] | select(.names == ["socket"] and .action == "SCMP_ACT_ERRNO" and .args[0].value == 38) | "\(.args[0].op) \(.errnoRet) \(.includes // {} | length) \(.excludes // {} | length)"' "$prof")" = "SCMP_CMP_EQ 97 0 0" ]
+  [ "$(jq '[.syscalls[] | select(.action != "SCMP_ACT_ERRNO") | .names[] | select(. == "keyctl" or . == "memfd_secret" or . == "socketcall")] | length' "$prof")" = 0 ]
+  # socket: every allow names its family with an exact match (a NE or a mask lets high bits
+  # through), and only unix, inet, inet6 and netlink.
+  [ "$(jq -c '[.syscalls[] | select(.names == ["socket"] and .action == "SCMP_ACT_ALLOW") | .args[] | select(.index == 0) | "\(.op) \(.value)"] | unique' "$prof")" \
+    = '["SCMP_CMP_EQ 1","SCMP_CMP_EQ 10","SCMP_CMP_EQ 16","SCMP_CMP_EQ 2"]' ]
+  [ "$(jq '[.syscalls[] | select(.names == ["socket"] and .action == "SCMP_ACT_ALLOW") | select(([.args[] | select(.index == 0)] | length) != 1)] | length' "$prof")" = 0 ]
+  [ "$(jq -c '[.syscalls[] | select(.names | index("socketpair")) | [.action, (.args | map("\(.index) \(.op) \(.value)"))]]' "$prof")" = '[["SCMP_ACT_ALLOW",["0 SCMP_CMP_EQ 1"]]]' ]
+  # x86_64 takes no i386 or x32 syscalls (socketcall, and the compat surface): they kill.
+  [ "$(jq -c '.archMap[] | select(.architecture == "SCMP_ARCH_X86_64") | .subArchitectures' "$prof")" = '[]' ]
+  # The behaviour itself is checked in a real box by the image smoke test.
+  grep -q 'seccomp-checks.py' "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh"
 }
 
 @test "the doctor and the image smoke test run their boxes under the same profile" {

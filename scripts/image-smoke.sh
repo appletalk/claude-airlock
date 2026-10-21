@@ -39,6 +39,9 @@ printf '\033[1mimage smoke: %s (engine %s, egress minimal)\033[0m\n' "$IMAGE" "$
   -e AIRLOCK_EGRESS_GROUPS="" \
   -v "$REPO_DIR/test/fixtures/validators:/fixtures:ro" \
   -v "$REPO_DIR/scripts/validator-checks.sh:/usr/local/bin/validator-checks:ro" \
+  -v "$REPO_DIR/scripts/seccomp-checks.py:/usr/local/lib/seccomp-checks.py:ro" \
   --entrypoint /bin/bash "$IMAGE" -c \
   '/usr/local/bin/init-firewall.sh >/dev/null 2>&1 || { echo "image-smoke: firewall failed to come up" >&2; exit 1; }
+   printf "\033[1mseccomp profile, by behaviour\033[0m\n"
+   gosu dev python3 -I /usr/local/lib/seccomp-checks.py || exit 1
    exec gosu dev /usr/local/bin/validator-checks /fixtures'
