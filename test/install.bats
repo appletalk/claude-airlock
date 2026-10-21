@@ -87,6 +87,28 @@ EOF
   grep -q 'apt-get upgrade -y' "$df"
 }
 
+# The base holds what runs Claude Code and the airlock machinery; developer tools are dev's.
+@test "the base installs python3 and no developer tools; dev installs them before using git" {
+  base="$BATS_TEST_DIRNAME/../image/Dockerfile"
+  dev="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  apt_pkgs() { awk '/apt-get install/{f=1} f{print} /apt-get clean/{f=0}' "$1"; }
+  base_pkgs="$(apt_pkgs "$base")"
+  dev_pkgs="$(apt_pkgs "$dev")"
+  for p in ca-certificates curl jq python3 iptables ipset iproute2 dnsutils aggregate gosu socat; do
+    grep -qE "^[[:space:]]+$p \\\\\$" <<<"$base_pkgs" || { echo "base lacks $p"; false; }
+  done
+  for p in git gh make less vim zsh ripgrep; do
+    refute grep -qE "^[[:space:]]+$p \\\\\$" <<<"$base_pkgs"
+    grep -qE "^[[:space:]]+$p \\\\\$" <<<"$dev_pkgs" || { echo "dev lacks $p"; false; }
+  done
+  # The bare interpreter only: pip and venv stay dev's.
+  refute grep -q -e python3-pip -e python3-venv <<<"$base_pkgs"
+  # dev's first use of git (the bats clone) comes after its apt layer installs it.
+  apt_line="$(grep -n 'apt-get install' "$dev" | head -1 | cut -d: -f1)"
+  git_line="$(grep -nE '(^|[[:space:];])git -' "$dev" | grep -v '^[0-9]*:#' | head -1 | cut -d: -f1)"
+  [ -n "$apt_line" ] && [ -n "$git_line" ] && [ "$apt_line" -lt "$git_line" ]
+}
+
 @test "make refresh forces a fresh key, prefixed with the week so install can recognise it" {
   grep -qE '^refresh:' "$BATS_TEST_DIRNAME/../Makefile"
   grep -A1 '^refresh:' "$BATS_TEST_DIRNAME/../Makefile" | grep -q 'AIRLOCK_APT_REFRESH="\$\$(date +%G-W%V)\.'

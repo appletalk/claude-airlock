@@ -526,6 +526,9 @@ If the proxy writes a client manifest next to its socket (`<name>.clients` besid
   this has no tea login. Your own tea config is never mounted (`.config/tea` is on the deny list).
 - **curl and the rest**: use `http://<host>/` URLs; the proxy variables already point there.
 
+The clients themselves (git, gh, tea) are in `:dev` and the images built on it. A `:base`
+box gets the same config files but has no client to read them.
+
 `airlock egress show` lists the hosts. The manifest ends up in git config, so it is used only
 if it is root's, writable only by root, in a root-owned directory, at most 64 KiB, and every
 line is `<host> <port> <rules> yes|no` with a valid lowercase host name. Otherwise the launch
@@ -1007,14 +1010,17 @@ network.
 
 Layered, built by `make install`:
 
-- `claude-airlock:base` — Debian + Claude Code + git/gh + the egress firewall + core CLIs.
+- `claude-airlock:base` — Debian + Claude Code + the egress firewall and proxy bridge, and
+  little else: curl, jq and a bare `python3` (no pip or venv). No git, gh or editor; those
+  are in `:dev`.
 - `claude-airlock:os` — the base without Claude Code (its `os` build stage). Not a box
   image: `:dev` builds on it and copies Claude Code from `:base` as its last layer. To build
   `:dev` by hand, build both first: `podman build --target os -t claude-airlock:os image`.
-- `claude-airlock:dev` *(default)* — base + Python, Node, PowerShell, build tools,
-  PostgreSQL, yaml tooling, infra clients (kubectl, helm, sops, tea, drill; no
-  credentials baked in), and the offline config validators below. Start Postgres
-  in-box with `airlock-pg-start` (localhost:5432, ephemeral).
+- `claude-airlock:dev` *(default)* — base + git, gh, make, less, vim, zsh, ripgrep, Python
+  (pip, venv), Node, PowerShell, build tools, PostgreSQL, yaml tooling, infra clients
+  (kubectl, helm, sops, tea, drill; no credentials baked in), and the offline config
+  validators below. Start Postgres in-box with `airlock-pg-start` (localhost:5432,
+  ephemeral).
 - `claude-airlock:playwright` — dev + headless Chromium + the Playwright MCP. Opt in via
   `image = claude-airlock:playwright`. Build on demand:
   `docker build -t claude-airlock:playwright image/playwright`.

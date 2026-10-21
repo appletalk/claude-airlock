@@ -171,6 +171,21 @@ expect_fail "sops filestatus does not call plaintext encrypted" sops_status sops
 expect_ok   "tea runs"                                      tea --version
 expect_ok   "drill runs"                                    drill -v
 
+# Developer tools: dev's, not the base's (image/Dockerfile keeps them out). A local round
+# trip, no remote. Invoked through "$@"; 127 when git is absent, as for sops above.
+# shellcheck disable=SC2317,SC2329
+git_roundtrip() { command -v git >/dev/null || return 127
+                  local r; r="$(mktemp -d)"
+                  git -C "$r" init -q \
+                    && git -C "$r" -c user.name=smoke -c user.email=smoke@example.invalid commit -q --allow-empty -m smoke \
+                    && [ "$(git -C "$r" rev-list --count HEAD)" = 1 ]; }
+hdr "developer tools (git, rg, gh, make)"
+expect_ok   "git commits in a fresh repo"                   git_roundtrip
+expect_ok   "rg finds a pattern"                            rg -q -F 'printf' shell/good.sh
+expect_fail "rg reports no match"                           rg -q -F 'no-such-string-in-this-file' shell/good.sh
+expect_ok   "gh runs"                                       gh --version
+expect_ok   "make runs"                                     make --version
+
 hdr "runtimes (node, pwsh)"
 expect_ok   "node runs a script"                            node node/good.js
 expect_fail "node --check rejects a syntax error"           node --check node/bad.js

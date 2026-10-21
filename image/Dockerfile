@@ -28,28 +28,29 @@ ENV DEBIAN_FRONTEND=noninteractive
 # its packages are current as of that build, it just has no refresh schedule.
 ARG APT_REFRESH=unkeyed
 LABEL org.claude-airlock.apt-refresh="$APT_REFRESH"
-# socat (in the list below) bridges a loopback port to a host proxy's Unix socket: Claude
-# Code's HTTPS_PROXY must be an http:// URL, so a box with no network reaches the proxy
-# through it. It is a general relay, but curl and bash already give a box as much.
+# Only what running Claude Code and the airlock machinery needs: the firewall
+# (iptables, ipset, iproute2, dnsutils, aggregate, curl, jq), the privilege drop (gosu)
+# and the proxy bridge (socat). Developer tools (git, gh, make, less, vim, zsh, ripgrep)
+# live in the dev image; Claude Code ships its own ripgrep. python3 (the bare
+# interpreter, no pip or venv) is here so helper scripts can run in a base-only box;
+# they run it isolated (`python3 -I`).
+#
+# socat bridges a loopback port to a host proxy's Unix socket: Claude Code's HTTPS_PROXY
+# must be an http:// URL, so a box with no network reaches the proxy through it. It is a
+# general relay, but curl and bash already give a box as much.
 RUN echo "apt refresh key: ${APT_REFRESH}" \
     && apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
-      git \
-      gh \
       jq \
-      make \
-      ripgrep \
+      python3 \
       iptables \
       ipset \
       iproute2 \
       dnsutils \
       aggregate \
       gosu \
-      less \
-      vim \
-      zsh \
       socat \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

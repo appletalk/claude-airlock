@@ -1,6 +1,7 @@
-# claude-airlock dev base (layer 1) - the base plus the language runtimes most
-# projects need to actually run: Python, Node.js, PowerShell, a C build toolchain,
-# and the config validators that lint infrastructure-as-code offline.
+# claude-airlock dev base (layer 1) - the base plus the developer tools (git, gh, make,
+# an editor and pager, ripgrep), the language runtimes most projects need to actually run
+# (Python, Node.js, PowerShell, a C build toolchain), and the config validators that lint
+# infrastructure-as-code offline.
 #
 # This is the default image for real work. Toolchains that need to DOWNLOAD a
 # per-project dependency graph before they can do anything (Terraform providers,
@@ -24,6 +25,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Every Debian package the dev image adds, in ONE layer (one index fetch, one snapshot of
 # the archive). What each group is for:
+#
+# Developer tools: git, gh, make, less, vim, zsh, ripgrep. The base keeps only what runs
+# Claude Code and the airlock machinery, so these come in here. git must stay in this
+# layer: the bats install below clones with it.
 #
 # Python + a C/C++ build toolchain (many pip packages compile native extensions).
 # python3-yaml + yamllint are the DISTRO packages (not pip), so they need no PyPI
@@ -49,6 +54,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # unzip: terraform, tflint, alloy and the PSScriptAnalyzer .nupkg ship as zips.
 # drill (ldnsutils) sits beside dnsutils' dig for hosts whose tooling standardizes on ldns.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      gh \
+      make \
+      less \
+      vim \
+      zsh \
+      ripgrep \
       python3 \
       python3-pip \
       python3-venv \
