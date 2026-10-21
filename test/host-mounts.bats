@@ -113,3 +113,44 @@ STUB
   printf '644 %s\n' "$f" >> "$FM"; printf '[1,2]\n' > "$f"; stops "not a JSON object"
   printf 'not json\n' > "$f"; stops "not a JSON object"
 }
+
+@test "a workspace holding the account's airlock state (\$HOME or above) is refused: it would hand the box its managed settings" {
+  f="$T/ms.json"; printf '{"a":1}\n' > "$f"; printf '0 %s\n' "$f" >> "$FO"; printf '644 %s\n' "$f" >> "$FM"
+  printf 'AIRLOCK_MANAGED_SETTINGS=%s\n' "$f" > "$CFG"
+  run _launch "$AIRLOCK_HOME"
+  [ "$status" -ne 0 ]; [[ "$output" == *"holds this account's airlock state"* ]] || { echo "$output"; return 1; }
+  if engine_args | grep -q '^ENGINE_INVOKED='; then echo "launched"; return 1; fi
+}
+
+@test "extra mounts: read-write needs a root-owned dir (ours is read-only only); named twice, mounted once, ro wins; env-only mounted once; no globbing" {
+  p="$(mkproj emmore)"
+  mkdir -p "$Q/mine"; printf '%s %s\n' "$(id -u)" "$Q/mine" >> "$FO"; printf '755 %s\n' "$Q/mine" >> "$FM"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw"\n' "$Q/mine" > "$CFG"
+  : > "$ENGINE_ARGS_FILE"; run _launch "$p"
+  [[ "$output" == *"read-write needs a directory root owns"* ]]; if engine_args | grep -q -- "^$Q/mine:"; then return 1; fi
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro"\n' "$Q/mine" > "$CFG"
+  : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- "$Q/mine:$Q/mine:ro"
+  # twice (config rw + env ro): one mount, read-only
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw"\n' "$Q/requests" > "$CFG"
+  : > "$ENGINE_ARGS_FILE"; AIRLOCK_EXTRA_MOUNTS="$Q/requests:ro" _launch "$p" >/dev/null 2>&1 || true
+  [ "$(engine_args | grep -c -- "^$Q/requests:")" = 1 ]; engine_args | grep -qx -- "$Q/requests:$Q/requests:ro"
+  # environment only (nothing in the config): once
+  : > "$CFG"; : > "$ENGINE_ARGS_FILE"; AIRLOCK_EXTRA_MOUNTS="$Q/answers:ro" _launch "$p" >/dev/null 2>&1 || true
+  [ "$(engine_args | grep -c -- "^$Q/answers:")" = 1 ]
+  # a glob is a literal path, never expanded into what's there
+  mkdir -p "$Q/x"; printf '0 %s\n' "$Q/x" >> "$FO"; printf '755 %s\n' "$Q/x" >> "$FM"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s/*:ro"\n' "$Q" > "$CFG"
+  : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
+  if engine_args | grep -q -- "^$Q/x:"; then echo "glob expanded"; return 1; fi
+}
+
+@test "an extra mount swapped for another real directory (not a link) while a prompt waited: the inode pin stops the launch" {
+  p="$(mkproj emswap2)"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro"\n' "$Q/answers" > "$CFG"
+  _launch "$p" secret set TOKEN pass:x/y >/dev/null
+  printf '#!/usr/bin/env bash\nmv "%s" "%s.away" && mkdir "%s"\necho secret\n' "$Q/answers" "$Q/answers" "$Q/answers" > "$STUBBIN/pass"
+  chmod +x "$STUBBIN/pass"
+  run _launch "$p"
+  [ "$status" -ne 0 ]; [[ "$output" == *"extra mount $Q/answers changed after it was checked"* ]] || { echo "$output"; return 1; }
+}

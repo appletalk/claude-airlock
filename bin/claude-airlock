@@ -2201,6 +2201,15 @@ fi
 #
 # An empty directory, kept in the host-only STATE_DIR (never mounted into a box), to mount
 # read-only over the image's managed-settings.d below. Emptied each launch.
+# A workspace holding this account's airlock state (the home directory, or anything above
+# ~/.config/claude-airlock) would hand the box that state read-write through the workspace
+# mount: its managed settings, session files and config. Refused.
+_cfgdir="$(readlink -f "$HOME/.config/claude-airlock" 2>/dev/null)" || _cfgdir="$HOME/.config/claude-airlock"
+case "$_cfgdir/" in
+  "$WORKSPACE"/*)
+    echo "claude-airlock: the workspace $WORKSPACE holds this account's airlock state ($_cfgdir); run it from a project folder, not \$HOME or above; not launching" >&2
+    exit 1 ;;
+esac
 mkdir -p "$STATE_DIR/managed-settings.d"
 find "$STATE_DIR/managed-settings.d" -mindepth 1 -delete
 # A host-side managed-settings drop-in (AIRLOCK_MANAGED_SETTINGS, config or environment only): a
@@ -2414,16 +2423,25 @@ fi
 
 # Host-configured extra mounts (AIRLOCK_EXTRA_MOUNTS): "DIR:ro" or "DIR:rw", at their own
 # path. A directory that fails the check is skipped with a warning (that only removes access).
+# Split, never globbed; a directory named twice is mounted once, read-only if any entry says so;
+# :rw only for a directory root owns (one the account owns, the box could chmod open).
 _extra_pins=()
-for _em in $AIRLOCK_EXTRA_MOUNTS; do
+declare -A _emode=()
+read -ra _ems <<< "$AIRLOCK_EXTRA_MOUNTS"
+for _em in "${_ems[@]}"; do
   _emp="${_em%:*}" _emm="${_em##*:}"
   case "$_emm" in ro|rw) ;; *) echo "claude-airlock: AIRLOCK_EXTRA_MOUNTS entry '$_em' needs :ro or :rw; skipped" >&2; continue ;; esac
-  if _emc="$(_airlock_extra_mount_check "$_emp" 2>&1)"; then
-    args+=( -v "$_emc:$_emc:$_emm" ); _extra_pins+=( "$(stat -c %d:%i "$_emc") $_emc" )
-  else
-    echo "claude-airlock: NOT mounting AIRLOCK_EXTRA_MOUNTS entry '$_em': $_emc" >&2
+  if ! _emc="$(_airlock_extra_mount_check "$_emp" 2>&1)"; then
+    echo "claude-airlock: NOT mounting AIRLOCK_EXTRA_MOUNTS entry '$_em': $_emc" >&2; continue
   fi
+  if [ "$_emc" = "${_paste_pin#* }" ]; then continue; fi        # already the paste dir, read-only
+  if [ "$_emm" = rw ] && [ "$(stat -c %u "$_emc")" != 0 ]; then
+    echo "claude-airlock: NOT mounting AIRLOCK_EXTRA_MOUNTS entry '$_em': read-write needs a directory root owns" >&2; continue
+  fi
+  if [ -z "${_emode[$_emc]:-}" ]; then _extra_pins+=( "$(stat -c %d:%i "$_emc") $_emc" ); fi
+  [ "${_emode[$_emc]:-}" = ro ] || _emode[$_emc]=$_emm
 done
+for _kp in "${_extra_pins[@]}"; do _emc="${_kp#* }"; args+=( -v "$_emc:$_emc:${_emode[$_emc]}" ); done
 
 # Host-added read-only mounts (`airlock mount add`). Re-checked here, not trusted from the
 # store: a directory that has since become a symlink into ~/.ssh, or gained a hard link,
