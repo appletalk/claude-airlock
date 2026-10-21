@@ -346,13 +346,15 @@ EOF
   # none of which were ever removed. The concurrent-session prompt does NOT reproduce this:
   # an interrupted read there falls through to "Aborted." and exits anyway.
   write_config "$proj" "egress = example.com"
-  # stdin must stay OPEN, not be /dev/null: the prompt would read EOF instantly and leave
-  # no window for the signal. `exec` makes the pid we signal the launcher itself.
+  # stdin must be a terminal that stays silent (the launcher asks only a terminal), not
+  # /dev/null or a pipe: no window for the signal otherwise. `exec` makes the pid we signal
+  # the launcher itself.
+  tty_stub
   ( cd "$proj" && exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
       TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
       AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
       ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
-      bash "$AIRLOCK" ) < <(exec 3>&-; exec sleep 30) >/dev/null 2>&1 &
+      bash "$AIRLOCK" ) < "$TTY_STUB" >/dev/null 2>&1 &
   LPID=$!
   for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
   sleep 0.5
@@ -468,11 +470,12 @@ EOF
   # The test then failed against CORRECT code (a real user's foreground Ctrl-\ does fire it).
   # TERM needs none of this, which is why only the QUIT twin failed.
   set -m
+  tty_stub
   ( cd "$proj" && exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
       TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
       AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
       ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
-      bash "$AIRLOCK" ) < <(exec 3>&-; exec sleep 30) >/dev/null 2>&1 &
+      bash "$AIRLOCK" ) < "$TTY_STUB" >/dev/null 2>&1 &
   LPID=$!
   set +m
   for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done
@@ -506,11 +509,12 @@ EOF
   # from 130, and dropping `set -m`.
   write_config "$proj" "egress = example.com"
   set -m
+  tty_stub
   ( cd "$proj" && exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
       TERM=xterm AIRLOCK_ENGINE="$ENGINE" AIRLOCK_IMAGE="claude-airlock:dev" \
       AIRLOCK_SHARE_BASE="$SHARE_BASE" AIRLOCK_ROOTS="" CLAUDE_CODE_OAUTH_TOKEN="t" \
       ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
-      bash "$AIRLOCK" ) < <(exec 3>&-; exec sleep 30) >/dev/null 2>&1 &
+      bash "$AIRLOCK" ) < "$TTY_STUB" >/dev/null 2>&1 &
   LPID=$!
   set +m
   for _ in $(seq 100); do [ -d "$(sessions_dir "$proj")" ] && break; sleep 0.1; done

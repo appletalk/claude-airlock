@@ -256,3 +256,27 @@ _stub_upstream_installer() {
   printf '#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in *claude.ai/install.sh) cat "%s"; exit 0 ;; esac; done\nexit 22\n' "$1" > "$STUBBIN/curl"
   chmod +x "$STUBBIN/curl"
 }
+
+# A terminal that never types, for tests that need the launcher blocked at a prompt (it asks
+# only a terminal): sets TTY_STUB to a pty's path. A background process holds its master
+# open until whoever opened the other end has closed it (3 s grace, 60 s at most).
+tty_stub() {
+  local fd
+  exec {fd}< <(exec 3>&-; python3 -I -c '
+import os, select, time
+m, s = os.openpty()
+print(os.ttyname(s), flush=True)
+os.close(s)
+t = time.time()
+while time.time() - t < 60:
+    time.sleep(0.2)
+    try:
+        if select.select([m], [], [], 0)[0]:
+            os.read(m, 1024)
+    except OSError:
+        if time.time() - t > 3:
+            break
+')
+  read -r TTY_STUB <&"$fd"
+  exec {fd}<&-
+}
