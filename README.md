@@ -701,7 +701,14 @@ branches, say). Nothing in the launcher assumes it runs as you:
   directory or the workspace, root's or the account's own, never world-writable (group-writable
   is fine: a queue several accounts share), with every directory above it root's and writable by
   root alone, and no hard-linked file or mount point inside. Checked, pinned, and re-checked just
-  before the launch (a swap stops it); an entry that fails is skipped with a warning.
+  before the launch (a swap stops it); an entry that fails is skipped with a warning. `:rw`
+  needs a directory root owns (in one the account owns, the box could open the mode up); a
+  directory named twice is mounted once, read-only if either entry says so.
+- **Launch from a project folder.** A box is refused when its workspace is the home directory
+  or anything above it, or sits inside `~/.config/claude-airlock` or the install directory
+  (compared after resolving symlinks): the workspace mount would hand the box its own
+  managed settings, state and launcher read-write. Subcommands (`airlock egress show`, ...)
+  still work from anywhere.
 - **Box settings the box can't loosen: `AIRLOCK_MANAGED_SETTINGS`.** A JSON object in a file
   root owns and only root may write (config or environment only), copied in as a Claude Code
   managed-settings drop-in, which outranks the user's and the project's settings. Use it to

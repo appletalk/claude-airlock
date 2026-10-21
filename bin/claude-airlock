@@ -2199,17 +2199,27 @@ fi
 # ITS OWN user namespace, so NET_ADMIN grants control of the box's own network namespace
 # and nothing on the host. Under Docker the same caps are backed by real host root.
 #
+# A workspace holding this account's airlock state would hand the box that state read-write
+# through the workspace mount: its managed settings, session files and config, or the
+# installed launcher (host code the next launch runs). Refused: the home directory or
+# anything above it, and anything inside the config or install directories. Compared as
+# resolved paths, since the engine mounts what a symlinked workspace or home resolves to.
+_ws_real="$(cd -P -- "$WORKSPACE" 2>/dev/null && pwd -P)" || _ws_real="$WORKSPACE"
+_home_real="$(readlink -f "$HOME" 2>/dev/null)" || _home_real="$HOME"
+_ws_pre="${_ws_real%/}/"      # "/" for the root (an inline ${..%/} in a case pattern does not match there)
+_held=""
+for _sd in "$_home_real" "$HOME/.config/claude-airlock" "$HOME/.local/share/claude-airlock"; do
+  _sdr="$(readlink -f "$_sd" 2>/dev/null)" || _sdr="$_sd"
+  case "$_sdr/" in "$_ws_pre"*) _held="$_sdr" ;; esac               # the workspace holds it
+  [ "$_sdr" = "$_home_real" ] && continue
+  case "$_ws_real/" in "$_sdr"/*) _held="$_sdr" ;; esac            # the workspace is inside it
+done
+if [ -n "$_held" ]; then
+  echo "claude-airlock: the workspace $WORKSPACE ($_ws_real) holds or sits in this account's airlock state ($_held); run it from a project folder, not \$HOME or above; not launching" >&2
+  exit 1
+fi
 # An empty directory, kept in the host-only STATE_DIR (never mounted into a box), to mount
 # read-only over the image's managed-settings.d below. Emptied each launch.
-# A workspace holding this account's airlock state (the home directory, or anything above
-# ~/.config/claude-airlock) would hand the box that state read-write through the workspace
-# mount: its managed settings, session files and config. Refused.
-_cfgdir="$(readlink -f "$HOME/.config/claude-airlock" 2>/dev/null)" || _cfgdir="$HOME/.config/claude-airlock"
-case "$_cfgdir/" in
-  "$WORKSPACE"/*)
-    echo "claude-airlock: the workspace $WORKSPACE holds this account's airlock state ($_cfgdir); run it from a project folder, not \$HOME or above; not launching" >&2
-    exit 1 ;;
-esac
 mkdir -p "$STATE_DIR/managed-settings.d"
 find "$STATE_DIR/managed-settings.d" -mindepth 1 -delete
 # A host-side managed-settings drop-in (AIRLOCK_MANAGED_SETTINGS, config or environment only): a
@@ -2427,7 +2437,7 @@ fi
 # :rw only for a directory root owns (one the account owns, the box could chmod open).
 _extra_pins=()
 declare -A _emode=()
-read -ra _ems <<< "$AIRLOCK_EXTRA_MOUNTS"
+read -ra _ems -d '' <<< "$AIRLOCK_EXTRA_MOUNTS" || true    # every line, not just the first
 for _em in "${_ems[@]}"; do
   _emp="${_em%:*}" _emm="${_em##*:}"
   case "$_emm" in ro|rw) ;; *) echo "claude-airlock: AIRLOCK_EXTRA_MOUNTS entry '$_em' needs :ro or :rw; skipped" >&2; continue ;; esac

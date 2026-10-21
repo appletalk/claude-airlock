@@ -118,8 +118,37 @@ STUB
   f="$T/ms.json"; printf '{"a":1}\n' > "$f"; printf '0 %s\n' "$f" >> "$FO"; printf '644 %s\n' "$f" >> "$FM"
   printf 'AIRLOCK_MANAGED_SETTINGS=%s\n' "$f" > "$CFG"
   run _launch "$AIRLOCK_HOME"
-  [ "$status" -ne 0 ]; [[ "$output" == *"holds this account's airlock state"* ]] || { echo "$output"; return 1; }
+  [ "$status" -ne 0 ]; [[ "$output" == *"this account's airlock state"* ]] || { echo "$output"; return 1; }
   if engine_args | grep -q '^ENGINE_INVOKED='; then echo "launched"; return 1; fi
+}
+
+@test "the state refusal holds through symlinks, from /, and from inside the state or install dirs" {
+  refused() {  # refused <dir> [logical pwd]
+    : > "$ENGINE_ARGS_FILE"; TEST_LOGICAL_PWD="${2:-}" run _launch "$1"
+    [ "$status" -ne 0 ] && [[ "$output" == *"this account's airlock state"* ]] || { echo "$1: $output"; return 1; }
+    if engine_args | grep -q '^ENGINE_INVOKED='; then echo "$1: launched"; return 1; fi
+  }
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock/state" "$AIRLOCK_HOME/.local/share/claude-airlock/versions"
+  ln -s "$AIRLOCK_HOME" "$T/homelink"
+  refused "$T/homelink" "$T/homelink"                                   # a symlink to $HOME
+  refused /
+  refused "$AIRLOCK_HOME/.config/claude-airlock/state"
+  refused "$AIRLOCK_HOME/.local/share/claude-airlock/versions"
+  # the config dir symlinked out of $HOME: $HOME itself is still refused
+  mv "$AIRLOCK_HOME/.config/claude-airlock" "$T/cfg-elsewhere"; ln -s "$T/cfg-elsewhere" "$AIRLOCK_HOME/.config/claude-airlock"
+  refused "$AIRLOCK_HOME"
+  refused "$T/cfg-elsewhere/state"
+  # a project folder still launches
+  p="$(mkproj fine)"; : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -q '^ENGINE_INVOKED='
+}
+
+@test "extra mounts: entries on later lines of a multi-line value are kept" {
+  p="$(mkproj emlines)"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro\n%s:ro"\n' "$Q/requests" "$Q/answers" > "$CFG"
+  : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- "$Q/requests:$Q/requests:ro"
+  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro"
 }
 
 @test "extra mounts: read-write needs a root-owned dir (ours is read-only only); named twice, mounted once, ro wins; env-only mounted once; no globbing" {
