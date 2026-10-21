@@ -2437,7 +2437,7 @@ fi
 # :rw only for a directory root owns (one the account owns, the box could chmod open).
 _extra_pins=()
 declare -A _emode=()
-read -ra _ems -d '' <<< "$AIRLOCK_EXTRA_MOUNTS" || true    # every line, not just the first
+read -r -d '' -a _ems <<< "$AIRLOCK_EXTRA_MOUNTS" || true    # every line, not just the first
 for _em in "${_ems[@]}"; do
   _emp="${_em%:*}" _emm="${_em##*:}"
   case "$_emm" in ro|rw) ;; *) echo "claude-airlock: AIRLOCK_EXTRA_MOUNTS entry '$_em' needs :ro or :rw; skipped" >&2; continue ;; esac
