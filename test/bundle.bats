@@ -119,12 +119,17 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   writer_install "$REV1"
   run bundle "$B"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(ls "$B" | LC_ALL=C sort | tr '\n' ' ')" = "MANIFEST claude-airlock-$REV1.tar images-$REV1.tar install-bundle.sh " ]
-  [ "$(stat -c %a "$B/MANIFEST" "$B/images-$REV1.tar" | sort -u)" = 640 ]
+  [ "$(ls "$B" | LC_ALL=C sort | tr '\n' ' ')" = "MANIFEST claude-airlock-$REV1.tar images-base-$REV1.tar images-dev-$REV1.tar install-bundle.sh " ]
+  [ "$(stat -c %a "$B/MANIFEST" "$B/images-base-$REV1.tar" "$B/images-dev-$REV1.tar" | sort -u)" = 640 ]
+  grep -qx "format 2" "$B/MANIFEST"
   grep -qx "commit $REV1" "$B/MANIFEST"
   grep -qx "image dev sha256:w1-dev" "$B/MANIFEST"
-  grep -qx "sha256 $(sha256sum "$B/images-$REV1.tar" | cut -d' ' -f1) images-$REV1.tar" "$B/MANIFEST"
-  grep -qx "claude-airlock:dev-$REV1 sha256:w1-dev" "$B/images-$REV1.tar"     # saved under the commit's tags
+  for a in base dev; do
+    grep -qx "sha256 $(sha256sum "$B/images-$a-$REV1.tar" | cut -d' ' -f1) images-$a-$REV1.tar" "$B/MANIFEST"
+  done
+  # base with its os stage in one archive, dev alone in the other, under the commit's tags
+  [ "$(cut -d' ' -f1 "$B/images-base-$REV1.tar" | sort | tr '\n' ' ')" = "claude-airlock:base-$REV1 claude-airlock:os-$REV1 " ]
+  grep -qx "claude-airlock:dev-$REV1 sha256:w1-dev" "$B/images-dev-$REV1.tar"
   ! grep -q -- "-$REV1 " "$W/fe/tags" || false                                 # ...which are gone again
 }
 
@@ -166,7 +171,7 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
 
 @test "install-bundle: a file that does not match the manifest, or no manifest, installs nothing" {
   writer_install "$REV1"; bundle "$B" >/dev/null
-  for f in "images-$REV1.tar" "claude-airlock-$REV1.tar" install-bundle.sh; do
+  for f in "images-base-$REV1.tar" "images-dev-$REV1.tar" "claude-airlock-$REV1.tar" install-bundle.sh; do
     cp "$B/$f" "$BATS_TEST_TMPDIR/keep"; printf x >> "$B/$f"
     run env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$R/home" FE_STATE="$R/fe" AIRLOCK_ENGINE="$ENGINE" bash "$REPO/bin/install-bundle.sh" "$B"
     [ "$status" -ne 0 ] && [[ "$output" == *"$f does not match the manifest"* ]] || { echo "$f: $output"; return 1; }
@@ -189,8 +194,9 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
 @test "install-bundle: a source tree that is not the manifest's commit is refused" {
   writer_install "$REV1"; bundle "$B" >/dev/null
   sed -i "s/^commit $REV1/commit $REV2/" "$B/MANIFEST"
-  sed -i "s/claude-airlock-$REV1.tar/claude-airlock-$REV2.tar/; s/images-$REV1.tar/images-$REV2.tar/" "$B/MANIFEST"
-  mv "$B/claude-airlock-$REV1.tar" "$B/claude-airlock-$REV2.tar"; mv "$B/images-$REV1.tar" "$B/images-$REV2.tar"
+  sed -i "s/claude-airlock-$REV1.tar/claude-airlock-$REV2.tar/; s/images-base-$REV1.tar/images-base-$REV2.tar/; s/images-dev-$REV1.tar/images-dev-$REV2.tar/" "$B/MANIFEST"
+  mv "$B/claude-airlock-$REV1.tar" "$B/claude-airlock-$REV2.tar"
+  mv "$B/images-base-$REV1.tar" "$B/images-base-$REV2.tar"; mv "$B/images-dev-$REV1.tar" "$B/images-dev-$REV2.tar"
   run reader_install
   [ "$status" -ne 0 ]; [[ "$output" == *"not commit $REV2's"* ]]
   [ ! -e "$(RROOT)/current" ]
@@ -367,4 +373,31 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
   chmod 0644 "$c"; printf 'AIRLOCK_PASTE_DIR=/srv/inbox/pastes\n' >> "$c"
   R_CONFIG="$c" run reader_install
   [ "$status" -eq 0 ]; [[ "$output" != *"is not set up"* ]]
+}
+
+@test "install-bundle: an account on claude-airlock:base loads no dev image, records none, and lets an older dev go" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  # a reader that ran dev before: it holds an older dev image
+  printf 'claude-airlock:dev sha256:old-dev\n' >> "$R/fe/tags"; printf 'sha256:old-dev L\n' >> "$R/fe/images"
+  printf 'AIRLOCK_IMAGE=claude-airlock:base\n' > "$BATS_TEST_TMPDIR/agent.conf"
+  : > "$ENGINE_ARGS_FILE"
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"the dev image is not loaded"* && "$output" == *"image smoke (the dev tools) skipped"* ]]
+  if grep -q "images-dev-$REV1.tar" "$ENGINE_ARGS_FILE"; then echo "loaded the dev archive"; return 1; fi
+  grep -q "images-base-$REV1.tar" "$ENGINE_ARGS_FILE"
+  [ "$(cut -d' ' -f1 "$(RROOT)/current/IMAGES" | tr '\n' ' ')" = "base os " ]
+  grep -qx "claude-airlock:base sha256:w1-base" "$R/fe/tags"
+  if grep -q '^claude-airlock:dev' "$R/fe/tags"; then echo "a dev tag is left"; return 1; fi
+  if grep -q '^sha256:old-dev ' "$R/fe/images"; then echo "the old dev image wasn't pruned"; return 1; fi
+}
+
+@test "install-bundle: an account on dev (or with no image set) loads both archives" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  : > "$ENGINE_ARGS_FILE"
+  run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q "images-dev-$REV1.tar" "$ENGINE_ARGS_FILE"
+  grep -qx "claude-airlock:dev sha256:w1-dev" "$R/fe/tags"
+  [ "$(cut -d' ' -f1 "$(RROOT)/current/IMAGES" | tr '\n' ' ')" = "base os dev " ]
 }

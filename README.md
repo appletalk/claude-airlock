@@ -712,13 +712,15 @@ bash /srv/agent-inbox/airlock/install-bundle.sh   # as the other account: no bui
 make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has installed it
 ```
 
-- **What it holds:** the installed commit's source tree, its three images (`podman save`,
-  shared layers stored once) and a `MANIFEST` with the commit, each image's ID and a sha256
-  of every file. `make bundle` refuses unless the image tags are still the ones that commit
+- **What it holds:** the installed commit's source tree, its images in two archives (`base`
+  with its `os` stage, and `dev`; `podman save`, shared layers stored once per archive) and a
+  `MANIFEST` with the commit, each image's ID and a sha256 of every file. `make bundle` refuses unless the image tags are still the ones that commit
   went live with.
 - **What the reader checks:** every file against the manifest (a changed or half-written
   bundle installs nothing; the manifest is written last), that the source tree is the
-  manifest's commit, and that each image loads as exactly the ID the manifest names. Then it
+  manifest's commit, and that each image loads as exactly the ID the manifest names. An
+  account whose config runs `AIRLOCK_IMAGE=claude-airlock:base` loads only the base archive
+  (and lets an older `dev` of its own go): it never writes the dev image's layers. Then it
   goes live like any install, containment check and image smoke test included. The reader
   runs the bundle's own installer, so launcher and images always come from one commit. A
   bundle is not signed: it proves the files are the ones the writer wrote, so put it where

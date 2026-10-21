@@ -12,13 +12,13 @@ DIR="${1:-$(dirname "${BASH_SOURCE[0]}")}"
 DIR="$(cd "$DIR" && pwd)"
 M="$DIR/MANIFEST"
 [ -f "$M" ] || { echo "claude-airlock: no bundle in $DIR (no MANIFEST; still being written?)" >&2; exit 1; }
-grep -qx 'format 1' "$M" || { echo "claude-airlock: $M is not a bundle this version reads" >&2; exit 1; }
+grep -qx 'format 2' "$M" || { echo "claude-airlock: $M is not a bundle this version reads" >&2; exit 1; }
 REV="$(sed -n 's/^commit \([0-9a-f]\{12\}\)$/\1/p' "$M" | head -1)"
 [ -n "$REV" ] || { echo "claude-airlock: $M names no commit" >&2; exit 1; }
 
-# Exactly the three files, each matching. A name is only ever one of these: nothing in the
+# Exactly these files, each matching. A name is only ever one of these: nothing in the
 # manifest can point outside DIR.
-for f in "claude-airlock-$REV.tar" "images-$REV.tar" install-bundle.sh; do
+for f in "claude-airlock-$REV.tar" "images-base-$REV.tar" "images-dev-$REV.tar" install-bundle.sh; do
   want="$(awk -v f="$f" '$1 == "sha256" && $3 == f { print $2 }' "$M")"
   [ -n "$want" ] || { echo "claude-airlock: $M has no checksum for $f" >&2; exit 1; }
   have="$(sha256sum "$DIR/$f" 2>/dev/null | cut -d' ' -f1)"

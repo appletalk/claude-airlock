@@ -64,27 +64,31 @@ trap 'rm -f -- "$DIR"/*.part; for t in base os dev; do "$AIRLOCK_ENGINE" rmi "cl
 echo "==> Bundling commit $REV into $DIR"
 tar -C "$VER" -cf "$DIR/claude-airlock-$REV.tar.part" .
 # Saved under this commit's own tags (added just for the save), so loading one moves no
-# reader's live tags before its install has checked them.
+# reader's live tags before its install has checked them. Two archives: base with its os
+# stage, which every reader loads, and dev, which a reader loads only if its account runs dev
+# (an account on :base never writes the dev image's layers).
 for t in base os dev; do "$AIRLOCK_ENGINE" tag "claude-airlock:$t" "claude-airlock:$t-$REV"; done
-if [ "$AIRLOCK_ENGINE" = podman ]; then
-  podman save -q -m --format docker-archive -o "$DIR/images-$REV.tar.part" \
-    "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV"
-else
-  docker save -o "$DIR/images-$REV.tar.part" "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV"
-fi
+_save() {  # _save <archive> <tag...>
+  local out="$1"; shift
+  if [ "$AIRLOCK_ENGINE" = podman ]; then podman save -q -m --format docker-archive -o "$out" "$@"
+  else docker save -o "$out" "$@"; fi
+}
+_save "$DIR/images-base-$REV.tar.part" "claude-airlock:base-$REV" "claude-airlock:os-$REV"
+_save "$DIR/images-dev-$REV.tar.part" "claude-airlock:dev-$REV"
 cp "$VER/bin/install-bundle.sh" "$DIR/install-bundle.sh.part"
 chmod 0640 "$DIR"/*.part
-for f in "claude-airlock-$REV.tar" "images-$REV.tar" install-bundle.sh; do mv -f "$DIR/$f.part" "$DIR/$f"; done
+FILES=("claude-airlock-$REV.tar" "images-base-$REV.tar" "images-dev-$REV.tar" install-bundle.sh)
+for f in "${FILES[@]}"; do mv -f "$DIR/$f.part" "$DIR/$f"; done
 {
-  echo "format 1"
+  echo "format 2"
   echo "commit $REV"
   echo "engine $AIRLOCK_ENGINE"
   for t in base os dev; do echo "image $t $(awk -v t="$t" '$1 == t { print $2 }' "$VER/IMAGES")"; done
-  for f in "claude-airlock-$REV.tar" "images-$REV.tar" install-bundle.sh; do
+  for f in "${FILES[@]}"; do
     echo "sha256 $(sha256sum "$DIR/$f" | cut -d' ' -f1) $f"
   done
 } > "$DIR/MANIFEST.part"
 mv -f "$DIR/MANIFEST.part" "$DIR/MANIFEST"
-echo "==> Bundle ready: $(du -ch "$DIR/claude-airlock-$REV.tar" "$DIR/images-$REV.tar" | tail -1 | cut -f1) in $DIR"
+echo "==> Bundle ready: $(du -ch "$DIR/claude-airlock-$REV.tar" "$DIR"/images-*-"$REV".tar | tail -1 | cut -f1) in $DIR"
 echo "    The other account: bash $DIR/install-bundle.sh"
 echo "    Then remove it:    make bundle-clean DIR=$DIR   (or bin/bundle.sh --clean $DIR)"

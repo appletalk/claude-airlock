@@ -30,6 +30,12 @@ if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_FILE" ]; then
   AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_FILE" | tr -d '"'\''[:space:]' | tail -1)"
 fi
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
+# The image this account's boxes run (the same config): from a bundle, an account on
+# claude-airlock:base loads no dev image at all (its layers are a few GB never used).
+ACCOUNT_IMAGE="${AIRLOCK_IMAGE:-}"
+if [ -z "$ACCOUNT_IMAGE" ] && [ -f "$CONFIG_FILE" ]; then
+  ACCOUNT_IMAGE="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}AIRLOCK_IMAGE=//p' "$CONFIG_FILE" | tr -d '"'\''[:space:]' | tail -1)"
+fi
 
 case "$AIRLOCK_ENGINE" in
   podman|docker) ;;
@@ -232,11 +238,17 @@ if [ -n "$FROM_BUNDLE" ]; then
     echo "  (their image IDs and names differ); ask for a bundle written with $AIRLOCK_ENGINE. Nothing went live." >&2
     exit 1
   fi
-  _imgs="$FROM_BUNDLE/images-$REV.tar"
-  [ -f "$_imgs" ] || { echo "claude-airlock: the bundle has no images-$REV.tar; nothing went live." >&2; exit 1; }
-  echo "==> Loading the bundle's images ($(du -h "$_imgs" | cut -f1))"
-  "$AIRLOCK_ENGINE" load -q -i "$_imgs" >/dev/null
-  for _t in base os dev; do
+  # base (with its os stage) always; dev only for an account whose boxes run it.
+  _types="base os dev" _archives="base dev"
+  if [ "$ACCOUNT_IMAGE" = claude-airlock:base ]; then _types="base os" _archives="base"; fi
+  for _a in $_archives; do
+    _imgs="$FROM_BUNDLE/images-$_a-$REV.tar"
+    [ -f "$_imgs" ] || { echo "claude-airlock: the bundle has no images-$_a-$REV.tar; nothing went live." >&2; exit 1; }
+    echo "==> Loading the bundle's $_a image ($(du -h "$_imgs" | cut -f1))"
+    "$AIRLOCK_ENGINE" load -q -i "$_imgs" >/dev/null
+  done
+  [ "$_archives" = base ] && echo "    (this account runs claude-airlock:base: the dev image is not loaded)"
+  for _t in $_types; do
     _want="$(awk -v t="$_t" '$1 == "image" && $2 == t { print $3 }' "$FROM_BUNDLE/MANIFEST")"
     _have="$(_id "claude-airlock:$_t-$REV")"
     if [ -z "$_want" ] || [ "$_have" != "$_want" ]; then
@@ -356,8 +368,10 @@ else
   echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
 fi
 
-# Which images this version is (a bundle carries the list).
-for _t in base os dev; do printf '%s %s\n' "$_t" "$(_id "claude-airlock:$_t-$REV")"; done > "$DEST/IMAGES"
+# Which images this version is (a bundle carries the list): the ones this account has.
+_have_types="base os dev"
+[ -n "$(_id "claude-airlock:dev-$REV")" ] || _have_types="base os"
+for _t in $_have_types; do printf '%s %s\n' "$_t" "$(_id "claude-airlock:$_t-$REV")"; done > "$DEST/IMAGES"
 
 # Both images built: make this version live. The image tags and `current` move together;
 # `current` flips in one rename (a unique temp name, so concurrent installs cannot trip over
@@ -365,7 +379,12 @@ for _t in base os dev; do printf '%s %s\n' "$_t" "$(_id "claude-airlock:$_t-$REV
 # activation time, which the prune orders by.
 "$AIRLOCK_ENGINE" tag "claude-airlock:base-$REV" claude-airlock:base
 "$AIRLOCK_ENGINE" tag "claude-airlock:os-$REV" claude-airlock:os
-"$AIRLOCK_ENGINE" tag "claude-airlock:dev-$REV" claude-airlock:dev
+if [ "$_have_types" = "base os dev" ]; then
+  "$AIRLOCK_ENGINE" tag "claude-airlock:dev-$REV" claude-airlock:dev
+else
+  # No dev for this account: let go of an older one, so the prune below can take its layers.
+  "$AIRLOCK_ENGINE" rmi claude-airlock:dev >/dev/null 2>&1 || true
+fi
 "$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
 [ -n "$FROM_BUNDLE" ] || printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
 touch "$DEST"
@@ -439,8 +458,10 @@ if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:base "$SRC_DI
   exit 1
 fi
 
-echo "==> Checking the dev image's tools work offline (image smoke)"
-if ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:dev "$SRC_DIR/scripts/image-smoke.sh"; then
+if [ "$_have_types" != "base os dev" ]; then
+  echo "==> No dev image on this account: image smoke (the dev tools) skipped"
+elif echo "==> Checking the dev image's tools work offline (image smoke)"
+  ! AIRLOCK_ENGINE="$AIRLOCK_ENGINE" AIRLOCK_IMAGE=claude-airlock:dev "$SRC_DIR/scripts/image-smoke.sh"; then
   echo
   echo "claude-airlock: commit $REV is now live, but its dev image FAILED the smoke test above." >&2
   echo "  Boxes still start; a tool listed as FAIL will not work inside them." >&2
