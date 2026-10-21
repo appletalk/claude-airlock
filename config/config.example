@@ -66,6 +66,18 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 # install -d -m 2750 -o <writer> -g <reader's primary group> DIR) so pastes are readable there.
 # AIRLOCK_PASTE_DIR="/srv/agent-inbox/pastes"
 
+# Extra host directories for every box of this account, at their own paths: "DIR:ro" or
+# "DIR:rw", space-separated (a host-side script launching a box may add more in the
+# environment; both apply; .airlock/config can't). Each must be its real path, root's or yours,
+# not world-writable (group-writable is fine), every directory above it root's alone, and not
+# a system directory or the workspace. A failing entry is skipped with a warning.
+# AIRLOCK_EXTRA_MOUNTS="/srv/queue/requests:rw /srv/queue/answers:ro"
+#
+# A Claude Code managed-settings drop-in for every box of this account (a JSON object in a
+# file root owns and only root may write): restrictions the box can't loosen, such as denied
+# tools. A file that fails the check stops the launch.
+# AIRLOCK_MANAGED_SETTINGS="/etc/agent/managed-settings.json"
+
 # Broad read-only roots mounted at /roots/<name> for cross-project inspection.
 # EMPTY by default (no other project is visible unless a project `share =`s it and
 # you approve it). Only set this if you deliberately want every listed tree readable

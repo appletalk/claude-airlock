@@ -539,6 +539,7 @@ Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
 `AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`,
 `AIRLOCK_PROTECTED_PATHS` (extra paths no share or mount may overlap),
 `AIRLOCK_PASTE_PROJECT` or `AIRLOCK_PASTE_DIR` (where pastes go; see `airlock paste`),
+`AIRLOCK_EXTRA_MOUNTS` and `AIRLOCK_MANAGED_SETTINGS` (see *Running boxes as a dedicated user*),
 `AIRLOCK_SECRET_DENY` (pass entries never injected) and `AIRLOCK_GIT_RO` (default `1`:
 read-write repos get their git config and hooks bound read-only, see SECURITY.md; `0` turns
 it off), and `AIRLOCK_TZ` (the box's timezone, a zone name such as `America/Vancouver`; by
@@ -693,6 +694,21 @@ branches, say). Nothing in the launcher assumes it runs as you:
   accepts that path (root-owned directories, a service account's socket).
 - **Pastes through a drop box.** The account has no clipboard of yours; set
   `AIRLOCK_PASTE_DIR` to a directory you write and it only reads (see *Pasting images*).
+- **Shared directories, by the operator only: `AIRLOCK_EXTRA_MOUNTS`.** Space-separated
+  `DIR:ro` / `DIR:rw` entries, mounted at their own paths, from the account's config or the
+  environment of whatever launches the box (a host-side script running one box for one task;
+  both lists apply), never from `.airlock/config`. Each must be its real path, not a system
+  directory or the workspace, root's or the account's own, never world-writable (group-writable
+  is fine: a queue several accounts share), with every directory above it root's and writable by
+  root alone, and no hard-linked file or mount point inside. Checked, pinned, and re-checked just
+  before the launch (a swap stops it); an entry that fails is skipped with a warning.
+- **Box settings the box can't loosen: `AIRLOCK_MANAGED_SETTINGS`.** A JSON object in a file
+  root owns and only root may write (config or environment only), copied in as a Claude Code
+  managed-settings drop-in, which outranks the user's and the project's settings. Use it to
+  deny tools per account (say, `"permissions": {"deny": ["SendMessage", "ListAgents"]}` and
+  `"crossSessionInbound": "refuse"` so sessions on one subscription can't message each other).
+  A file that fails the check stops the launch: a box without the restrictions isn't the box
+  you configured.
 - **Files the other way: git only.** Clone the repos it works on into its own home and have
   it push branches; you review and merge. Don't share a checkout you later run.
 - **Get to its sessions without its password:** `machinectl shell <user>@.host` (with a

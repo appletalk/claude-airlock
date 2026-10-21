@@ -94,10 +94,15 @@ _airlock_tmp_base_ready() {
 # values would apply the config twice (an appending AIRLOCK_DNS doubles).
 _AIRLOCK_PODMAN_NETWORK_ENV="$AIRLOCK_PODMAN_NETWORK"
 _AIRLOCK_DNS_ENV="$AIRLOCK_DNS"
+# Extra host mounts may come from the config and from the launching process (a host-side script
+# running a box for one task); both apply. Never from .airlock/config, which the box can write.
+_AIRLOCK_EXTRA_MOUNTS_ENV="${AIRLOCK_EXTRA_MOUNTS:-}"
+unset AIRLOCK_EXTRA_MOUNTS
 
 CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+AIRLOCK_EXTRA_MOUNTS="${AIRLOCK_EXTRA_MOUNTS:-} $_AIRLOCK_EXTRA_MOUNTS_ENV"
 
 # The refcount primitives and the `session` subcommand live HERE, above the engine and
 # AIRLOCK_TMP_BASE checks, because the host `claude` wrapper calls them on every start
@@ -765,8 +770,13 @@ _airlock_place() {   # $1 = private temp file, $2 = destination in a box-writabl
 # else between this check and the mount. Hard links and mount points are refused as found
 # here; what the owner adds later is bounded by the kernel (fs.protected_hardlinks lets them
 # link only files they own or may write; a FUSE mount of theirs is closed to other users).
-_airlock_paste_dir_check() {
-  local want="$1" c home d u m
+_airlock_paste_dir_check() { _airlock_host_dir_check "$1" paste; }
+# A host-configured extra mount (AIRLOCK_EXTRA_MOUNTS): the same rules, but the directory itself
+# may be group-writable (a queue several accounts write); it must be root's or this account's
+# and never world-writable. Every directory above it is still root's and root-writable only.
+_airlock_extra_mount_check() { _airlock_host_dir_check "$1" extra; }
+_airlock_host_dir_check() {   # $1 = path, $2 = paste | extra
+  local want="$1" kind="$2" c home d u m
   case "$want" in /*) ;; *) echo "'$want' must be an absolute path" >&2; return 1 ;; esac
   case "$want" in
     *:*|*,*|*[[:cntrl:]]*) echo "'$want' contains ':', ',' or a control character" >&2; return 1 ;;
@@ -789,10 +799,20 @@ _airlock_paste_dir_check() {
   esac
   case "$WORKSPACE" in "$c"/*) echo "'$c' contains the workspace" >&2; return 1 ;; esac
   d="$c"
+  if [ "$kind" = extra ]; then
+    u="$(stat -c %u "$c")" m="$(stat -c %a "$c")"
+    if [ "$u" != 0 ] && [ "$u" != "$(id -u)" ]; then
+      echo "'$c' must be root's or yours" >&2; return 1
+    fi
+    if [[ ! "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#002 )); then
+      echo "'$c' is world-writable" >&2; return 1
+    fi
+    d="$(dirname "$c")"
+  fi
   while :; do
     u="$(stat -c %u "$d")" m="$(stat -c %a "$d")"
     if [ "$d" != "$c" ] && [ "$u" != 0 ]; then
-      echo "'$d' (above '$c') must be root's, so the paste dir's owner cannot swap it" >&2; return 1
+      echo "'$d' (above '$c') must be root's, so the directory's owner cannot swap it" >&2; return 1
     fi
     if [[ ! "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#022 )); then
       echo "'$d' (holding or being '$c') is group/world-writable: only its owner may write there" >&2; return 1
@@ -2183,6 +2203,22 @@ fi
 # read-only over the image's managed-settings.d below. Emptied each launch.
 mkdir -p "$STATE_DIR/managed-settings.d"
 find "$STATE_DIR/managed-settings.d" -mindepth 1 -delete
+# A host-side managed-settings drop-in (AIRLOCK_MANAGED_SETTINGS, config or environment only): a
+# JSON file root owns and only root may change (the account running the box cannot loosen its own
+# box), copied in here, so the box sees it under /etc/claude-code/managed-settings.d. A file that
+# fails the check stops the launch: these are restrictions, and a box without them is not the box
+# the operator configured.
+if [ -n "${AIRLOCK_MANAGED_SETTINGS:-}" ]; then
+  _ms="$AIRLOCK_MANAGED_SETTINGS"
+  _msr="$(readlink -e "$_ms" 2>/dev/null)" || { echo "claude-airlock: AIRLOCK_MANAGED_SETTINGS '$_ms' does not exist; not launching" >&2; exit 1; }
+  if [ ! -f "$_msr" ] || [ "$(stat -c %u "$_msr")" != 0 ] || (( 8#$(stat -c %a "$_msr") & 8#022 )); then
+    echo "claude-airlock: AIRLOCK_MANAGED_SETTINGS '$_msr' must be a file root owns and only root may write; not launching" >&2; exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1 || ! jq -e 'type == "object"' "$_msr" >/dev/null 2>&1; then
+    echo "claude-airlock: AIRLOCK_MANAGED_SETTINGS '$_msr' is not a JSON object (or jq is missing); not launching" >&2; exit 1
+  fi
+  cp "$_msr" "$STATE_DIR/managed-settings.d/50-host.json"
+fi
 # The box's timezone: AIRLOCK_TZ, else $TZ, else the host's zone (timedatectl, or where
 # /etc/localtime points), else UTC. Only a plain zone name is passed on.
 _box_tz() {
@@ -2375,6 +2411,19 @@ if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then
   fi
 fi
 [ -z "$_pastes" ] || args+=( -e "AIRLOCK_PASTES=$_pastes" )
+
+# Host-configured extra mounts (AIRLOCK_EXTRA_MOUNTS): "DIR:ro" or "DIR:rw", at their own
+# path. A directory that fails the check is skipped with a warning (that only removes access).
+_extra_pins=()
+for _em in $AIRLOCK_EXTRA_MOUNTS; do
+  _emp="${_em%:*}" _emm="${_em##*:}"
+  case "$_emm" in ro|rw) ;; *) echo "claude-airlock: AIRLOCK_EXTRA_MOUNTS entry '$_em' needs :ro or :rw; skipped" >&2; continue ;; esac
+  if _emc="$(_airlock_extra_mount_check "$_emp" 2>&1)"; then
+    args+=( -v "$_emc:$_emc:$_emm" ); _extra_pins+=( "$(stat -c %d:%i "$_emc") $_emc" )
+  else
+    echo "claude-airlock: NOT mounting AIRLOCK_EXTRA_MOUNTS entry '$_em': $_emc" >&2
+  fi
+done
 
 # Host-added read-only mounts (`airlock mount add`). Re-checked here, not trusted from the
 # store: a directory that has since become a symlink into ~/.ssh, or gained a hard link,
@@ -3015,6 +3064,16 @@ if [ -n "$_paste_pin" ]; then
     exit 1
   fi
 fi
+
+# The extra mounts the same way.
+for _kp in "${_extra_pins[@]}"; do
+  _kpath="${_kp#* }"
+  if ! _airlock_extra_mount_check "$_kpath" >/dev/null 2>&1 \
+      || [ "$(stat -c %d:%i "$_kpath" 2>/dev/null)" != "${_kp%% *}" ]; then
+    echo "claude-airlock: the extra mount $_kpath changed after it was checked; not launching" >&2
+    exit 1
+  fi
+done
 
 MOUNTED=1
 if [ "$AIRLOCK_SHELL" = 1 ]; then
