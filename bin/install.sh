@@ -25,19 +25,17 @@ CONFIG_DIR="$HOME/.config/claude-airlock"
 # The config the launcher reads: AIRLOCK_CONFIG if set (a config kept elsewhere, say one root
 # owns for an agent's account), else the usual one.
 CONFIG_FILE="${AIRLOCK_CONFIG:-$CONFIG_DIR/config}"
-AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-}"
-if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_FILE" ]; then
-  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_FILE" | tail -1 | tr -d '"'\''[:space:]')"
-fi
+# A setting as the launcher sees it: the environment, then the config sourced over it (the
+# config wins). Sourced, not parsed, so the install and the launcher can't read it differently.
+_cfg_get() {  # _cfg_get NAME
+  # shellcheck disable=SC1090
+  ( set +eu; [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE" </dev/null >/dev/null 2>&1; printf '%s' "${!1:-}" ) || true
+}
+AIRLOCK_ENGINE="$(_cfg_get AIRLOCK_ENGINE)"
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
-# The image this account's boxes run (the same config): from a bundle, an account on
-# claude-airlock:base loads no dev image at all (its layers are a few GB never used). The
-# config wins over the environment, as in the launcher (which sources it after reading both).
-ACCOUNT_IMAGE=""
-if [ -f "$CONFIG_FILE" ]; then
-  ACCOUNT_IMAGE="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}AIRLOCK_IMAGE=//p' "$CONFIG_FILE" | tail -1 | tr -d '"'\''[:space:]')"
-fi
-ACCOUNT_IMAGE="${ACCOUNT_IMAGE:-${AIRLOCK_IMAGE:-}}"
+# The image this account's boxes run: from a bundle, an account on claude-airlock:base loads
+# no dev image at all (its layers are a few GB never used).
+ACCOUNT_IMAGE="$(_cfg_get AIRLOCK_IMAGE)"
 ACCOUNT_IMAGE="${ACCOUNT_IMAGE#localhost/}"
 
 case "$AIRLOCK_ENGINE" in
@@ -393,6 +391,10 @@ if [ "$_have_types" = "base os dev" ]; then
 else
   # No dev for this account: let go of an older one, so the prune below can take its layers.
   "$AIRLOCK_ENGINE" rmi claude-airlock:dev >/dev/null 2>&1 || true
+  if [ -n "$(_id claude-airlock:dev)" ]; then
+    echo "claude-airlock: warning: an older claude-airlock:dev is still here (a running box holds it?);" >&2
+    echo "  a launch on dev would run it. Remove it once no box uses it: $AIRLOCK_ENGINE rmi claude-airlock:dev" >&2
+  fi
 fi
 # One at a time: an engine may stop at a name it does not have (no dev on a base-only account).
 for _t in base os dev; do "$AIRLOCK_ENGINE" rmi "claude-airlock:$_t-$REV" >/dev/null 2>&1 || true; done

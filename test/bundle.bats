@@ -14,7 +14,8 @@ load helper
 # a tag (the image too once nothing tags it) or an id, save writes the tags' lines to the
 # archive and load reads them back (FE_LOAD_ID=<id> replaces every id, as a foreign archive
 # would). image prune with the label removes untagged labelled images, except FE_INUSE (an
-# id a running box holds); FE_PRUNE_FAIL=1 makes it fail, FE_BUILD_FAIL=<tag> fails that build.
+# id a running box holds); FE_PRUNE_FAIL=1 makes it fail, FE_BUILD_FAIL=<tag> fails that build,
+# FE_RMI_REFUSE=<tag> keeps that tag through rmi (an image a running box holds).
 fake_engine() {
   cat > "$STUBBIN/$ENGINE" <<'EOF'
 #!/usr/bin/env bash
@@ -53,6 +54,7 @@ case "$1" in
   tag) id="$(get "$2")"; [ -n "$id" ] || exit 1; put "$3" "$id" ;;
   rmi) shift; for a in "$@"; do
          case "$a" in -*) continue ;; esac
+         [ "$a" != "${FE_RMI_REFUSE:-}" ] || continue                 # in use by a running box
          id="$(get "$a")"
          if [ -n "$id" ]; then grep -v "^$(norm "$a") " "$st" > "$st.n" || true; mv "$st.n" "$st"; tagged "$id" || drop_image "$id"
          else grep -v " $a$" "$st" > "$st.n" || true; mv "$st.n" "$st"; drop_image "$a"; fi
@@ -105,6 +107,7 @@ reader_install() {  # as the reader: the bundle's own install-bundle.sh
     ${R_CONFIG:+AIRLOCK_CONFIG="$R_CONFIG"} ${R_IMAGE:+AIRLOCK_IMAGE="$R_IMAGE"} \
     ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" ${FE_LOAD_ID:+FE_LOAD_ID="$FE_LOAD_ID"} \
     ${FAIL_CHECK:+FAIL_CHECK="$FAIL_CHECK"} ${R_ENGINE:+AIRLOCK_ENGINE="$R_ENGINE"} \
+    ${FE_RMI_REFUSE:+FE_RMI_REFUSE="$FE_RMI_REFUSE"} \
     bash "$B/install-bundle.sh" </dev/null
 }
 RROOT() { printf '%s' "$R/home/.local/share/claude-airlock"; }
@@ -435,4 +438,31 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
   run reader_install
   [ "$status" -ne 0 ]; [[ "$output" == *"is not a bundle this version reads"* ]]
   [ ! -e "$(RROOT)/current" ]
+}
+
+@test "install-bundle: the config is read as the launcher reads it (sourced): a conditional dev line still loads dev" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  printf 'AIRLOCK_IMAGE=claude-airlock:base\n[ 1 ] && AIRLOCK_IMAGE=claude-airlock:dev\n' > "$BATS_TEST_TMPDIR/agent.conf"
+  : > "$ENGINE_ARGS_FILE"
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q "images-dev-$REV1.tar" "$ENGINE_ARGS_FILE"
+}
+
+@test "install-bundle: the config's engine wins over the environment's, export or not" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  other=docker; [ "$ENGINE" = podman ] || other=podman
+  printf 'export AIRLOCK_ENGINE=%s\n' "$other" > "$BATS_TEST_TMPDIR/agent.conf"
+  ln -sf "$STUBBIN/$ENGINE" "$STUBBIN/$other" 2>/dev/null || true
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" run reader_install
+  [ "$status" -ne 0 ]; [[ "$output" == *"this account uses $other"* ]] || { echo "$output"; return 1; }
+}
+
+@test "install-bundle: a base-only account warns when an older dev stays (a running box holds it)" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  printf 'claude-airlock:dev sha256:old-dev\n' >> "$R/fe/tags"; printf 'sha256:old-dev L\n' >> "$R/fe/images"
+  printf 'AIRLOCK_IMAGE=claude-airlock:base\n' > "$BATS_TEST_TMPDIR/agent.conf"
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" FE_RMI_REFUSE=claude-airlock:dev run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"an older claude-airlock:dev is still here"* ]]
 }

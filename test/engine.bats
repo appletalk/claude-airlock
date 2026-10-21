@@ -467,7 +467,7 @@ S
   done
 }
 
-@test "an image this account does not have is refused before the run, under BOTH engines" {
+@test "an image this account does not have is refused before the run" {
   p="$(mkproj noimg)"
   STUB_IMAGE_MISSING=1 run _launch "$p"
   [ "$status" -ne 0 ]

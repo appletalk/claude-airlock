@@ -26,11 +26,10 @@ _drop() {
 if [ "$clean" = 1 ]; then _drop; echo "==> Removed the bundle in $DIR"; exit 0; fi
 [ -w "$DIR" ] || { echo "claude-airlock: $DIR is not writable by you" >&2; exit 1; }
 
-CONFIG_DIR="$HOME/.config/claude-airlock"
-AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-}"
-if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_DIR/config" ]; then
-  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_DIR/config" | tail -1 | tr -d '"'\''[:space:]')"
-fi
+# The engine as the launcher sees it: the environment, then the config sourced over it.
+CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
+# shellcheck disable=SC1090
+AIRLOCK_ENGINE="$( (set +eu; [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE" </dev/null >/dev/null 2>&1; printf '%s' "${AIRLOCK_ENGINE:-}") || true)"
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
 case "$AIRLOCK_ENGINE" in podman|docker) ;; *) echo "claude-airlock: AIRLOCK_ENGINE must be podman or docker" >&2; exit 1 ;; esac
 
