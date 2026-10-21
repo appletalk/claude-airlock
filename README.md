@@ -705,9 +705,11 @@ branches, say). Nothing in the launcher assumes it runs as you:
   needs a directory root owns (in one the account owns, the box could open the mode up); a
   directory named twice is mounted once, read-only if either entry says so.
 - **Launch from a project folder.** A box is refused when its workspace is the home directory
-  or anything above it, or sits inside `~/.config/claude-airlock` or the install directory
-  (compared after resolving symlinks): the workspace mount would hand the box its own
-  managed settings, state and launcher read-write. Subcommands (`airlock egress show`, ...)
+  or anything above it, sits inside `~/.config/claude-airlock`, the install directory or
+  `~/.local/bin`, or holds an `AIRLOCK_CONFIG` file the account owns (compared after resolving
+  symlinks): the workspace mount would hand the box its own managed settings, state, config
+  or launcher read-write. Other host config in the home directory (shell profiles, other
+  tools' settings) is yours to keep out of workspaces. Subcommands (`airlock egress show`, ...)
   still work from anywhere.
 - **Box settings the box can't loosen: `AIRLOCK_MANAGED_SETTINGS`.** A JSON object in a file
   root owns and only root may write (config or environment only), copied in as a Claude Code

@@ -138,6 +138,17 @@ STUB
   mv "$AIRLOCK_HOME/.config/claude-airlock" "$T/cfg-elsewhere"; ln -s "$T/cfg-elsewhere" "$AIRLOCK_HOME/.config/claude-airlock"
   refused "$AIRLOCK_HOME"
   refused "$T/cfg-elsewhere/state"
+  refused / //                                                         # "//" resolves to /
+  mkdir -p "$AIRLOCK_HOME/.local/bin"; refused "$AIRLOCK_HOME/.local/bin"
+  # an installed launcher's own root (<root>/versions/<rev>), wherever the root is
+  mkdir -p "$T/iroot/versions/r1" "$T/iroot/work"
+  tar -C "$BATS_TEST_DIRNAME/.." --exclude=.git --exclude=.tooling -cf - . | tar -x -C "$T/iroot/versions/r1"
+  ( AIRLOCK="$T/iroot/versions/r1/bin/claude-airlock"; refused "$T/iroot/work" )
+  # an AIRLOCK_CONFIG the account owns: refused only when the workspace holds the file
+  mkdir -p "$T/cfgs/proj"; printf '' > "$T/cfgs/airlock.conf"
+  TEST_AIRLOCK_CONFIG="$T/cfgs/airlock.conf" refused "$T/cfgs"
+  : > "$ENGINE_ARGS_FILE"; TEST_AIRLOCK_CONFIG="$T/cfgs/airlock.conf" _launch "$T/cfgs/proj" >/dev/null 2>&1 || true
+  engine_args | grep -q '^ENGINE_INVOKED='
   # a project folder still launches
   p="$(mkproj fine)"; : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
   engine_args | grep -q '^ENGINE_INVOKED='

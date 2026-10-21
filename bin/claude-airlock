@@ -2202,18 +2202,28 @@ fi
 # A workspace holding this account's airlock state would hand the box that state read-write
 # through the workspace mount: its managed settings, session files and config, or the
 # installed launcher (host code the next launch runs). Refused: the home directory or
-# anything above it, and anything inside the config or install directories. Compared as
+# anything above it, and anything inside the directories below. Compared as
 # resolved paths, since the engine mounts what a symlinked workspace or home resolves to.
-_ws_real="$(cd -P -- "$WORKSPACE" 2>/dev/null && pwd -P)" || _ws_real="$WORKSPACE"
+_ws_real="$(readlink -f -- "$WORKSPACE" 2>/dev/null)" || _ws_real="$WORKSPACE"   # readlink, not pwd -P: that keeps "//"
 _home_real="$(readlink -f "$HOME" 2>/dev/null)" || _home_real="$HOME"
 _ws_pre="${_ws_real%/}/"      # "/" for the root (an inline ${..%/} in a case pattern does not match there)
 _held=""
-for _sd in "$_home_real" "$HOME/.config/claude-airlock" "$HOME/.local/share/claude-airlock"; do
+# Also: ~/.local/bin (the launcher links), the install root this launcher runs from (an
+# installed one: <root>/versions/<rev>; not a checkout, which may be the workspace on purpose),
+# and an AIRLOCK_CONFIG file the account owns (it is sourced at launch: refused only when the
+# workspace holds the file itself).
+_state_dirs=( "$_home_real" "$HOME/.config/claude-airlock" "$HOME/.local/share/claude-airlock" "$HOME/.local/bin" )
+[ "$(basename "$(dirname "$_repo")")" = versions ] && _state_dirs+=( "$(dirname "$(dirname "$_repo")")" )
+for _sd in "${_state_dirs[@]}"; do
   _sdr="$(readlink -f "$_sd" 2>/dev/null)" || _sdr="$_sd"
   case "$_sdr/" in "$_ws_pre"*) _held="$_sdr" ;; esac               # the workspace holds it
   [ "$_sdr" = "$_home_real" ] && continue
   case "$_ws_real/" in "$_sdr"/*) _held="$_sdr" ;; esac            # the workspace is inside it
 done
+if [ -f "$CONFIG_FILE" ] && [ "$(stat -c %u "$CONFIG_FILE")" != 0 ]; then
+  _cfr="$(readlink -f "$CONFIG_FILE" 2>/dev/null)" || _cfr="$CONFIG_FILE"
+  case "$_cfr" in "$_ws_pre"*) _held="$_cfr" ;; esac
+fi
 if [ -n "$_held" ]; then
   echo "claude-airlock: the workspace $WORKSPACE ($_ws_real) holds or sits in this account's airlock state ($_held); run it from a project folder, not \$HOME or above; not launching" >&2
   exit 1
