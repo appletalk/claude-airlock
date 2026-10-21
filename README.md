@@ -779,7 +779,10 @@ make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has instal
   exploits. Nothing the box runs needs one: Claude Code's own Bash sandbox (bubblewrap)
   is opt-in, not in the image, and falls back to unsandboxed with a warning; Chromium
   runs `--no-sandbox`; git, node, python, pwsh, kubectl, the validators and Postgres are
-  unaffected (checked). The doctor and the image smoke test run under the same profile.
+  unaffected (checked). The profile also refuses kernel interfaces nothing in the box uses
+  and that have a history of kernel bugs: keyrings (`keyctl`; `add_key` and `request_key`
+  are already outside the default), `memfd_secret`, and `AF_ALG` sockets (the kernel crypto
+  API, answered EAFNOSUPPORT). The doctor and the image smoke test run under the same profile.
 - **The host is not on the box's network.** Under pasta the launcher passes
   `--map-guest-addr none`, so `169.254.1.2` (`host.containers.internal`) reaches nothing;
   podman already declines to map the gateway address and forwards no ports. Host

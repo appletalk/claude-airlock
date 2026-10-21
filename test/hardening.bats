@@ -22,7 +22,8 @@ setup() { setup_airlock_env; }
 # The engine's default seccomp profile lets the agent create user namespaces and become
 # root with a full cap set inside one (measured) - the precondition for most
 # container-to-host kernel exploits. The box runs with the repo's own profile instead:
-# podman's default with new namespaces refused. Both engines take the same flag.
+# podman's default with new namespaces (and a few unused kernel interfaces) refused. Both
+# engines take the same flag.
 @test "passes the repo's seccomp profile, under BOTH engines" {
   for e in podman docker; do
     : > "$ENGINE_ARGS_FILE"
@@ -32,7 +33,7 @@ setup() { setup_airlock_env; }
   done
 }
 
-@test "the seccomp profile refuses new namespaces and nothing else the default allows" {
+@test "the seccomp profile refuses new namespaces and keeps the everyday syscalls" {
   prof="$BATS_TEST_DIRNAME/../image/seccomp.json"
   jq -e . "$prof" >/dev/null                                             # valid JSON
   # unshare and setns: refused outright.
@@ -45,9 +46,22 @@ setup() { setup_airlock_env; }
   # None of the four appears in an unconditional allow rule any more.
   [ "$(jq '[.syscalls[] | select(.action == "SCMP_ACT_ALLOW" and (.args | length) == 0 and (.includes // {} | length) == 0) | .names[] | select(. == "unshare" or . == "setns" or . == "clone" or . == "clone3")] | length' "$prof")" = 0 ]
   # The rest of the default is intact: fork's siblings and the everyday syscalls stay allowed.
-  for s in fork vfork execve openat read write mmap futex epoll_wait; do
+  for s in fork vfork execve openat read write mmap futex epoll_wait memfd_create; do
     jq -e --arg s "$s" '.syscalls[] | select(.action == "SCMP_ACT_ALLOW") | .names[] | select(. == $s)' "$prof" >/dev/null || { echo "$s missing"; false; }
   done
+}
+
+@test "the seccomp profile refuses keyrings, memfd_secret and AF_ALG sockets" {
+  prof="$BATS_TEST_DIRNAME/../image/seccomp.json"
+  # Not allowed by any rule (so the default ENOSYS answers), and refused explicitly.
+  for s in keyctl add_key request_key memfd_secret; do
+    [ "$(jq --arg s "$s" '[.syscalls[] | select(.action == "SCMP_ACT_ALLOW") | .names[] | select(. == $s)] | length' "$prof")" = 0 ] \
+      || { echo "$s allowed"; false; }
+  done
+  [ "$(jq -r '.syscalls[] | select(.names == ["keyctl","memfd_secret"]) | "\(.action) \(.errnoRet)"' "$prof")" = "SCMP_ACT_ERRNO 38" ]
+  # socket(AF_ALG = 38): EAFNOSUPPORT, whatever the caps (an argument rule; the ERRNO wins
+  # over the allow rules for other families, as the AF_VSOCK rule already relies on).
+  [ "$(jq -r '.syscalls[] | select(.names == ["socket"] and .action == "SCMP_ACT_ERRNO" and .args[0].value == 38) | "\(.args[0].op) \(.errnoRet) \(.includes // {} | length) \(.excludes // {} | length)"' "$prof")" = "SCMP_CMP_EQ 97 0 0" ]
 }
 
 @test "the doctor and the image smoke test run their boxes under the same profile" {

@@ -2195,7 +2195,8 @@ args=(
   # exploits (netfilter, overlayfs, keyrings). image/seccomp.json is podman's default
   # with unshare/setns refused, clone allowed only without namespace flags, and clone3
   # answered ENOSYS so libc falls back to the filtered clone (the clone3 argument block
-  # cannot be inspected). Nothing the box runs needs a namespace: Claude Code's own Bash
+  # cannot be inspected); keyctl, memfd_secret and AF_ALG sockets are refused too (unused
+  # kernel surface). Nothing the box runs needs a namespace: Claude Code's own Bash
   # sandbox (bubblewrap) is opt-in, not installed in the image, and documented to fall
   # back to unsandboxed with a warning when unavailable; Chromium runs --no-sandbox.
   # Verified live: git, node workers, python threads, pwsh, kubectl, helm, every

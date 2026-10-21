@@ -233,7 +233,6 @@
         "ioprio_get",
         "ioprio_set",
         "ipc",
-        "keyctl",
         "kill",
         "landlock_add_rule",
         "landlock_create_ruleset",
@@ -255,7 +254,6 @@
         "mbind",
         "membarrier",
         "memfd_create",
-        "memfd_secret",
         "mincore",
         "mkdir",
         "mkdirat",
@@ -1165,6 +1163,32 @@
       "errnoRet": 1,
       "args": [],
       "comment": "airlock: no new or foreign namespaces from inside the box"
+    },
+    {
+      "names": [
+        "keyctl",
+        "memfd_secret"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38,
+      "args": [],
+      "comment": "airlock: no kernel keyrings (add_key and request_key are already outside the default) and no secret memory areas: kernel attack surface nothing in the box uses"
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 97,
+      "args": [
+        {
+          "index": 0,
+          "value": 38,
+          "valueTwo": 0,
+          "op": "SCMP_CMP_EQ"
+        }
+      ],
+      "comment": "airlock: no AF_ALG sockets (the kernel crypto API): EAFNOSUPPORT, as if not built"
     }
   ]
 }
