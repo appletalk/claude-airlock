@@ -14,8 +14,8 @@ load helper
 setup() { setup_airlock_env; _stub_upstream_installer "$BATS_TEST_DIRNAME/../image/claude-install.sh"; }
 
 # Run install.sh hermetically: isolated HOME, stubbed engine (records argv) and curl, a pinned
-# Claude Code version so it never curls upstream, and stdin not a TTY so the paste-project
-# prompt is skipped. The trailing doctor fails against the stub, so the exit status is not
+# Claude Code version so it never curls upstream, and stdin not a TTY (the install reads none).
+# The trailing doctor fails against the stub, so the exit status is not
 # asserted - only what the build was asked to do.
 _install() {
   env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
@@ -608,6 +608,8 @@ _install_to_end() {
     AIRLOCK_ENGINE="$ENGINE" CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
     ${TOKEN_ENV:+CLAUDE_CODE_OAUTH_TOKEN="$TOKEN_ENV"} \
     ${INSTALL_ROOT_ENV:+AIRLOCK_INSTALL_ROOT="$INSTALL_ROOT_ENV"} \
+    ${PASTE_PROJECT_ENV:+AIRLOCK_PASTE_PROJECT="$PASTE_PROJECT_ENV"} ${PASTE_DIR_ENV:+AIRLOCK_PASTE_DIR="$PASTE_DIR_ENV"} \
+    ${CONFIG_ENV:+AIRLOCK_CONFIG="$CONFIG_ENV"} \
     bash "$CLONE/bin/install.sh" </dev/null >"$BATS_TEST_TMPDIR/install.out" 2>"$BATS_TEST_TMPDIR/install.err"
 }
 
@@ -684,4 +686,57 @@ _install_to_end() {
 @test "install says nothing about telemetry when no project had it on" {
   _install
   ! grep -q 'always off' "$BATS_TEST_TMPDIR/install.err"
+}
+
+# --- airlock paste: never a prompt, a note while it isn't set up ----------------------------
+
+@test "an install on a terminal never asks for a paste project; it ends with a note while none is set" {
+  command -v script >/dev/null && command -v timeout >/dev/null || skip "needs util-linux script and timeout"
+  mkclone
+  _install_to_end   # writes the stubs, and the install itself must not need them on a tty
+  w="$BATS_TEST_TMPDIR/tty-install.sh"
+  cat > "$w" <<W
+#!/bin/sh
+[ -t 0 ] || { echo "stdin is not a terminal" >&2; exit 9; }
+exec env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+  AIRLOCK_ENGINE="$ENGINE" CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
+  bash "$CLONE/bin/install.sh"
+W
+  chmod +x "$w"
+  run timeout 300 script -qec "$w" /dev/null </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" != *"Which project"* && "$output" != *"project path:"* ]]
+  [[ "$output" == *"'airlock paste' (clipboard images into a box) is not set up"* ]]
+  [[ "$output" == *"AIRLOCK_PASTE_PROJECT="* ]]
+  refute grep -qE '^[[:space:]]*AIRLOCK_PASTE_PROJECT=' "$AIRLOCK_HOME/.config/claude-airlock/config"
+}
+
+@test "no paste note once the config names a paste project or dir, or says empty on purpose" {
+  mkclone
+  cfg="$AIRLOCK_HOME/.config/claude-airlock/config"
+  _install_to_end
+  grep -q "'airlock paste' (clipboard images into a box) is not set up" "$BATS_TEST_TMPDIR/install.out"
+  for line in 'AIRLOCK_PASTE_PROJECT="$HOME/x"' 'export AIRLOCK_PASTE_DIR=/srv/inbox/pastes' 'AIRLOCK_PASTE_PROJECT='; do
+    cp "$BATS_TEST_DIRNAME/../config/config.example" "$cfg"
+    printf '%s\n' "$line" >> "$cfg"
+    _install_to_end
+    if grep -q 'is not set up' "$BATS_TEST_TMPDIR/install.out"; then echo "note with: $line"; return 1; fi
+  done
+  # a commented-out example is not a choice
+  cp "$BATS_TEST_DIRNAME/../config/config.example" "$cfg"
+  _install_to_end
+  grep -q 'is not set up' "$BATS_TEST_TMPDIR/install.out"
+}
+
+@test "no paste note when the environment sets either; the note names AIRLOCK_CONFIG's file; a near-miss name is no choice" {
+  mkclone
+  out="$BATS_TEST_TMPDIR/install.out"
+  PASTE_PROJECT_ENV=/x _install_to_end; refute grep -q 'is not set up' "$out"
+  PASTE_DIR_ENV=/d _install_to_end;     refute grep -q 'is not set up' "$out"
+  c="$BATS_TEST_TMPDIR/elsewhere.conf"
+  printf 'AIRLOCK_PASTE_DIR=/srv/inbox/pastes\n' > "$c"
+  CONFIG_ENV="$c" _install_to_end;     refute grep -q 'is not set up' "$out"
+  printf 'AIRLOCK_PASTE_PROJECTS=/x\n' > "$c"
+  CONFIG_ENV="$c" _install_to_end
+  grep -qF "(or AIRLOCK_PASTE_DIR) in $c." "$out"
 }

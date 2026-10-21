@@ -50,7 +50,7 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 # a container the X11/Wayland socket would let it read everything you copy). `airlock
 # paste` bridges that as a FILE instead: it saves the clipboard image into this project's
 # $AIRLOCK_TMP/pastes/ and prints the path, which you paste as text — the agent opens the
-# file. `bin/install.sh` offers to set this for you.
+# file. Unset, `bin/install.sh` ends with a note saying so.
 #
 # It is NOT keyed off $PWD on purpose: you run paste from whatever terminal is free while
 # the agent holds the other one, and a $PWD default would quietly write into a directory

@@ -354,3 +354,16 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
   [[ "$output" == *"Done (from a bundle)"*"AIRLOCK_PERSIST_LOGIN=1"* ]]
   [[ "$output" != *"setup-token"* && "$output" != *"~/.zshrc"* ]]
 }
+
+@test "install-bundle: the paste note too, pointing whoever can't edit the config at its manager; silent once it names a paste dir" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  c="$BATS_TEST_TMPDIR/agent.conf"
+  printf 'AIRLOCK_EGRESS_MODE=proxy\n' > "$c"; chmod 0444 "$c"
+  R_CONFIG="$c" run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"Done (from a bundle)"*"'airlock paste' (clipboard images into a box) is not set up"* ]]
+  [[ "$output" == *"AIRLOCK_PASTE_DIR (a shared drop box) or AIRLOCK_PASTE_PROJECT in $c: ask whoever manages it."* ]]
+  chmod 0644 "$c"; printf 'AIRLOCK_PASTE_DIR=/srv/inbox/pastes\n' >> "$c"
+  R_CONFIG="$c" run reader_install
+  [ "$status" -eq 0 ]; [[ "$output" != *"is not set up"* ]]
+}

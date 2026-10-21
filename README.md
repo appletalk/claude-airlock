@@ -623,8 +623,8 @@ shape is deliberate — it makes lexical order chronological, so listing needs n
 Files that do **not** match that shape are ignored by `paste list` and are **never**
 pruned: this tool does not delete files it did not write.
 
-**Setup.** `bin/install.sh` asks which project pastes belong to and writes it to your host
-config; set it by hand if you skipped the prompt:
+**Setup.** Set the project pastes belong to in your host config (`bin/install.sh` doesn't ask;
+it ends with a note, from a bundle too, while neither this nor `AIRLOCK_PASTE_DIR` is set):
 
 ```
 AIRLOCK_PASTE_PROJECT="$HOME/development/myproject"

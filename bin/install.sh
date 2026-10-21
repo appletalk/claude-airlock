@@ -178,52 +178,27 @@ if [ -z "${AIRLOCK_CONFIG:-}" ] && [ ! -f "$CONFIG_DIR/config" ]; then
   echo "    wrote default config -> $CONFIG_DIR/config"
 fi
 
-# `airlock paste` needs ONE project to write clipboard images into — see README
-# ("Pasting images into a box"). There is no safe default: it is typed from whatever
-# terminal is free, so keying it off $PWD would silently write pastes into a directory
-# the running box never mounts. Ask once, here, rather than failing at first use.
-# Skipped when stdin is not a TTY, so CI and scripted installs stay non-interactive.
-if [ -z "$FROM_BUNDLE" ] && [ -z "${AIRLOCK_CONFIG:-}" ] && [ -t 0 ] && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_PROJECT=' "$CONFIG_DIR/config"; then
-  echo
-  echo "==> Which project should 'airlock paste' write clipboard images into?"
-  echo "    They land in that project's \$AIRLOCK_TMP/pastes/, where its box can read them."
-  echo "    Leave blank to skip — paste will then tell you how to set it."
-  printf '    project path: '
-  read -r PASTE_PROJECT || PASTE_PROJECT=""
-  # `read` does not expand anything, so a typed ~ or $HOME arrives literally. Both are
-  # natural to type (config.example itself shows "$HOME/..."), so handle the leading
-  # forms explicitly — never with eval, which would run whatever was pasted in.
-  PASTE_PROJECT="${PASTE_PROJECT%\"}"; PASTE_PROJECT="${PASTE_PROJECT#\"}"
-  PASTE_PROJECT="${PASTE_PROJECT%\'}"; PASTE_PROJECT="${PASTE_PROJECT#\'}"
-  # These patterns are LITERAL on purpose — they match the characters the user typed, so
-  # "does not expand in single quotes / tilde does not expand" is the intent, not a bug.
-  # shellcheck disable=SC2016,SC2088
-  case "$PASTE_PROJECT" in
-    '~')          PASTE_PROJECT="$HOME" ;;
-    '~/'*)        PASTE_PROJECT="$HOME/${PASTE_PROJECT#\~/}" ;;
-    '$HOME')      PASTE_PROJECT="$HOME" ;;
-    '$HOME/'*)    PASTE_PROJECT="$HOME/${PASTE_PROJECT#\$HOME/}" ;;
-    '${HOME}')    PASTE_PROJECT="$HOME" ;;
-    '${HOME}/'*)  PASTE_PROJECT="$HOME/${PASTE_PROJECT#\$\{HOME\}/}" ;;
-  esac
-  # Absolutise. A relative path would be stored verbatim and later resolved against
-  # whatever directory `airlock paste` is run from - reintroducing the exact $PWD
-  # dependence this setting exists to remove, and writing to the wrong project silently.
-  if [ -n "$PASTE_PROJECT" ] && [ -d "$PASTE_PROJECT" ]; then
-    PASTE_PROJECT="$(cd "$PASTE_PROJECT" && pwd)"
-  fi
-  if [ -n "$PASTE_PROJECT" ] && [ ! -d "$PASTE_PROJECT" ]; then
-    echo "    not a directory: $PASTE_PROJECT — skipping." >&2
-    echo "    Set it later in $CONFIG_DIR/config, e.g.:" >&2
-    echo "        AIRLOCK_PASTE_PROJECT=\"\$HOME/development/myproject\"" >&2
-    PASTE_PROJECT=""
-  fi
-  if [ -n "$PASTE_PROJECT" ]; then
-    printf '\n# Project that "airlock paste" writes clipboard images into (set at install).\nAIRLOCK_PASTE_PROJECT=%q\n' \
-      "$PASTE_PROJECT" >> "$CONFIG_DIR/config"
-    echo "    set AIRLOCK_PASTE_PROJECT=$PASTE_PROJECT"
-  fi
+# `airlock paste` needs ONE project (or a shared paste dir) to write clipboard images into:
+# see README ("Pasting images into a box"). There is no safe default: it is typed from whatever
+# terminal is free, so keying it off $PWD would silently write pastes into a directory the
+# running box never mounts. An install never stops to ask: if the config names neither (an
+# empty line counts as a choice), a note at the end says how, and `airlock paste` says it again
+# when it is run.
+_paste_note=""
+if [ -z "${AIRLOCK_PASTE_PROJECT:-}${AIRLOCK_PASTE_DIR:-}" ] \
+    && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?AIRLOCK_PASTE_(PROJECT|DIR)=' "$CONFIG_FILE" 2>/dev/null; then
+  _paste_note=1
 fi
+_print_paste_note() {
+  [ -n "$_paste_note" ] || return 0
+  echo "==> Note: 'airlock paste' (clipboard images into a box) is not set up. To use it, set"
+  if [ -w "$CONFIG_FILE" ] || { [ ! -e "$CONFIG_FILE" ] && [ -w "$(dirname "$CONFIG_FILE")" ]; }; then
+    echo "    AIRLOCK_PASTE_PROJECT=\"\$HOME/development/myproject\" (or AIRLOCK_PASTE_DIR) in $CONFIG_FILE."
+  else
+    echo "    AIRLOCK_PASTE_DIR (a shared drop box) or AIRLOCK_PASTE_PROJECT in $CONFIG_FILE: ask whoever manages it."
+  fi
+  echo
+}
 
 # The os image's layers must be exactly the base image's lowest layers: that is what makes
 # dev's OS layers the ones the base (and doctor) has. A pull of the Debian tag by a
@@ -523,6 +498,8 @@ if [ -n "$FROM_BUNDLE" ]; then
   echo "==> Done (from a bundle). Shell integration and the Claude login are this account's own: with no"
   echo "    network of its own, set AIRLOCK_PERSIST_LOGIN=1 and /login inside a box (README: Running boxes"
   echo "    as a dedicated user)."
+  echo
+  _print_paste_note
   exit 0
 fi
 echo
@@ -555,6 +532,7 @@ if [ -n "$_rc_done" ] && [ -n "$_token_done" ]; then
   echo "==> Done. Shell integration and token are already set up; open a new shell to pick up this version."
   echo
 fi
+_print_paste_note
 cat <<EOF
 Then: cd into any project and run 'airlock'.
 
