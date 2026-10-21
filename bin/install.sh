@@ -27,15 +27,18 @@ CONFIG_DIR="$HOME/.config/claude-airlock"
 CONFIG_FILE="${AIRLOCK_CONFIG:-$CONFIG_DIR/config}"
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-}"
 if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_FILE" ]; then
-  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_FILE" | tr -d '"'\''[:space:]' | tail -1)"
+  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_FILE" | tail -1 | tr -d '"'\''[:space:]')"
 fi
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
 # The image this account's boxes run (the same config): from a bundle, an account on
-# claude-airlock:base loads no dev image at all (its layers are a few GB never used).
-ACCOUNT_IMAGE="${AIRLOCK_IMAGE:-}"
-if [ -z "$ACCOUNT_IMAGE" ] && [ -f "$CONFIG_FILE" ]; then
-  ACCOUNT_IMAGE="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}AIRLOCK_IMAGE=//p' "$CONFIG_FILE" | tr -d '"'\''[:space:]' | tail -1)"
+# claude-airlock:base loads no dev image at all (its layers are a few GB never used). The
+# config wins over the environment, as in the launcher (which sources it after reading both).
+ACCOUNT_IMAGE=""
+if [ -f "$CONFIG_FILE" ]; then
+  ACCOUNT_IMAGE="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}AIRLOCK_IMAGE=//p' "$CONFIG_FILE" | tail -1 | tr -d '"'\''[:space:]')"
 fi
+ACCOUNT_IMAGE="${ACCOUNT_IMAGE:-${AIRLOCK_IMAGE:-}}"
+ACCOUNT_IMAGE="${ACCOUNT_IMAGE#localhost/}"
 
 case "$AIRLOCK_ENGINE" in
   podman|docker) ;;
@@ -92,7 +95,7 @@ _cleanup() {
     rm -rf -- "$DEST"
   fi
   if [ -n "$REV" ] && [ -n "${AIRLOCK_ENGINE:-}" ]; then
-    "$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
+    for _t in base os dev; do "$AIRLOCK_ENGINE" rmi "claude-airlock:$_t-$REV" >/dev/null 2>&1 || true; done
   fi
 }
 trap _cleanup EXIT
@@ -368,9 +371,15 @@ else
   echo "      $AIRLOCK_ENGINE build -t claude-airlock:playwright \"$SRC_DIR/image/playwright\""
 fi
 
-# Which images this version is (a bundle carries the list): the ones this account has.
-_have_types="base os dev"
-[ -n "$(_id "claude-airlock:dev-$REV")" ] || _have_types="base os"
+# Which images this version is (a bundle carries the list): from a bundle, exactly the ones
+# just loaded and checked (a dev-$REV tag left by a killed earlier install is not one of
+# them); from a build, the ones built.
+if [ -n "$FROM_BUNDLE" ]; then
+  _have_types="$_types"
+else
+  _have_types="base os dev"
+  [ -n "$(_id "claude-airlock:dev-$REV")" ] || _have_types="base os"
+fi
 for _t in $_have_types; do printf '%s %s\n' "$_t" "$(_id "claude-airlock:$_t-$REV")"; done > "$DEST/IMAGES"
 
 # Both images built: make this version live. The image tags and `current` move together;
@@ -385,7 +394,8 @@ else
   # No dev for this account: let go of an older one, so the prune below can take its layers.
   "$AIRLOCK_ENGINE" rmi claude-airlock:dev >/dev/null 2>&1 || true
 fi
-"$AIRLOCK_ENGINE" rmi "claude-airlock:base-$REV" "claude-airlock:os-$REV" "claude-airlock:dev-$REV" >/dev/null 2>&1 || true
+# One at a time: an engine may stop at a name it does not have (no dev on a base-only account).
+for _t in base os dev; do "$AIRLOCK_ENGINE" rmi "claude-airlock:$_t-$REV" >/dev/null 2>&1 || true; done
 [ -n "$FROM_BUNDLE" ] || printf '%s\n' "$APT_REFRESH" > "$REFRESH_STAMP"
 touch "$DEST"
 _cur_tmp="$INSTALL_ROOT/.current.$$"

@@ -29,7 +29,7 @@ if [ "$clean" = 1 ]; then _drop; echo "==> Removed the bundle in $DIR"; exit 0; 
 CONFIG_DIR="$HOME/.config/claude-airlock"
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-}"
 if [ -z "$AIRLOCK_ENGINE" ] && [ -f "$CONFIG_DIR/config" ]; then
-  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_DIR/config" | tr -d '"'\''[:space:]' | tail -1)"
+  AIRLOCK_ENGINE="$(sed -n 's/^[[:space:]]*AIRLOCK_ENGINE=//p' "$CONFIG_DIR/config" | tail -1 | tr -d '"'\''[:space:]')"
 fi
 AIRLOCK_ENGINE="${AIRLOCK_ENGINE:-podman}"
 case "$AIRLOCK_ENGINE" in podman|docker) ;; *) echo "claude-airlock: AIRLOCK_ENGINE must be podman or docker" >&2; exit 1 ;; esac

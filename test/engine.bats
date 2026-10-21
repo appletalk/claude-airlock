@@ -466,3 +466,11 @@ S
     refute grep -q "^COLORTERM" "$ENGINE_ARGS_FILE"          # unset on the host: nothing passed
   done
 }
+
+@test "an image this account does not have is refused before the run, under BOTH engines" {
+  p="$(mkproj noimg)"
+  STUB_IMAGE_MISSING=1 run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"is not installed for this account"* ]]
+  if grep -q '^ENGINE_INVOKED=' "$ENGINE_ARGS_FILE" 2>/dev/null; then echo "the box ran"; return 1; fi
+}

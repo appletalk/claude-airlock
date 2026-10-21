@@ -2920,13 +2920,22 @@ fi
 # must stay the last thing before the run.
 # shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
 source "$_repo/lib/host-dns.sh"
+# The image must be installed for this account: an account can hold base without dev (a
+# bundle reader on base loads no dev). Left to the run, a missing image becomes a registry
+# pull, refused or opaque. The same query answers the proxy posture's label check below.
+if ! _img_proxy="$("$AIRLOCK_ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}' "$AIRLOCK_IMAGE" 2>/dev/null)"; then
+  echo "claude-airlock: $AIRLOCK_IMAGE is not installed for this account." >&2
+  echo "  Install it (make install, or from a bundle: set AIRLOCK_IMAGE to it in this account's" >&2
+  echo "  config and run install-bundle.sh again), or run another image." >&2
+  exit 1
+fi
 if [ -n "$EGRESS_PROXY" ]; then
   # No interfaces but loopback, and no resolver: the proxy socket is the only way out.
   # The entrypoint refuses to start Claude if it finds any other interface.
   args+=( --network=none )
   # An image from before this posture would try to raise the firewall without the
   # capabilities for it and die with a confusing error; say what is actually wrong.
-  if [ "$("$AIRLOCK_ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}' "$AIRLOCK_IMAGE" 2>/dev/null)" != 1 ]; then
+  if [ "$_img_proxy" != 1 ]; then
     echo "claude-airlock: $AIRLOCK_IMAGE predates the proxy posture (no socket bridge in its entrypoint)." >&2
     echo "  Rebuild the images (make install), or pick another posture: airlock egress minimal" >&2
     exit 1

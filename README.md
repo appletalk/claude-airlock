@@ -720,8 +720,11 @@ make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has instal
   bundle installs nothing; the manifest is written last), that the source tree is the
   manifest's commit, and that each image loads as exactly the ID the manifest names. An
   account whose config runs `AIRLOCK_IMAGE=claude-airlock:base` loads only the base archive
-  (and lets an older `dev` of its own go): it never writes the dev image's layers. Then it
-  goes live like any install, containment check and image smoke test included. The reader
+  (and lets an older `dev` of its own go): it never writes the dev image's layers, though it
+  still checks the dev archive's sha256 with every other file. Then it goes live like any
+  install, with the containment check, and the image smoke test when dev is loaded (the
+  smoke test runs as `dev`). A base-only account that later wants `dev` sets its config to
+  it and installs the same bundle again; until then a launch on `dev` says so and stops. The reader
   runs the bundle's own installer, so launcher and images always come from one commit. A
   bundle is not signed: it proves the files are the ones the writer wrote, so put it where
   only the writer can write (its directory owned by the writer, every directory above it

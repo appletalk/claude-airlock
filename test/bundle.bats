@@ -102,7 +102,7 @@ bundle() {  # bundle [--clean]: as the writer
 }
 reader_install() {  # as the reader: the bundle's own install-bundle.sh
   env -i PATH="$STUBBIN:/usr/bin:/bin" HOME="$R/home" FE_STATE="$R/fe" AIRLOCK_ENGINE="$ENGINE" \
-    ${R_CONFIG:+AIRLOCK_CONFIG="$R_CONFIG"} \
+    ${R_CONFIG:+AIRLOCK_CONFIG="$R_CONFIG"} ${R_IMAGE:+AIRLOCK_IMAGE="$R_IMAGE"} \
     ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" ${FE_LOAD_ID:+FE_LOAD_ID="$FE_LOAD_ID"} \
     ${FAIL_CHECK:+FAIL_CHECK="$FAIL_CHECK"} ${R_ENGINE:+AIRLOCK_ENGINE="$R_ENGINE"} \
     bash "$B/install-bundle.sh" </dev/null
@@ -148,7 +148,8 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   writer_install "$REV1"; bundle "$B" >/dev/null
   touch "$B/notes.txt"
   writer_install "$REV2" w2; bundle "$B" >/dev/null
-  [ ! -e "$B/images-$REV1.tar" ] && [ ! -e "$B/claude-airlock-$REV1.tar" ]
+  [ ! -e "$B/images-base-$REV1.tar" ] && [ ! -e "$B/images-dev-$REV1.tar" ] && [ ! -e "$B/claude-airlock-$REV1.tar" ]
+  [ -e "$B/images-base-$REV2.tar" ] && [ -e "$B/images-dev-$REV2.tar" ]
   grep -qx "commit $REV2" "$B/MANIFEST"
   run bundle --clean "$B"
   [ "$status" -eq 0 ]
@@ -400,4 +401,38 @@ all_ids() { cut -d' ' -f1 "$W/fe/images" | sort | tr '\n' ' '; }
   grep -q "images-dev-$REV1.tar" "$ENGINE_ARGS_FILE"
   grep -qx "claude-airlock:dev sha256:w1-dev" "$R/fe/tags"
   [ "$(cut -d' ' -f1 "$(RROOT)/current/IMAGES" | tr '\n' ' ')" = "base os dev " ]
+}
+
+@test "install-bundle: a base-only account ignores a dev tag of the same commit left by a killed install" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  printf 'claude-airlock:dev-%s sha256:stale\n' "$REV1" >> "$R/fe/tags"; printf 'sha256:stale L\n' >> "$R/fe/images"
+  printf 'AIRLOCK_IMAGE=claude-airlock:base\n' > "$BATS_TEST_TMPDIR/agent.conf"
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cut -d' ' -f1 "$(RROOT)/current/IMAGES" | tr '\n' ' ')" = "base os " ]
+  if grep -q '^claude-airlock:dev' "$R/fe/tags"; then echo "a dev tag is left or went live"; return 1; fi
+}
+
+@test "install-bundle: the account image is the config's last line (over the environment), localhost/ or not" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  printf 'AIRLOCK_IMAGE=claude-airlock:dev\n  export AIRLOCK_IMAGE="localhost/claude-airlock:base"\n' > "$BATS_TEST_TMPDIR/agent.conf"
+  : > "$ENGINE_ARGS_FILE"
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" R_IMAGE=claude-airlock:dev run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  if grep -q "images-dev-$REV1.tar" "$ENGINE_ARGS_FILE"; then echo "loaded the dev archive"; return 1; fi
+  # no image in the config: the environment's
+  printf '# AIRLOCK_IMAGE=claude-airlock:dev\n' > "$BATS_TEST_TMPDIR/agent.conf"
+  writer_install "$REV2" w2; bundle "$B" >/dev/null
+  : > "$ENGINE_ARGS_FILE"
+  R_CONFIG="$BATS_TEST_TMPDIR/agent.conf" R_IMAGE=claude-airlock:base run reader_install
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  if grep -q "images-dev-$REV2.tar" "$ENGINE_ARGS_FILE"; then echo "loaded the dev archive"; return 1; fi
+}
+
+@test "install-bundle: a bundle of the older format (one image archive) is refused" {
+  writer_install "$REV1"; bundle "$B" >/dev/null
+  sed -i 's/^format 2$/format 1/' "$B/MANIFEST"
+  run reader_install
+  [ "$status" -ne 0 ]; [[ "$output" == *"is not a bundle this version reads"* ]]
+  [ ! -e "$(RROOT)/current" ]
 }

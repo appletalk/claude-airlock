@@ -45,9 +45,11 @@ if [ "\${1:-}" = info ] && [[ "\$*" == *Host.Pasta.Executable* ]]; then
   echo "Copyright Red Hat"
   exit 0
 fi
-# The launcher's proxy-posture image check: answered, not recorded. STUB_IMAGE_EGRESS_PROXY
-# is the label value (default 1, an image that has it; empty for one that predates it).
+# The launcher's image check (installed? proxy posture label?): answered, not recorded.
+# STUB_IMAGE_EGRESS_PROXY is the label value (default 1, an image that has it; empty for one
+# that predates it); STUB_IMAGE_MISSING=1 is an image this account does not have.
 if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ] && [[ "\$*" == *org.claude-airlock.egress-proxy* ]]; then
+  [ -z "\${STUB_IMAGE_MISSING:-}" ] || exit 125
   echo "\${STUB_IMAGE_EGRESS_PROXY-1}"
   exit 0
 fi
@@ -158,6 +160,7 @@ _launch_env() {
     ${FAKE_OWNERS:+FAKE_OWNERS="$FAKE_OWNERS"}
     ${FAKE_FSTYPE:+FAKE_FSTYPE="$FAKE_FSTYPE"}
     ${STUB_IMAGE_EGRESS_PROXY+STUB_IMAGE_EGRESS_PROXY="$STUB_IMAGE_EGRESS_PROXY"}
+    ${STUB_IMAGE_MISSING:+STUB_IMAGE_MISSING="$STUB_IMAGE_MISSING"}
     ${TEST_EGRESS_MODE:+AIRLOCK_EGRESS_MODE="$TEST_EGRESS_MODE"}
     ${TEST_EGRESS_PROXY:+AIRLOCK_EGRESS_PROXY="$TEST_EGRESS_PROXY"}
     ${TEST_EXTRA_EGRESS:+AIRLOCK_EXTRA_EGRESS="$TEST_EXTRA_EGRESS"}
