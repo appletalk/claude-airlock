@@ -742,4 +742,16 @@ W
   # a config not made yet, where it can be: the user's to set
   CONFIG_ENV="$BATS_TEST_TMPDIR/new/agent.conf" _install_to_end
   grep -qF "(or AIRLOCK_PASTE_DIR) in $BATS_TEST_TMPDIR/new/agent.conf." "$out"
+  CONFIG_ENV="$BATS_TEST_TMPDIR/none.conf" _install_to_end              # a writable dir, no file yet
+  grep -qF "(or AIRLOCK_PASTE_DIR) in $BATS_TEST_TMPDIR/none.conf." "$out"
+  # not the user's to make: a directory, or below a read-only dir (however deep)
+  mkdir -p "$BATS_TEST_TMPDIR/adir" "$BATS_TEST_TMPDIR/ro"
+  CONFIG_ENV="$BATS_TEST_TMPDIR/adir" _install_to_end
+  grep -qF "in $BATS_TEST_TMPDIR/adir: ask whoever manages it." "$out"
+  if [ "$(id -u)" != 0 ]; then
+    chmod 0555 "$BATS_TEST_TMPDIR/ro"
+    CONFIG_ENV="$BATS_TEST_TMPDIR/ro/sub/x.conf" _install_to_end
+    chmod 0755 "$BATS_TEST_TMPDIR/ro"
+    grep -qF "in $BATS_TEST_TMPDIR/ro/sub/x.conf: ask whoever manages it." "$out"
+  fi
 }

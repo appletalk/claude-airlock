@@ -193,10 +193,12 @@ fi
 _print_paste_note() {
   [ -n "$_paste_note" ] || return 0
   echo "==> Note: 'airlock paste' (clipboard images into a box) is not set up. To use it, set"
-  # The installing user's to edit: a writable file, or none yet where one can be made.
+  # The installing user's to edit: a writable file, or none yet where one can be made (the
+  # nearest directory that exists is writable).
   _pd="$(dirname "$CONFIG_FILE")"
+  while [ ! -e "$_pd" ] && [ "$_pd" != / ] && [ "$_pd" != . ]; do _pd="$(dirname "$_pd")"; done
   if { [ -f "$CONFIG_FILE" ] && [ -w "$CONFIG_FILE" ]; } \
-      || { [ ! -e "$CONFIG_FILE" ] && { [ -w "$_pd" ] || [ ! -e "$_pd" ]; }; }; then
+      || { [ ! -e "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] && [ -d "$_pd" ] && [ -w "$_pd" ]; }; then
     echo "    AIRLOCK_PASTE_PROJECT=\"\$HOME/development/myproject\" (or AIRLOCK_PASTE_DIR) in $CONFIG_FILE."
   else
     echo "    AIRLOCK_PASTE_DIR (a shared drop box) or AIRLOCK_PASTE_PROJECT in $CONFIG_FILE: ask whoever manages it."

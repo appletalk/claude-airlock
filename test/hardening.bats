@@ -157,7 +157,7 @@ for ((i=0; i<${#a[@]}; i++)); do
 done
 EOF
   chmod +x "$STUBBIN/$ENGINE"
-  _launch "$agent"                                        # opted out -> no token
+  _launch "$agent"                                       # opted out -> no token
   [ ! -f "$ENGINE_ARGS_FILE.hasvar" ]
   _launch "$worker"                                      # untouched -> still tokenised
   [ "$(cat "$ENGINE_ARGS_FILE.hasvar" 2>/dev/null)" = "yes" ]
