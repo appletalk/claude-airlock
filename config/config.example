@@ -34,7 +34,7 @@
 
 # Image to run.
 #   dev  = base + Python / Node 24 / build toolchain (default, for real work)
-#   base = lean (Claude + git + gh + egress firewall only)
+#   base = lean (Claude + egress firewall + python3; no git or gh)
 AIRLOCK_IMAGE=claude-airlock:dev
 
 # Base folder for per-project folder shares. A project's .airlock/config asks for
