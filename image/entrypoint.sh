@@ -44,7 +44,8 @@ if [ -n "${AIRLOCK_EGRESS_PROXY:-}" ]; then
   export HTTP_PROXY=http://127.0.0.1:3128 http_proxy=http://127.0.0.1:3128
   export NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1
 else
-  /usr/local/bin/init-firewall.sh
+  # Its log goes to stderr: the box's stdout is the command's alone (`airlock exec`, `claude -p`).
+  /usr/local/bin/init-firewall.sh >&2
 fi
 
 # A tea login the launcher wrote for this box (a Forgejo host behind the proxy): tea reads only

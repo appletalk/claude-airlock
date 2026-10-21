@@ -251,6 +251,8 @@ airlock               # Claude Code, contained, for this directory
 ```
 airlock                         Claude Code in the box for $PWD
 airlock shell                   interactive shell in the box (no session lock)
+airlock exec -- CMD [ARG...]    run one command in the box (scripts, service units); its exit status
+airlock -p "PROMPT" ...         Claude Code headless (any claude flags pass through)
 airlock --dangerously-skip-permissions   auto mode, contained
 
 airlock secret set KEY VALUE|pass:PATH   grant an env secret to this project's box
@@ -280,6 +282,11 @@ airlock doctor                  verify this host can actually contain a box (liv
 alpaste                         zsh shortcut for `airlock paste --copy`
 command claude                  raw host Claude (bypasses the airlock guard)
 ```
+
+A box asks the engine for a terminal only when the launcher has one (stdin and stdout), so
+`airlock -p` and `airlock exec` run from a script or a service unit; the box's stdout is the
+command's own (the firewall logs to stderr). The launcher's own prompts read its stdin, so a
+run with stdin from `/dev/null` declines them.
 
 `airlock doctor` is the one to run after changing engines or rebooting: it checks the
 rootless prerequisites and then makes a real throwaway box prove containment — an allowed

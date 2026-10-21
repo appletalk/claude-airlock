@@ -72,6 +72,8 @@ if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ] && [[ "\$*" == *'{{range .Ro
     claude-airlock:base-*) echo "sha256:os sha256:claude " ;;
   esac
 fi
+# STUB_RUN_EXIT: the status a box's command exits with (a run only).
+[ "\${1:-}" != run ] || exit "\${STUB_RUN_EXIT:-0}"
 exit 0
 EOF
     chmod +x "$STUBBIN/$_e"
@@ -163,6 +165,7 @@ _launch_env() {
     ${FAKE_FSTYPE:+FAKE_FSTYPE="$FAKE_FSTYPE"}
     ${STUB_IMAGE_EGRESS_PROXY+STUB_IMAGE_EGRESS_PROXY="$STUB_IMAGE_EGRESS_PROXY"}
     ${STUB_IMAGE_MISSING:+STUB_IMAGE_MISSING="$STUB_IMAGE_MISSING"}
+    ${STUB_RUN_EXIT:+STUB_RUN_EXIT="$STUB_RUN_EXIT"}
     ${TEST_AIRLOCK_CONFIG:+AIRLOCK_CONFIG="$TEST_AIRLOCK_CONFIG"}
     ${TEST_EGRESS_MODE:+AIRLOCK_EGRESS_MODE="$TEST_EGRESS_MODE"}
     ${TEST_EGRESS_PROXY:+AIRLOCK_EGRESS_PROXY="$TEST_EGRESS_PROXY"}

@@ -572,6 +572,16 @@ _airlock_is_host_address() {
 # session lock (a shell can't corrupt --resume history).
 AIRLOCK_SHELL=0
 if [ "${1:-}" = "shell" ]; then AIRLOCK_SHELL=1; shift; fi
+# `airlock exec -- COMMAND [ARG...]` runs one command in the box instead of Claude: the
+# box `airlock shell` gets, for a script or a service unit (no terminal needed). Its exit
+# status is the launcher's.
+AIRLOCK_EXEC=()
+if [ "${1:-}" = exec ]; then
+  if [ "${2:-}" != -- ] || [ -z "${3:-}" ]; then
+    echo "usage: airlock exec -- COMMAND [ARG...]" >&2; exit 2
+  fi
+  AIRLOCK_SHELL=1; AIRLOCK_EXEC=( "${@:3}" ); set --
+fi
 
 # `airlock secret set|list|rm` manages the host-side per-project secret store —
 # the host-CONTROLLED grant of what this project's box gets, injected as env at
@@ -2266,7 +2276,7 @@ _box_tz() {
 }
 
 args=(
-  --rm -it
+  --rm -i
   --hostname airlock
   --cap-drop=ALL
   --cap-add=SETUID --cap-add=SETGID
@@ -3001,6 +3011,10 @@ if [ -n "$PERMISSION_MODE" ]; then
   claude_args+=( --permission-mode "$PERMISSION_MODE" )
 fi
 
+# A terminal only when there is one: a run from a script or a service unit (`claude -p`,
+# `airlock exec`) has none, and the engine refuses -t then.
+if [ -t 0 ] && [ -t 1 ]; then args+=( -t ); fi
+
 # --- Network and DNS (shared with the doctor's box: lib/host-dns.sh) ---------------
 # Assembled here, after every prompt and guard, because it asks podman and pasta what
 # they support (a query, not a box). Only the share/socket re-checks come later: they
@@ -3114,7 +3128,9 @@ for _kp in "${_extra_pins[@]}"; do
 done
 
 MOUNTED=1
-if [ "$AIRLOCK_SHELL" = 1 ]; then
+if [ ${#AIRLOCK_EXEC[@]} -gt 0 ]; then
+  "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" "${AIRLOCK_EXEC[@]}"
+elif [ "$AIRLOCK_SHELL" = 1 ]; then
   "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" bash -l
 else
   "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" claude "${claude_args[@]}" "$@"
