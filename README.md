@@ -541,7 +541,8 @@ Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
 `AIRLOCK_PASTE_PROJECT` or `AIRLOCK_PASTE_DIR` (where pastes go; see `airlock paste`),
 `AIRLOCK_SECRET_DENY` (pass entries never injected) and `AIRLOCK_GIT_RO` (default `1`:
 read-write repos get their git config and hooks bound read-only, see SECURITY.md; `0` turns
-it off).
+it off), and `AIRLOCK_TZ` (the box's timezone, a zone name such as `America/Vancouver`; by
+default `$TZ`, else the host's own zone from `timedatectl` or `/etc/localtime`, else UTC).
 
 ## Statusline — `config/airlock-statusline.sh`
 

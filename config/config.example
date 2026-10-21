@@ -126,6 +126,10 @@ AIRLOCK_ARTIFACT_DIRS=".venv node_modules"
 # AIRLOCK_PIDS_LIMIT=4096
 # AIRLOCK_MEMORY=
 
+# The box's timezone, a zone name (America/Vancouver). Empty: $TZ, else this host's own zone
+# (timedatectl, or where /etc/localtime points), else UTC.
+# AIRLOCK_TZ=
+
 # Git identity used inside the box (it has no ~/.gitconfig of its own). Defaults
 # to your host's global git user.name/email; a repo's local .git/config still wins.
 # AIRLOCK_GIT_NAME="Your Name"

@@ -34,6 +34,7 @@ AIRLOCK_MODEL="${AIRLOCK_MODEL:-opus}"                # default model in the box
 AIRLOCK_ARTIFACT_DIRS="${AIRLOCK_ARTIFACT_DIRS:-.venv node_modules}"  # env-built dirs kept container-local
 AIRLOCK_PIDS_LIMIT="${AIRLOCK_PIDS_LIMIT:-4096}"     # cap in-box process count (fork-bomb guard); 0/"" = engine default
 AIRLOCK_MEMORY="${AIRLOCK_MEMORY:-}"                 # host RAM cap, e.g. 8g; empty = no limit (too low breaks real builds)
+AIRLOCK_TZ="${AIRLOCK_TZ:-}"                         # the box's timezone, e.g. America/Vancouver; empty = $TZ, else the host's zone
 AIRLOCK_PROTECTED_PATHS="${AIRLOCK_PROTECTED_PATHS:-}" # extra host paths no share or mount may contain (space-separated)
 AIRLOCK_GIT_RO="${AIRLOCK_GIT_RO:-1}"                # 1 = bind the git config and hooks of read-write repos read-only (0 = off)
 AIRLOCK_SECRET_DENY="${AIRLOCK_SECRET_DENY:-}"       # pass entry globs `airlock secret` must never inject (space-separated)
@@ -2182,6 +2183,23 @@ fi
 # read-only over the image's managed-settings.d below. Emptied each launch.
 mkdir -p "$STATE_DIR/managed-settings.d"
 find "$STATE_DIR/managed-settings.d" -mindepth 1 -delete
+# The box's timezone: AIRLOCK_TZ, else $TZ, else the host's zone (timedatectl, or where
+# /etc/localtime points), else UTC. Only a plain zone name is passed on.
+_box_tz() {
+  local z="${AIRLOCK_TZ:-${TZ:-}}"
+  if [ -z "$z" ]; then
+    z="$(timedatectl show -p Timezone --value 2>/dev/null)" || z=""
+    if [ -z "$z" ]; then
+      z="$(readlink /etc/localtime 2>/dev/null)" || z=""
+      case "$z" in */zoneinfo/*) z="${z#*/zoneinfo/}" ;; *) z="" ;; esac
+    fi
+  fi
+  z="${z#:}"   # a POSIX TZ may start with ':'
+  if [[ "$z" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]]; then printf '%s' "$z"; return; fi
+  [ -z "$z" ] || echo "claude-airlock: timezone '$z' is not a plain zone name; the box uses UTC" >&2
+  printf UTC
+}
+
 args=(
   --rm -it
   --hostname airlock
@@ -2203,7 +2221,7 @@ args=(
   # Verified live: git, node workers, python threads, pwsh, kubectl, helm, every
   # validator, Postgres and claude itself run unchanged.
   --security-opt "seccomp=$_repo/image/seccomp.json"
-  -e TERM -e "TZ=${TZ:-UTC}"
+  -e TERM -e "TZ=$(_box_tz)"
   -e DISABLE_AUTOUPDATER=1 -e DISABLE_TELEMETRY=1 -e DISABLE_ERROR_REPORTING=1
   # Managed settings, mounted from this install rather than trusted to the image: the box's
   # .airlock/config can pick any claude-airlock:* tag, including one built before the image
