@@ -1778,3 +1778,22 @@ S
     run "$P"
     [ "$status" -ne 0 ]; [[ "$output" == *"/etc/systemd/system/user@1101.service replaces the system's unit"* ]]
 }
+
+@test "the toolkit's checksums: recorded without listing themselves; a fresh install passes, a changed file pauses" {
+    mkdir -p "$R/usr/local/lib/airlock-agents" "$R/usr/local/share/airlock-agents/box" "$R/usr/local/sbin"
+    cp "$REPO/agents/operator" "$R/usr/local/lib/airlock-agents/operator"
+    cp "$REPO/agents/box/web.py" "$R/usr/local/share/airlock-agents/box/web.py"
+    cp "$REPO/agents/airlock-agents-apply" "$R/usr/local/sbin/airlock-agents-apply"
+    run "$P" --record-toolkit
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run "$P" --record-toolkit                                   # a reinstall: the old list is there now
+    s="$R/usr/local/share/airlock-agents/TOOLKIT.sha256"
+    grep -q "  /usr/local/share/airlock-agents/box/web.py$" "$s" && grep -q "  /usr/local/sbin/airlock-agents-apply$" "$s"
+    run grep -c 'TOOLKIT' "$s"; [ "$output" = 0 ]
+    grep -q '  /usr/local/lib/airlock-agents/operator$' "$s"
+    run "$P"
+    [[ "$output" != *"toolkit files differ"* ]] || { echo "$output"; return 1; }
+    echo '# changed' >> "$R/usr/local/lib/airlock-agents/operator"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"toolkit files differ from the install"*"operator"* ]]
+}

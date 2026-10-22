@@ -136,9 +136,7 @@ put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
 if [ -d /etc/pacman.d ]; then put 0644 "$SRC/hooks/airlock-agents-nodump.hook" /etc/pacman.d/hooks/airlock-agents-nodump.hook; fi
 if [ -d /etc/apt/apt.conf.d ]; then put 0644 "$SRC/hooks/80airlock-agents-nodump" /etc/apt/apt.conf.d/80airlock-agents-nodump; fi
 # What was installed, so the apply notices any later change to it (drift: put back by reinstalling).
-{ find "$LIBDIR" -maxdepth 1 -type f ! -name TOOLKIT.sha256; find "$SHARE" -type f ! -name TOOLKIT.sha256; echo /usr/local/sbin/airlock-agents-apply; } \
-    | LC_ALL=C sort | xargs sha256sum > "$SHARE/TOOLKIT.sha256.new"
-chmod 0644 "$SHARE/TOOLKIT.sha256.new" && mv -f "$SHARE/TOOLKIT.sha256.new" "$SHARE/TOOLKIT.sha256"
+/usr/local/sbin/airlock-agents-apply --record-toolkit
 
 # Each user's default claude-airlock config is written by the apply (once; the site's afterwards).
 eval "$("$SRC/airlock-agents-apply" --env "$ETC/agents.conf" | grep -E '^AGENTS_[A-Z_]+=[A-Za-z0-9_./-]*$')"

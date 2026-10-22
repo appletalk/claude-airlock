@@ -10,6 +10,8 @@
 #   airlock-agents-apply --render DIR   write the rendered files under DIR (any user; nothing else)
 #   airlock-agents-apply --env          print the rendered agents.env (any user)
 #   airlock-agents-apply --user-conf U  print user U's default claude-airlock config (any user)
+#   airlock-agents-apply --record-toolkit   (root; install-agents runs it) record the checksum of
+#                                       every installed toolkit file, which later applies check
 #   [SITE]                              another site file (default /etc/claude-airlock/agents/agents.conf)
 #
 # The site file (agents.conf.example): who operates the agents, the agent users with their uids,
@@ -39,12 +41,24 @@ while [ $# -gt 0 ]; do
         --render) [ $# -ge 2 ] || die "--render needs a directory"; mode=render out=$2; shift ;;
         --env) mode="env" ;;
         --user-conf) [ $# -ge 2 ] || die "--user-conf needs a user"; mode=userconf out=$2; shift ;;
+        --record-toolkit) mode=record ;;
         -h|--help) usage; exit 0 ;;
         -*) die "unknown option $1 (see --help)" ;;
         *) [ -z "$site" ] || die "one site file"; site=$1 ;;
     esac
     shift
 done
+if [ "$mode" = record ]; then
+    # Every toolkit file as installed, the list written beside and renamed in (and never listing
+    # itself: it is made in a temp dir first).
+    [ "$(id -u)" = 0 ] || [ -n "$ROOT" ] || die "run as root"
+    t="$(mktemp)"; trap 'rm -f "$t"' EXIT
+    { find "$ROOT$LIBDIR" -maxdepth 1 -type f; find "$ROOT$SHARE" -type f ! -name 'TOOLKIT.sha256*'; echo "$ROOT/usr/local/sbin/airlock-agents-apply"; } \
+        | LC_ALL=C sort | sed "s#^$ROOT##" | while IFS= read -r f; do printf '%s  %s\n' "$(sha256sum < "$ROOT$f" | cut -d' ' -f1)" "$f"; done > "$t"
+    install -m 0644 "$t" "$ROOT$SHARE/TOOLKIT.sha256.new" && mv -f "$ROOT$SHARE/TOOLKIT.sha256.new" "$ROOT$SHARE/TOOLKIT.sha256"
+    echo "recorded $(wc -l < "$ROOT$SHARE/TOOLKIT.sha256") toolkit files"
+    exit 0
+fi
 site="${site:-$ROOT$ETC/agents.conf}"
 [ -f "$site" ] && [ -r "$site" ] || die "no site file $site (sudo make install-agents writes one on its first run; every line: $SHARE/agents.conf.example)"
 
@@ -695,7 +709,7 @@ fi
 # The toolkit as installed: every file as install-agents wrote it (a changed one is drift, and an
 # apply runs only on the toolkit as released: reinstall it).
 if [ -f "$ROOT$SHARE/TOOLKIT.sha256" ]; then
-    if ! changed="$(cd / && sha256sum --quiet -c "$ROOT$SHARE/TOOLKIT.sha256" 2>&1)"; then
+    if ! changed="$(cd "${ROOT:-/}" && sed 's#  /#  #' "$ROOT$SHARE/TOOLKIT.sha256" | sha256sum --quiet -c - 2>&1)"; then
         pause "toolkit files differ from the install (sudo make install-agents puts them back): $(tr '\n' ' ' <<< "$changed")"
     fi
 fi
