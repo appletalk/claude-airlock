@@ -1834,29 +1834,29 @@ EOF
     { echo 'table inet airlock-agents {'; echo '	chain output {'; echo '		type filter hook output priority filter; policy accept;'
       echo '		meta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop'; echo '	}'; echo '}'; } > "$NFT_RULESET"
     run "$P"
-    [ "$status" -eq 1 ]; [[ "$output" == *"no drop for agent (uid 1100"* ]] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ]; [[ "$output" == *"chain drops agent (uid 1100"* ]] || { echo "$output"; return 1; }
     # a drop in a chain no hook reaches
     { echo 'table inet filter {'; echo '	chain spare {'; echo '		meta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop'; echo '	}'; echo '}'; } > "$NFT_RULESET"
     run "$P"
-    [ "$status" -eq 1 ]; [[ "$output" == *"no drop for agent (uid 1100"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"chain drops agent (uid 1100"* ]]
     # an output chain, but: an ip table (IPv6 gets through), an accept or jump before the drop, a dormant table
     out() { printf 'table %s filter {\n%b\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n%b\t\tmeta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop\n\t}\n}\n' "$1" "$2" "$3" > "$NFT_RULESET"; }
-    for c in "ip||" "inet||\t\toifname \"lo\" accept\n" "inet||\t\tjump site\n" "inet||\t\tqueue num 0 bypass\n" "inet|\tflags dormant\n|"; do
+    for c in "ip||" "inet||\t\toifname \"lo\" accept\n" "inet||\t\tct state established,related accept\n" "inet||\t\tjump site\n" "inet||\t\tqueue num 0 bypass\n" "inet|\tflags dormant\n|"; do
         IFS='|' read -r fam fl pre <<< "$c"
         out "$fam" "$fl" "$pre"
         run "$P"
-        [ "$status" -eq 1 ] && [[ "$output" == *"no drop for agent (uid 1100"* ]] || { echo "counted ($c): $(cat "$NFT_RULESET")"; return 1; }
+        [ "$status" -eq 1 ] && [[ "$output" == *"chain drops agent (uid 1100"* ]] || { echo "counted ($c): $(cat "$NFT_RULESET")"; return 1; }
     done
     # a match in front of the uid narrows the drop: not counted
     for pre in 'oifname "eth0" ' 'ip daddr 8.8.8.8 ' 'limit rate 1/minute '; do
         printf 'table inet filter {\n\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n\t\t%smeta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop\n\t}\n}\n' "$pre" > "$NFT_RULESET"
         run "$P"
-        [ "$status" -eq 1 ] && [[ "$output" == *"no drop for agent (uid 1100"* ]] || { echo "counted: $pre"; return 1; }
+        [ "$status" -eq 1 ] && [[ "$output" == *"chain drops agent (uid 1100"* ]] || { echo "counted: $pre"; return 1; }
     done
-    # the same in a working inet table counts (a log rule, or accepting established replies, before it is fine)
-    out inet "" '\t\tct state established,related accept\n\t\tmeta skuid 1100 log prefix "x"\n'
+    # the same in a working inet table counts (a log rule before it is fine, whatever its comment says)
+    out inet "" '\t\tmeta skuid 1100 log prefix "x" comment "log, then accept nothing"\n'
     run "$P"
-    [[ "$output" != *"no drop for agent (uid 1100"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"chain drops agent (uid 1100"* ]] || { echo "$output"; return 1; }
 }
 
 @test "external: a site's own copy at a part's path is never removed, even where the toolkit's copy was" {
@@ -1879,7 +1879,7 @@ EOF
     grep -q '^table inet airlock-agents-site {' "$NFT_RULESET"
     run grep -c 'table inet airlock-agents ' "$T/r4/external/etc/airlock-agents.nft"; [ "$output" = 0 ]
     run "$P"
-    [[ "$output" != *"no drop for"* ]] || { echo "$output"; cat "$NFT_RULESET"; return 1; }
+    [[ "$output" != *"chain drops"* ]] || { echo "$output"; cat "$NFT_RULESET"; return 1; }
 }
 
 @test "a run that stops before its reloads leaves them pending; the next run does them" {

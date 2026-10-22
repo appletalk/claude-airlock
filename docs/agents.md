@@ -103,8 +103,9 @@ once you have checked the agents' ids don't overlap its ID mapping) to `agents.c
 
 If your config repo already manages the firewall, polkit or shell profile, say so in
 `agents.conf`, for example `external nftables`. Apply then never writes that part and checks the
-live result instead (the firewall must drop each agent user; polkit must let you open a shell as
-them). `airlock-agents-apply --render ~/agents-render` (as yourself, into a new directory) shows
+live result instead (polkit must let you open a shell as each agent user; the firewall must drop
+each one with a rule of its own, in an `inet` table's output chain, before any rule there that
+accepts, even `ct state established`). `airlock-agents-apply --render ~/agents-render` (as yourself, into a new directory) shows
 what each part must provide, under `external/`.
 
 Files the toolkit owns aren't edited locally: changes come with a toolkit update.
