@@ -175,11 +175,14 @@ grep -q "nothing to change" <<<"$out" && pass "airlock-agents-apply --check: not
 echo "   getfacl of the queue, for the record:"; getfacl -Rpn "$Q" 2>/dev/null | grep -v "$TAG" | sed 's/^/     /'
 
 echo "== nftables: no network for their uids and subuids in the host's namespace"
-expect yes "the agents' table is loaded (inet airlock-agents)" nft list table inet airlock-agents
-if [ -n "${AGENTS_TEST_RELOAD:-}" ]; then   # opt in: reloads the host's firewall
-    systemctl reload nftables
-    expect yes "the agents' table survives an nftables reload" nft list table inet airlock-agents
-fi
+nft_external=0; [[ " ${AGENTS_EXTERNAL:-} " == *" nftables "* ]] && nft_external=1
+if [ "$nft_external" = 0 ]; then
+    expect yes "the agents' table is loaded (inet airlock-agents)" nft list table inet airlock-agents
+    if [ -n "${AGENTS_TEST_RELOAD:-}" ]; then   # opt in: reloads the host's firewall
+        systemctl reload nftables
+        expect yes "the agents' table survives an nftables reload" nft list table inet airlock-agents
+    fi
+else echo "     (nftables is managed elsewhere: the drops below are probed, not the table)"; fi
 probe_host="${AGENTS_PROBE_HOST:-1.1.1.1:443}"
 tcp() { timeout 4 bash -c "exec 3<>/dev/tcp/${probe_host%:*}/${probe_host##*:}"; }
 if setpriv --reuid=65534 --regid=65534 --clear-groups -- bash -c "$(declare -f tcp); tcp"; then
@@ -191,7 +194,7 @@ if setpriv --reuid=65534 --regid=65534 --clear-groups -- bash -c "$(declare -f t
     for id in $ids; do
         expect no "uid $id can't connect out" setpriv --reuid="$id" --regid="$id" --clear-groups -- bash -c "$(declare -f tcp); tcp"
     done
-    for u in $USERS; do
+    [ "$nft_external" = 1 ] || for u in $USERS; do
         expect yes "$u's drops are logged with its prefix" sh -c 'journalctl -k --since "-2 min" | grep -q "airlock-agents-$1-drop: "' sh "$u"
     done
 else
