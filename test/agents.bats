@@ -2002,3 +2002,37 @@ S
     run "$P"
     [[ "$output" != *"users come from a directory service"* ]]
 }
+
+@test "the workers: no start limit, and every timer run puts a failed queue watch back" {
+    for u in agent-web agent-guard; do
+        f="$RENDER/etc/systemd/user/$u-worker.service"
+        grep -qx 'StartLimitIntervalSec=0' "$f"
+        grep -qx "ExecStartPre=-/usr/bin/systemctl --user reset-failed $u-worker.path" "$f"
+        grep -qx "ExecStartPre=-/usr/bin/systemctl --user --no-block start $u-worker.path" "$f"
+    done
+}
+
+@test "a failed queue watch: --check reports it, --confirm resets and starts it, a running one is left alone" {
+    run "$P" --confirm; [ "$status" -eq 0 ]
+    # the managers run; agent-web's path unit failed, everything else of theirs is active
+    cat > "$T/bin/systemctl" <<'S'
+#!/bin/bash
+if [ "$1" = --user ]; then
+    [ "$4" = is-active ] && { [ "$3" = agent-web@ ] && [ "$6" = agent-web-worker.path ] && exit 3; exit 0; }
+    echo "systemctl $*" >> "$LOG"; exit 0
+fi
+case "$1" in is-enabled) [ -n "${NFT_LOADED:-}" ]; exit ;; is-active) case "$3" in user@*) exit 0 ;; esac; [ -n "${NFT_LOADED:-}" ]; exit ;; esac
+echo "systemctl $*" >> "$LOG"
+S
+    : > "$LOG"
+    run "$P" --check
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"would: reset and start agent-web's agent-web-worker.path"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"ok   agent-guard: agent-guard-worker.path active"* ]]
+    run grep -c -- '--user' "$LOG"; [ "$output" = 0 ]
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'systemctl --user -M agent-web@ reset-failed agent-web-worker.path' "$LOG"
+    grep -qx 'systemctl --user -M agent-web@ start agent-web-worker.path' "$LOG"
+    run grep -c "agent-guard@" "$LOG"; [ "$output" = 0 ] || { cat "$LOG"; return 1; }
+}

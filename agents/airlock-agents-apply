@@ -526,9 +526,15 @@ EOF
 [Unit]
 Description=$u: $what
 ConditionUser=$u
+# A burst of queue changes (many questions at once) starts it many times; each start drains the
+# queue and is cheap when nothing is left. A start limit would fail it, and the watch with it.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
+# The watch back up if anything failed it: every timer run heals it within 10 minutes.
+ExecStartPre=-/usr/bin/systemctl --user reset-failed $u-worker.path
+ExecStartPre=-/usr/bin/systemctl --user --no-block start $u-worker.path
 ExecStart=$LIBDIR/$3
 TimeoutStartSec=$5
 Nice=10
@@ -1238,6 +1244,21 @@ if [ -z "$ROOT" ]; then
     done
 fi
 
+# The web and guard workers start on their queue watch (a path unit). One that failed (a start
+# limit, an inotify error) leaves only the 10-minute timer: put it back, or say so.
+if [ "$WEB_ON" = 1 ]; then
+    for r in web guard; do
+        u=${NAME[$r]} id=${UID_OF[$r]}
+        systemctl is-active --quiet "user@$id.service" 2>/dev/null || continue
+        for unit in "$u-worker.path" "$u-worker.timer"; do
+            if systemctl --user -M "$u@" is-active --quiet "$unit" 2>/dev/null; then ok "$u: $unit active"
+            else step "reset and start $u's $unit (it isn't running: questions would wait for the timer, or forever)" \
+                sh -c 'systemctl --user -M "$1@" reset-failed "$2" 2>/dev/null; systemctl --user -M "$1@" start "$2"' _ "$u" "$unit" \
+                || echo "WARN: $u's $unit did not start (after a unit change, $COMMAND reload first)" >&2
+            fi
+        done
+    done
+fi
 if [ "$changes" = 0 ]; then echo "==> the agents are provisioned; nothing to change"
 elif [ "$check" = 1 ]; then echo "==> $changes change(s): drifted from the site file"; exit 1
 elif [ "$confirm" = 0 ]; then echo "==> $changes change(s); run with --confirm to apply"

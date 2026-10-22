@@ -314,6 +314,12 @@ for l in default.target.wants/$W-worker.path timers.target.wants/$W-worker.timer
     [ "$(readlink "/etc/systemd/user/$l")" = "/etc/systemd/user/${l#*/}" ] && pass "$l enabled" \
         || fail "$l not enabled (sudo airlock-agents-apply --confirm)"
 done
+# Enabled isn't running: a failed watch leaves questions to the 10-minute timer.
+for u in $W $G; do
+    for unit in "$u-worker.path" "$u-worker.timer"; do
+        expect yes "$u: $unit active in its manager" systemctl --user -M "$u@" is-active --quiet "$unit"
+    done
+done
 
 fi
 
