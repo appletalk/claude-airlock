@@ -1,65 +1,38 @@
-# Setup, by level
+# Setup
 
-Each level builds on the one before. Stop at the first one that gives you what you need. The
-details live in the README sections linked from each step; this page is the order and the checks.
+Install in levels. Stop at the one that gives you what you need.
 
-| Level | What you get | Who installs | Needs |
-|---|---|---|---|
-| 1. claude-airlock | Claude in a rootless box, an in-box firewall (Anthropic only, or a dev allowlist) | you | rootless Podman (or Docker) |
-| 2. + airlock-envoy | boxes with **no network**, only a host proxy socket: per-listener allowlists, an audit log, credentials injected outside the box (gh, git, kubectl) | root | level 1 |
-| 3. + agents | the agent in **Unix users of its own** (default `claude`), sandboxed user managers, named sessions you attach to | root | level 2, running |
-| 4. + agent web research | a second agent user researches the web; a third gates its answers before the first sees them | root | level 3 |
+| Level | You get | Install |
+|---|---|---|
+| 1. claude-airlock | Claude in a sandboxed container, with a firewall | `make install-airlock` |
+| 2. airlock-envoy | boxes with no network except a proxy you control; credentials kept outside the box | airlock-envoy's install |
+| 3. Agent users | the agent in its own Unix account, with sessions you attach to | `sudo make install-agents` |
+| 4. Web research | a separate user researches the web for the agent; answers are checked first | the same install, answering yes |
 
-There is no plain `make install`: each level has its own target, so nothing is installed by
-accident.
+There is no plain `make install`.
 
-## 1. claude-airlock (you)
+## 1. claude-airlock
 
 ```
-make install-airlock      # launcher + images, as yourself; ends with `airlock doctor`
+make install-airlock
 ```
 
-- Prerequisites, shell integration, auth: README § Setup.
-- Check: `airlock doctor` passes (a real box proves an allowed host is reachable and a denied one is not).
-- Update: rerun `make install-airlock` (Claude Code and Debian security updates; README § 2).
+It finishes by running `airlock doctor`, which checks the sandbox really works. Run it again to
+update. Details are in the README.
 
-## 2. airlock-envoy (root)
+## 2. airlock-envoy
 
-From a clean clone of [airlock-envoy](https://github.com/appletalk/airlock-envoy), as its README § Install says:
-
-```
-sudo install/install-envoy.sh 1.40.0      # the release binary, signature-checked
-sudo install/install-service.sh           # account, units, airlock-envoy-apply
-```
-
-- Write `/etc/airlock-envoy/site.conf`: a listener per profile, each with its one `client` user
-  (airlock-envoy README § Site listeners); apply with `sudo airlock-envoy-apply`.
-- Credentials the box must never hold (a GitHub token, a Forgejo bot, a Kubernetes token):
-  `sudo airlock-envoy-cred set <name>` and an `http` line (§ Plain HTTP and credentials). The
-  box gets its gh, tea and kubectl config from the proxy at launch (README § Plain HTTP
-  through the proxy).
-- Point boxes at a socket: `airlock egress proxy /run/airlock-envoy/<you>/<listener>.sock`, or
-  as the default in your host config (README § Egress through a host proxy).
-- Check: `airlock egress show` names the socket and its check; `sudo airlock-envoy-apply --status`.
-
-## 3. Agents (root)
-
-[agents.md](agents.md) has the design and the details. Needs level 2 running.
+Follow airlock-envoy's README. In short:
 
 ```
-sudo make install-agents     # asks for the names on the first run (default: claude)
+sudo install/install-envoy.sh 1.40.0
+sudo install/install-service.sh
 ```
 
-- Give each agent user its airlock-envoy listeners (apply names the missing ones), then as
-  yourself: `<command> update`, `<command> reload`, `<command> shell` to log in once.
-- Check: `sudo airlock-agents-apply --check` says nothing to change; `<command> new <project>`
-  starts a session and `<command> attach <project>` reaches it.
+Then add a listener for yourself in `/etc/airlock-envoy/site.conf`, run
+`sudo airlock-envoy-apply`, and point a project at it with
+`airlock egress proxy /run/airlock-envoy/<you>/<listener>.sock`.
 
-## 4. Agent web research
+## 3 and 4. Agent users and web research
 
-The same install, answering yes to web research (or adding `web` and `guard` lines to
-`agents.conf` and running `sudo airlock-agents-apply --confirm`). Give the web user a listener with
-`web` and the guard Anthropic alone; then `<command> reload` and `<command> web login`.
-
-- Check: `<command> web ask "a question"` is answered (`<command> web ls`), and a question
-  carrying one of your internal names is held.
+See [agents.md](agents.md).
