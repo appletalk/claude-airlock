@@ -1,38 +1,52 @@
 # bash completion for the agents' operator command (docs/agents.md). Root's copy, sourced from the
 # operator's bashrc:
 #   source /usr/local/share/airlock-agents/completion.bash
-# The command's name is the site's (agents.env); the names offered come from `<command>
-# _complete`, which checks and cleans them.
-_airlock_agents_names() {  # _airlock_agents_names <command> <what> [verb]: the names alone
-    "$@" 2>/dev/null | while IFS=$'\t' read -r n _; do printf '%s\n' "$n"; done
+# The command's name is the site's (agents.env). Names are offered only for the bare command
+# name as typed, from the installed command (<bindir>/<command> _complete, which checks and cleans
+# them), never from the word typed: `./<command> <Tab>` in a directory an agent can write must not run
+# that file. Names are checked again here and matched by prefix, never expanded (no compgen -W).
+_airlock_agents_names() {  # _airlock_agents_names <what> [verb]: the installed command's names
+    local bin=${AIRLOCK_AGENTS_BINDIR:-/usr/local/bin}/$_airlock_agents_cmd owner mode n _
+    [ "${COMP_WORDS[0]}" = "$_airlock_agents_cmd" ] && [ -f "$bin" ] && [ -x "$bin" ] || return 0
+    owner=$(command stat -Lc %u -- "$bin" 2>/dev/null) mode=$(command stat -Lc %a -- "$bin" 2>/dev/null)
+    { [ "$owner" = 0 ] || [ "$owner" = "$UID" ]; } && [[ $mode =~ ^[0-7]+$ ]] && (( (8#$mode & 8#022) == 0 )) || return 0
+    command timeout 5 "$bin" _complete "$@" </dev/null 2>/dev/null | command head -n 200 | while IFS=$'\t' builtin read -r n _; do
+        [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$ ]] && builtin printf '%s\n' "$n"
+    done
 }
 _airlock_agents() {
-    local cmd=${COMP_WORDS[0]} cur=${COMP_WORDS[COMP_CWORD]} words=""
+    local IFS=$' \t\n' cur=${COMP_WORDS[COMP_CWORD]} w
+    local -a words=()
+    COMPREPLY=()
     if [ "$COMP_CWORD" = 1 ]; then
-        words="ls list new attach stop restart paste update shell reload web help"
+        words=(ls list new attach stop restart paste update shell reload web help)
     else
         case "${COMP_WORDS[1]}" in
-            attach|stop|restart) [ "$COMP_CWORD" = 2 ] && words="$(_airlock_agents_names "$cmd" _complete sessions)" ;;
+            attach|stop|restart) [ "$COMP_CWORD" = 2 ] && mapfile -t words < <(_airlock_agents_names sessions) ;;
             web)
                 if [ "$COMP_CWORD" = 2 ]; then
-                    words="new stop restart ask ls show approve reject release retry login $(_airlock_agents_names "$cmd" _complete web-sessions)"
+                    mapfile -t words < <(_airlock_agents_names web-sessions)
+                    words+=(new stop restart ask ls show approve reject release retry login)
                 elif [ "$COMP_CWORD" = 3 ]; then
                     case "${COMP_WORDS[2]}" in
-                        show|approve|reject|release|retry) words="$(_airlock_agents_names "$cmd" _complete ids "${COMP_WORDS[2]}")" ;;
-                        stop|restart) words="$(_airlock_agents_names "$cmd" _complete web-sessions)" ;;
-                        login) words="research gate chat" ;;
+                        show|approve|reject|release|retry) mapfile -t words < <(_airlock_agents_names ids "${COMP_WORDS[2]}") ;;
+                        stop|restart) mapfile -t words < <(_airlock_agents_names web-sessions) ;;
+                        login) words=(research gate chat) ;;
                     esac
                 fi ;;
         esac
     fi
-    mapfile -t COMPREPLY < <(compgen -W "$words" -- "$cur")
+    for w in "${words[@]}"; do [[ $w == "$cur"* ]] && COMPREPLY+=("$w"); done
 }
 _airlock_agents_register() {
-    local env=${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env} line
-    [ -r "$env" ] || return 0
-    while IFS= read -r line; do
-        [[ $line =~ ^AGENTS_COMMAND=([a-z_][a-z0-9_-]{0,31})$ ]] && complete -F _airlock_agents "${BASH_REMATCH[1]}"
+    local env=${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env} line cmd=
+    [ -f "$env" ] && [ -r "$env" ] || return 0
+    while IFS= builtin read -r line; do
+        [[ $line =~ ^AGENTS_COMMAND=([a-z_][a-z0-9_-]{0,31})$ ]] && cmd=${BASH_REMATCH[1]}
     done < "$env"
+    [ -n "$cmd" ] || return 0
+    _airlock_agents_cmd=$cmd
+    complete -F _airlock_agents "$cmd"
 }
 _airlock_agents_register
 unset -f _airlock_agents_register

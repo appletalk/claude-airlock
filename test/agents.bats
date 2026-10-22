@@ -2043,8 +2043,8 @@ S
     REMOTE_OUT=$'agent-session@proj.main.service loaded active running a\nagent-session@ev;\$(x).y.service loaded active running b\nagent-session@o\e]52;c;eA==\ak.z.service loaded active running e\nagent-session@p2.review.service loaded inactive dead c\nagent-session@nodot.service loaded active running d' \
         run "$O" _complete sessions
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    # (the OSC is removed by the cleaning, leaving a plain name; the one with ; and $( is dropped)
-    [ "$output" = "$(printf 'proj.main\tactive/running\nok.z\tactive/running\np2.review\tinactive/dead')" ] || { printf '%s' "$output" | od -c | head; return 1; }
+    # checked raw: the names with an OSC in them, or ; and $(, are dropped, not cleaned into others
+    [ "$output" = "$(printf 'proj.main\tactive/running\np2.review\tinactive/dead')" ] || { printf '%s' "$output" | od -c | head; return 1; }
     req 20261021T120001Z-aaaaa1 'held one';     : > "$Q/held/20261021T120001Z-aaaaa1.json"
     req 20261021T120002Z-aaaaa2 'answered one'; : > "$Q/answers/20261021T120002Z-aaaaa2.md"
     req 20261021T120003Z-aaaaa3 'quarantined';  mkdir "$Q/quarantine/20261021T120003Z-aaaaa3"
@@ -2063,13 +2063,20 @@ S
     [[ "$output" != *not-an-id* ]]
     run "$O" _complete nonsense
     [ "$status" -ne 0 ]
+    # a flood of newer queued requests doesn't push the held one out of approve's 50
+    for i in $(seq 10 69); do req "20991231T0000${i}Z-ffffff" flood; done
+    run "$O" _complete ids approve
+    [ "$output" = "$(printf '20261021T120001Z-aaaaa1\theld')" ] || { echo "approve after a flood: $output"; return 1; }
+    run "$O" _complete ids show
+    [ "$(printf '%s\n' "$output" | wc -l)" = 50 ]
 }
 
 # A stand-in operator command for the completion scripts: `agent _complete <what> [verb]` answers
 # with fixed names.
 completion_stub() {
     printf 'AGENTS_COMMAND=agent\n' > "$T/c.env"
-    cat > "$T/bin/agent" <<'S'
+    export AIRLOCK_AGENTS_BINDIR="$T/cbin"; mkdir -p "$AIRLOCK_AGENTS_BINDIR"
+    cat > "$AIRLOCK_AGENTS_BINDIR/agent" <<'S'
 #!/bin/bash
 [ "$1" = _complete ] || exit 1
 case "$2 ${3:-}" in
@@ -2077,9 +2084,13 @@ case "$2 ${3:-}" in
     "web-sessions ") printf 'main\trunning\n' ;;
     "ids approve") printf '20261021T120001Z-aaaaa1\theld\n' ;;
     "ids show") printf '20261021T120001Z-aaaaa1\theld\n20261021T120002Z-aaaaa2\tanswered\n' ;;
+    "ids retry") printf 'x$(touch %s)\tbad\nok-name\tfine\n*\tglob\n~root\ttilde\nc:d\tcolon\n' "$PWNED" ;;
 esac
 S
-    chmod +x "$T/bin/agent"
+    chmod 0755 "$AIRLOCK_AGENTS_BINDIR/agent"
+    export PWNED="$T/pwned"
+    # the same name planted where an agent could write it: never run by a Tab
+    mkdir -p "$T/agentdir"; printf '#!/bin/sh\ntouch %s\n' "$T/planted-ran" > "$T/agentdir/agent"; chmod +x "$T/agentdir/agent"
 }
 
 @test "zsh completion: registered for the site's command; sessions, web verbs and filtered ids offered" {
@@ -2098,8 +2109,10 @@ print '== approve'; t agent web approve ''
 print '== show'; t agent web show ''
 print '== web'; t agent web ''
 print '== login'; t agent web login ''
+print '== retry'; t agent web retry ''
+print '== typed path'; (cd $T/agentdir && t ./agent attach ''); true
 Z
-    run env AIRLOCK_AGENTS_ENV="$T/c.env" REPO="$REPO" PATH="$T/bin:$PATH" zsh -f "$T/z.zsh"
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" AIRLOCK_AGENTS_BINDIR="$AIRLOCK_AGENTS_BINDIR" PWNED="$PWNED" T="$T" REPO="$REPO" zsh -f "$T/z.zsh"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -qx 'compdef _airlock_agents agent' <<< "$output"
     grep -qx 'attach:join a session' <<< "$output"
@@ -2110,6 +2123,27 @@ Z
     sed -n '/== show/,/== web/p' <<< "$output" | grep -qx '20261021T120002Z-aaaaa2:answered'
     sed -n '/== web/,/== login/p' <<< "$output" | grep -qx 'main:running'
     grep -qx 'values: research gate chat' <<< "$output"
+    # hostile names from the command are dropped, never run
+    [ "$(sed -n '/== retry/,/== typed path/p' <<< "$output" | grep -v '^==')" = 'ok-name:fine' ] || { echo "$output"; return 1; }
+    [ ! -e "$T/pwned" ]
+    # a typed path never runs that file, nor offers names
+    [ ! -e "$T/planted-ran" ]
+    [ -z "$(sed -n '/== typed path/,$p' <<< "$output" | grep -v '^==')" ]
+}
+
+@test "completion runs only a command owned by root or the operator and writable by no one else" {
+    command -v zsh >/dev/null || skip "no zsh"
+    completion_stub
+    chmod 0775 "$AIRLOCK_AGENTS_BINDIR/agent"
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" AIRLOCK_AGENTS_BINDIR="$AIRLOCK_AGENTS_BINDIR" REPO="$REPO" bash -c '
+        source "$REPO/agents/share/completion.bash"
+        COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "[${COMPREPLY[*]}]"'
+    [ "$output" = "[]" ] || { echo "$output"; return 1; }
+    chmod 0755 "$AIRLOCK_AGENTS_BINDIR/agent"
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" AIRLOCK_AGENTS_BINDIR="$AIRLOCK_AGENTS_BINDIR" REPO="$REPO" bash -c '
+        source "$REPO/agents/share/completion.bash"
+        COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "[${COMPREPLY[*]}]"'
+    [ "$output" = "[proj.main p2.review]" ] || { echo "$output"; return 1; }
 }
 
 @test "zsh completion: a command name in agents.env that isn't a plain name is not registered" {
@@ -2122,17 +2156,59 @@ Z
 
 @test "bash completion: registered for the site's command; sessions, web verbs and filtered ids offered" {
     completion_stub
-    run env AIRLOCK_AGENTS_ENV="$T/c.env" REPO="$REPO" PATH="$T/bin:$PATH" bash -c '
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" AIRLOCK_AGENTS_BINDIR="$AIRLOCK_AGENTS_BINDIR" PWNED="$PWNED" T="$T" REPO="$REPO" bash -c '
         source "$REPO/agents/share/completion.bash"
         complete -p agent
         t() { COMP_WORDS=("$@"); COMP_CWORD=$(($# - 1)); _airlock_agents; echo "${COMPREPLY[*]}"; }
-        t agent at; t agent attach ""; t agent web approve ""; t agent web show 2026; t agent web ""; t agent web login g'
+        t agent at; t agent attach ""; t agent web approve ""; t agent web show 2026; t agent web ""; t agent web login g
+        t agent web retry ""
+        cd "$T/agentdir"; t ./agent attach ""
+        IFS=:; COMP_WORDS=(agent ""); COMP_CWORD=1; _airlock_agents; echo "${#COMPREPLY[@]}"'
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "${lines[0]}" = "complete -F _airlock_agents agent" ]
     [ "${lines[1]}" = attach ]
     [ "${lines[2]}" = "proj.main p2.review" ]
     [ "${lines[3]}" = 20261021T120001Z-aaaaa1 ]
     [ "${lines[4]}" = "20261021T120001Z-aaaaa1 20261021T120002Z-aaaaa2" ]
-    [[ "${lines[5]}" == *"approve"*"main"* ]]
+    [[ "${lines[5]}" == *"main"*"approve"* ]]
     [ "${lines[6]}" = gate ]
+    [ "${lines[7]}" = ok-name ] || { echo "retry: ${lines[7]}"; return 1; }
+    [ ! -e "$T/pwned" ]
+    [ ! -e "$T/planted-ran" ]; [ "${#lines[@]}" -ge 9 ]
+    [ "${lines[8]}" -ge 12 ]          # a user IFS doesn't collapse the verb list
+}
+
+@test "bash completion: a command name in agents.env that isn't a plain name is not registered; the last one counts" {
+    printf 'AGENTS_COMMAND=agent;rm -rf x\nAGENTS_COMMAND=$(touch %s)\n' "$T/pwned" > "$T/c.env"
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" REPO="$REPO" bash -c 'source "$REPO/agents/share/completion.bash"; complete -p 2>/dev/null | grep _airlock_agents'
+    [ -z "$output" ]; [ ! -e "$T/pwned" ]
+    printf 'AGENTS_COMMAND=first\nAGENTS_COMMAND=second\n' > "$T/c.env"
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" REPO="$REPO" bash -c 'source "$REPO/agents/share/completion.bash"; complete -p | grep _airlock_agents'
+    [ "$output" = "complete -F _airlock_agents second" ]
+    mkfifo "$T/fifo.env"
+    run timeout 5 env AIRLOCK_AGENTS_ENV="$T/fifo.env" REPO="$REPO" bash -c 'source "$REPO/agents/share/completion.bash"; echo sourced'
+    [ "$output" = sourced ]
+}
+
+@test "zsh completion in a real interactive zsh (compinit, zpty): names complete; a typed path runs nothing" {
+    command -v zsh >/dev/null || skip "no zsh"
+    zsh -f -c 'zmodload zsh/zpty' 2>/dev/null || skip "no zsh/zpty"
+    completion_stub
+    cat > "$T/drive.zsh" <<'Z'
+zmodload zsh/zpty
+zpty z zsh -f -i
+zpty -w z "PS1='> '; export AIRLOCK_AGENTS_BINDIR=$AIRLOCK_AGENTS_BINDIR AIRLOCK_AGENTS_ENV=$T/c.env; autoload -U compinit; compinit -u -D; source $REPO/agents/share/completion.zsh; cd $T/agentdir"
+sleep 1
+zpty -w -n z $'agent attach p2\t'; sleep 1
+zpty -w -n z $'\x15agent web approve \t'; sleep 1
+zpty -w -n z $'\x15./agent attach p2\t'; sleep 1
+zpty -w z $'\x15exit'; sleep 0.5
+out=""; while zpty -r -t z line 2>/dev/null; do out+=$line; done
+print -r -- "$out" | tr -d '\r'
+Z
+    run timeout 30 env T="$T" REPO="$REPO" AIRLOCK_AGENTS_BINDIR="$AIRLOCK_AGENTS_BINDIR" zsh -f "$T/drive.zsh"
+    [[ "$output" == *"agent attach p2.review"* ]] || { printf '%s' "$output" | cat -v | tail -c 600; return 1; }
+    [[ "$output" == *"agent web approve 20261021T120001Z-aaaaa1"* ]]
+    [[ "$output" != *"./agent attach p2.review"* ]]
+    [ ! -e "$T/planted-ran" ]
 }

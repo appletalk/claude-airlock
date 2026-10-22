@@ -80,7 +80,8 @@ octl() {
     out="$(machinectl shell -q -E SYSTEMD_PAGER=cat -E SYSTEMD_COLORS=0 "$AS@" "$ND/sh" -c \
         'nd=$1; shift; "$nd/systemctl" --user --no-pager "$@" 2>&1; echo "agent-rc=$?"' sh "$ND" "$@" | tr -d '\r')"
     rc="$(printf '%s\n' "$out" | sed -n 's/^agent-rc=\([0-9][0-9]*\)$/\1/p' | tail -1)"
-    printf '%s\n' "$out" | LC_ALL=C grep -av '^agent-rc=[0-9]*$' | clean || true
+    # OCTL_RAW: uncleaned, for a caller that keeps only lines of a strict shape (no control bytes)
+    printf '%s\n' "$out" | LC_ALL=C grep -av '^agent-rc=[0-9]*$' | if [ -n "${OCTL_RAW:-}" ]; then cat; else clean; fi || true
     return "${rc:-1}"
 }
 sock() { printf '/run/user/%s/%s-%s.sock' "$AGENTS_AGENT_UID" "$AGENT" "$1"; }
@@ -204,23 +205,30 @@ last_stage() {  # last_stage <web>|<guard> <id>: read like any queue file (a FIF
     { qread 67108864 "log/$1/stages.jsonl" || true; } | grep -aF "\"id\":\"$2\"" | tail -1 \
         | sed -n 's/.*"stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1: \2/p'
 }
-# One word for where an id stands, from what the operator can see.
+# Every id's last stage line in one pass over a stage log on stdin: "id<TAB>stage: result"
+# (the same fields and pattern as last_stage).
+last_stages() {
+    LC_ALL=C sed -n 's/.*"id":"\([0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{6\}\)","stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1\t\2: \3/p' \
+        | awk -F'\t' '{ last[$1] = $2 } END { for (i in last) print i "\t" last[i] }'
+}
+# One word for where an id stands, from what the operator can see. (STAGE_WEB and STAGE_GUARD, when
+# set, are the id's last stage lines, read once for many ids by the caller.)
 web_state() {  # web_state <id>
     local id=$1 last
     if [ -e "$QUEUE/answers/$id.md" ]; then
         if [ -e "$QUEUE/quarantine/$id" ]; then echo "released by $AGENTS_OPERATOR"; else echo answered; fi
     elif [ -e "$QUEUE/quarantine/$id" ]; then
-        last="$(last_stage "$GUARD" "$id")"
+        last="${STAGE_GUARD-$(last_stage "$GUARD" "$id")}"
         case "$last" in *"release failed, gave up"*) echo "quarantined, release failed ($last)" ;; *) echo quarantined ;; esac
     elif [ -e "$QUEUE/decisions/$id.reject" ]; then echo rejected
     elif [ -e "$QUEUE/held/$id.json" ] && [ ! -e "$QUEUE/decisions/$id.approve" ]; then echo held
     else
-        last="$(last_stage "$WEB" "$id")"
+        last="${STAGE_WEB-$(last_stage "$WEB" "$id")}"
         case "$last" in
             *"gave up"*) echo "failed ($last)" ;;
             *changed*) echo "changed after its check ($last)" ;;
             "publish: published"*)
-                last="$(last_stage "$GUARD" "$id")"
+                last="${STAGE_GUARD-$(last_stage "$GUARD" "$id")}"
                 case "$last" in *"gave up"*) echo "gate failed ($last)" ;; *) echo gating ;; esac ;;
             "") echo queued ;;
             *) echo "researching ($last)" ;;
@@ -417,31 +425,46 @@ case "$cmd" in
         # For the shell completion (share/completion.zsh, .bash): names only, one per line, a tab,
         # then a short description. Each name is checked against its shape and every description
         # cleaned, so nothing from a session or the queue reaches the terminal raw.
+        exec </dev/null
         case "${1:-}" in
             sessions)
-                octl list-units --all --full --no-legend --plain "$UNIT*.service" 2>/dev/null \
-                    | awk -v pre="$UNIT" '{ u = $1; if (index(u, pre) != 1 || !sub(/\.service$/, "", u)) next
-                                           printf "%s\t%s/%s\n", substr(u, length(pre) + 1), $3, $4 }' \
-                    | grep -aE $'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\t[a-z-]+/[a-z-]+$' || true ;;
+                # checked raw, before any cleaning: a name cleaning would change is not offered
+                OCTL_RAW=1 octl list-units --all --full --no-legend --plain "$UNIT*.service" 2>/dev/null \
+                    | LC_ALL=C awk -v pre="$UNIT" '{ u = $1; if (index(u, pre) != 1 || !sub(/\.service$/, "", u)) next
+                                                    printf "%s\t%s/%s\n", substr(u, length(pre) + 1), $3, $4 }' \
+                    | LC_ALL=C grep -aE $'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\t[a-z-]+/[a-z-]+$' || true ;;
             web-sessions)
                 [ -n "$WEB" ] || exit 0
                 web_running | while IFS= read -r n; do name_ok "$n" && printf '%s\trunning\n' "$n"; done || true ;;
             ids)
-                # newest first, at most 50; filtered by what the verb (if any) accepts
+                # Newest first; the first 50 that the verb accepts (filtered before the cap: a flood
+                # of other requests can't push them out). approve, reject and release need only the
+                # queue's files; show and retry read each worker's stage log once.
                 [ -n "$WEB" ] || exit 0
                 verb="${2:-show}"
+                case "$verb" in show|approve|reject|release|retry) ;; *) exit 0 ;; esac
+                declare -A wl=() gl=()
+                if [ "$verb" = show ] || [ "$verb" = retry ]; then
+                    while IFS=$'\t' read -r i st; do wl[$i]=$st; done < <({ qread 67108864 "log/$WEB/stages.jsonl" || true; } | last_stages)
+                    while IFS=$'\t' read -r i st; do gl[$i]=$st; done < <({ qread 67108864 "log/$GUARD/stages.jsonl" || true; } | last_stages)
+                fi
+                n=0
                 for f in "$QUEUE"/requests/*.json; do
-                    [ -e "$f" ] || continue
                     id="${f##*/}"; id="${id%.json}"
                     [[ "$id" =~ $ID_RE ]] && printf '%s\n' "$id"
-                done | sort -r | head -50 | while IFS= read -r id; do
-                    st="$(web_state "$id")"
-                    case "$verb:$st" in
-                        show:*|approve:held|reject:held|release:quarantined) ;;
-                        retry:failed*|retry:changed*|"retry:gate failed"*|"retry:quarantined, release failed"*) ;;
-                        *) continue ;;
+                done | sort -r | while IFS= read -r id; do
+                    case "$verb" in
+                        approve|reject) [ -e "$QUEUE/held/$id.json" ] && [ ! -e "$QUEUE/answers/$id.md" ] && [ ! -e "$QUEUE/quarantine/$id" ] \
+                                            && [ ! -e "$QUEUE/decisions/$id.reject" ] && [ ! -e "$QUEUE/decisions/$id.approve" ] || continue
+                                        st=held ;;
+                        release) [ -e "$QUEUE/quarantine/$id" ] && [ ! -e "$QUEUE/answers/$id.md" ] || continue
+                                 case "${gl[$id]:-}" in *"release failed, gave up"*) continue ;; esac
+                                 st=quarantined ;;
+                        *) st="$(STAGE_WEB="${wl[$id]:-}" STAGE_GUARD="${gl[$id]:-}" web_state "$id")"
+                           [ "$verb" = show ] || case "$st" in failed*|changed*|"gate failed"*|"quarantined, release failed"*) ;; *) continue ;; esac ;;
                     esac
                     printf '%s\t%s\n' "$id" "$(printf '%s' "$st" | clean | tr -cd '[:print:]' | cut -c1-60)"
+                    n=$((n + 1)); [ "$n" -lt 50 ] || break
                 done ;;
             *) die "usage: $CMD _complete sessions|web-sessions|ids [verb]" ;;
         esac ;;
