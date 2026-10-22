@@ -18,7 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # reuses the cached apt layer forever: the Debian packages in the box stayed at whatever
 # stable-security shipped on the day of the FIRST build (measured: an apt layer from July
 # in an image "built" in September, 17 security updates behind). bin/install.sh passes
-# the current ISO week, so `make install` refreshes the base at most once a week and is a
+# the current ISO week, so `make install-airlock` refreshes the base at most once a week and is a
 # cache hit otherwise; `make refresh` appends a timestamp to force it now. The
 # `apt-get upgrade` is what makes the refresh mean something: `update` alone only affects
 # the packages installed below, not the ones the debian:trixie-slim tag already carries.

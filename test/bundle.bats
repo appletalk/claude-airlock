@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Bundles: one account installs claude-airlock (make install), writes the installed version
+# Bundles: one account installs claude-airlock (make install-airlock), writes the installed version
 # to a directory (make bundle), and another account, or an offline host, installs that
 # without building or fetching anything (install-bundle.sh). What must hold: the reader runs
 # exactly the images the writer went live with (by image ID), a damaged or half-written
@@ -143,7 +143,7 @@ REV1=aaaaaaaaaaaa REV2=bbbbbbbbbbbb
   run bundle "$B"; [ "$status" -ne 0 ]; [[ "$output" == *"no image record"* ]]
   writer_install "$REV1"
   FE_STATE="$W/fe" "$STUBBIN/$ENGINE" build -t claude-airlock:os
-  run bundle "$B"; [ "$status" -ne 0 ]; [[ "$output" == *"claude-airlock:os is "*"make install again"* ]]
+  run bundle "$B"; [ "$status" -ne 0 ]; [[ "$output" == *"claude-airlock:os is "*"make install-airlock again"* ]]
   [ -z "$(ls -A "$B")" ]
 }
 

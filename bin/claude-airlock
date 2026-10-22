@@ -3118,7 +3118,7 @@ source "$_repo/lib/host-dns.sh"
 # pull, refused or opaque. The same query answers the proxy posture's label check below.
 if ! _img_proxy="$("$AIRLOCK_ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}' "$AIRLOCK_IMAGE" 2>/dev/null)"; then
   echo "claude-airlock: $AIRLOCK_IMAGE is not installed for this account." >&2
-  echo "  Install it (make install, or from a bundle: set AIRLOCK_IMAGE to it in this account's" >&2
+  echo "  Install it (make install-airlock, or from a bundle: set AIRLOCK_IMAGE to it in this account's" >&2
   echo "  config and run install-bundle.sh again), or run another image." >&2
   exit 1
 fi
@@ -3130,7 +3130,7 @@ if [ -n "$EGRESS_PROXY" ]; then
   # capabilities for it and die with a confusing error; say what is actually wrong.
   if [ "$_img_proxy" != 1 ]; then
     echo "claude-airlock: $AIRLOCK_IMAGE predates the proxy posture (no socket bridge in its entrypoint)." >&2
-    echo "  Rebuild the images (make install), or pick another posture: airlock egress minimal" >&2
+    echo "  Rebuild the images (make install-airlock), or pick another posture: airlock egress minimal" >&2
     exit 1
   fi
 elif [ "$AIRLOCK_ENGINE" = podman ]; then

@@ -26,10 +26,19 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bun
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n",$$1,$$2}'
+	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}'
 
-install: ## install the launcher + build base/dev images (packages refreshed weekly; see bin/install.sh)
+install-airlock: ## install the launcher + build base/dev images for you (packages refreshed weekly; see bin/install.sh)
 	@bash bin/install.sh
+
+install-agents: ## (root, optional) agent users with their own sessions; needs airlock-envoy running (docs/setup.md)
+	@bash agents/install.sh
+
+install:
+	@echo "There is no plain 'make install'. Pick what to install (docs/setup.md):"
+	@echo "  make install-airlock   the launcher and images, for you (as yourself)"
+	@echo "  make install-agents    optional: agent users with their own sessions (as root, after airlock-envoy)"
+	@exit 1
 
 bundle: ## write the installed version (launcher + images) to DIR= for another account or an offline host
 	@test -n "$(DIR)" || { echo "usage: make bundle DIR=<directory the other account can read>"; exit 1; }
@@ -54,7 +63,7 @@ claude-installer-update: ## replace the vendored Claude Code installer with upst
 	@curl -fsSL https://claude.ai/install.sh -o image/claude-install.sh.new \
 	  && mv image/claude-install.sh.new image/claude-install.sh \
 	  && sha256sum image/claude-install.sh \
-	  && echo "updated image/claude-install.sh - review 'git diff', then commit and 'make install'"
+	  && echo "updated image/claude-install.sh - review 'git diff', then commit and 'make install-airlock'"
 
 lint: ## shellcheck the launcher + firewall + helper scripts (+ zsh -n on the integration)
 	@command -v "$(SHELLCHECK)" >/dev/null 2>&1 \
@@ -92,4 +101,4 @@ hooks: ## install the git pre-commit hook (symlink)
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap
+.PHONY: help install install-airlock install-agents bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap

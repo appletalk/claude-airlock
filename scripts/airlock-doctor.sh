@@ -139,8 +139,8 @@ if "$ENGINE" image exists "$IMAGE" 2>/dev/null || "$ENGINE" image inspect "$IMAG
   refresh="$("$ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.apt-refresh"}}' "$IMAGE" 2>/dev/null)"
   case "$refresh" in
     "")      warn "packages: no refresh record (image predates the weekly refresh) — run: make refresh" ;;
-    unkeyed) warn "packages: built directly, not via 'make install' — current as of that build, but not on the weekly refresh" ;;
-    *)       ok "packages refreshed: $refresh (weekly on 'make install'; 'make refresh' forces it)" ;;
+    unkeyed) warn "packages: built directly, not via 'make install-airlock' — current as of that build, but not on the weekly refresh" ;;
+    *)       ok "packages refreshed: $refresh (weekly on 'make install-airlock'; 'make refresh' forces it)" ;;
   esac
   # A proxy default refuses every launch on an image without the socket bridge.
   case "$EGRESS_MODE" in
@@ -148,11 +148,11 @@ if "$ENGINE" image exists "$IMAGE" 2>/dev/null || "$ENGINE" image inspect "$IMAG
       if [ "$("$ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}' "$IMAGE" 2>/dev/null)" = 1 ]; then
         ok "image supports the proxy egress posture (the default here)"
       else
-        bad "the default egress posture is proxy, but $IMAGE predates it — run: make install"
+        bad "the default egress posture is proxy, but $IMAGE predates it — run: make install-airlock"
       fi ;;
   esac
 else
-  bad "$IMAGE not built — run: make install"
+  bad "$IMAGE not built — run: make install-airlock"
   echo; exit 1
 fi
 

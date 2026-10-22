@@ -224,7 +224,7 @@ _check_os_layers() {
   base="$(_layers "claude-airlock:base-$REV")"
   if [ -z "$os" ] || [ "${base#"$os"}" = "$base" ]; then
     echo "claude-airlock: the os image for the dev image is not the base image's os stage" >&2
-    echo "  (another build moved its inputs in between?). Nothing went live; run make install again." >&2
+    echo "  (another build moved its inputs in between?). Nothing went live; run make install-airlock again." >&2
     exit 1
   fi
 }
@@ -288,15 +288,15 @@ else
   #
   # Two things fix that. The base tag is re-pulled so an upstream rebuild is picked up -
   # as its own step, not `build --pull`, because a bare `--pull` is "always" on both
-  # engines and turns an offline `make install` (a launcher update, every layer cached)
+  # engines and turns an offline `make install-airlock` (a launcher update, every layer cached)
   # into a hard failure; here it degrades to a warning, like the version lookup above.
   # APT_REFRESH is the cache key of the base apt layer (see image/Dockerfile): the current
-  # ISO week, so the base is rebuilt at most weekly and `make install` is a cache hit the
+  # ISO week, so the base is rebuilt at most weekly and `make install-airlock` is a cache hit the
   # rest of the week. Everything above the apt layer rebuilds with it, which is why the
   # default is a week and not a day.
   #
   # `make refresh` forces a rebuild now by passing "<week>.<timestamp>". The key that was
-  # used is remembered in the config dir, and a later `make install` in the SAME week reuses
+  # used is remembered in the config dir, and a later `make install-airlock` in the SAME week reuses
   # it: with the bare week key it would re-tag :base onto the cached, older week layer and
   # silently undo the refresh, with doctor reporting the week as if nothing had happened.
   # The image of the first FROM, without its `AS <stage>` suffix.
@@ -454,7 +454,7 @@ _rollback_hint() {
     echo "  To roll back, ask for a bundle of the previous commit (${_prev#versions/}); its images are" >&2
     echo "  kept until an install passes these checks, so loading it again is quick." >&2
   else
-    echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install" >&2
+    echo "  To roll back, reinstall the previous commit: git checkout ${_prev#versions/} && make install-airlock" >&2
   fi
 }
 echo "==> Verifying the host can actually contain a box (airlock doctor)"

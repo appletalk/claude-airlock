@@ -22,7 +22,7 @@ if ! command -v "$ENGINE" >/dev/null 2>&1; then
   exit 1
 fi
 if ! "$ENGINE" image exists "$IMAGE" 2>/dev/null && ! "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "image-smoke: image '$IMAGE' not found -- run 'make install' first." >&2
+  echo "image-smoke: image '$IMAGE' not found -- run 'make install-airlock' first." >&2
   exit 1
 fi
 

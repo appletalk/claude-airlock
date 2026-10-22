@@ -79,8 +79,11 @@ sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
 
 ### 2. Install the launcher and build the images
 
+(There is no plain `make install`: this is level 1 of [docs/setup.md](docs/setup.md), which
+lists the levels above it: airlock-envoy, then optional agent users.)
+
 ```sh
-make install          # or: ./bin/install.sh
+make install-airlock          # or: ./bin/install.sh
 ```
 
 That symlinks the launcher into `~/.local/bin`, writes a default host config to
@@ -101,7 +104,7 @@ install tracks both:
   rebuilding every toolchain. Pin or track a different channel with `CLAUDE_CODE_VERSION=stable make
   install` (or a specific `x.y.z`).
 - **Debian packages.** The build pulls the current `debian:trixie-slim` and keys the apt
-  layer on the ISO week, so the first `make install` of a week refreshes every package
+  layer on the ISO week, so the first `make install-airlock` of a week refreshes every package
   (including `stable-security` updates for what the base tag already carried) and the
   rest of the week is a cache hit. `make refresh` forces it today. Without this a rebuild
   reused the apt layer from the first build forever; `airlock doctor` now shows when the
@@ -115,12 +118,12 @@ weekly rather than daily.
 `image/claude-install.sh`, a copy of `https://claude.ai/install.sh`, never a script
 piped from the network: that script is the one download in the image nothing else
 verifies (it verifies the Claude Code binary itself, against the release manifest). The
-copy goes stale, so every `make install` compares it with upstream and reports drift
+copy goes stale, so every `make install-airlock` compares it with upstream and reports drift
 loudly, with `!!! INSTALLER DRIFT` lines, without failing the build. When you see that:
 
 ```sh
 make claude-installer-diff      # read what changed
-make claude-installer-update    # take it; then review `git diff`, commit, make install
+make claude-installer-update    # take it; then review `git diff`, commit, make install-airlock
 ```
 
 Expect this every few weeks. A stale copy keeps working until upstream changes the
@@ -142,13 +145,13 @@ the build cache is kept apart from images and is not covered (`docker builder pr
 A WSL disk image does not shrink by itself when space is freed inside it; this keeps it from
 growing, compacting it is still a Windows-side job.
 
-`make install` exports the checked-out **commit** (never uncommitted edits) to
+`make install-airlock` exports the checked-out **commit** (never uncommitted edits) to
 `~/.local/share/claude-airlock/versions/<commit>/`, builds the images from that copy,
 and only when the build succeeds points `~/.local/share/claude-airlock/current` at it.
 `~/.local/bin/airlock` (the command; `~/.local/bin/claude-airlock` is the same, kept as a
 second name) and the shell integration go through `current`, so the
 launcher never runs from this working tree: switching branches or editing files here
-changes nothing until the next `make install`, and a failed build leaves the previous
+changes nothing until the next `make install-airlock`, and a failed build leaves the previous
 version live. Local CA certs in `image/certs/` (untracked by design) are copied into each
 install. The live version and the two most recently activated others are kept;
 `current/VERSION` says which commit is live.
@@ -160,7 +163,7 @@ source "$HOME/.local/share/claude-airlock/current/shell/claude-airlock.zsh"
 ```
 
 Open shells pick up a new install on their next `airlock`. If an rc file still sources
-the zsh file, or calls the launcher, from a checkout, `make install` warns: that line
+the zsh file, or calls the launcher, from a checkout, `make install-airlock` warns: that line
 keeps the launcher in the working tree.
 
 This gives you `airlock` (Claude Code in the box) and a lock-aware `claude` on the host
@@ -222,7 +225,7 @@ same keys asserted in the box's `settings.json` each launch.
 Steering a session you started on this machine with Remote Control works with telemetry off,
 on Claude Code 2.1.283 or later. Versions 2.1.154 to 2.1.282 refused it, which is why
 airlock once had an `airlock telemetry on` switch. The switch is retired: a project still
-switched on is turned off at its next launch, with a notice, and `make install` clears the
+switched on is turned off at its next launch, with a notice, and `make install-airlock` clears the
 leftover switch for every project and lists them. Two Remote Control uses still need
 telemetry and are not supported in a box: starting a new session onto this machine from
 another device, and Remote Control under Trusted Devices.
@@ -572,7 +575,7 @@ default `$TZ`, else the host's own zone from `timedatectl` or `/etc/localtime`, 
 
 Boxes get it automatically, with a green `(airlock)` badge. To use the same line for
 **host** Claude, so both sides look identical apart from a red `(host)` badge, point your
-host `~/.claude/settings.json` at the copy `make install` puts in `~/.claude`, with `--host`:
+host `~/.claude/settings.json` at the copy `make install-airlock` puts in `~/.claude`, with `--host`:
 
 ```json
 "statusLine": {
@@ -754,7 +757,7 @@ that should not have it, such as an agent's own user, or a host that cannot reac
 install what you built instead:
 
 ```
-make install                              # as you, as usual
+make install-airlock                              # as you, as usual
 make bundle DIR=/srv/agent-inbox/airlock  # the installed version: launcher + images, ~3.5 GB
 bash /srv/agent-inbox/airlock/install-bundle.sh   # as the other account: no build, no network
 make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has installed it
@@ -971,7 +974,7 @@ capability set, is already refused inside the box by `image/seccomp.json`.
 **Keep the runtime patched.** Almost every container escape is a bug in the kernel, the
 OCI runtime (`crun`/`runc`), `conmon`, or the network helper (`pasta`/`passt`). Update them
 with the rest of the system, reboot for kernel updates, then run `airlock doctor`, which
-proves the firewall still holds on the new kernel. `make install` rebuilds the images, so
+proves the firewall still holds on the new kernel. `make install-airlock` rebuilds the images, so
 the userland inside the box stays current as well.
 
 **Set a memory ceiling.** Check that your user's systemd instance delegates the cgroup
@@ -1019,7 +1022,7 @@ certs chain to a private PKI, drop the CA chain into `image/certs/` and rebuild:
 
 ```sh
 cp /path/to/your-root-ca.crt image/certs/
-make install          # rebuild the images
+make install-airlock          # rebuild the images
 ```
 
 Public CA certificates only — **never private keys**. The directory is empty by default
@@ -1028,7 +1031,7 @@ network.
 
 ## Images
 
-Layered, built by `make install`:
+Layered, built by `make install-airlock`:
 
 - `claude-airlock:base` — Debian + Claude Code + the egress firewall and proxy bridge, and
   little else: curl, jq and a bare `python3` (no pip or venv). No git, gh or editor; those

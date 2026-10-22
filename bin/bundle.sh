@@ -37,23 +37,23 @@ case "$AIRLOCK_ENGINE" in podman|docker) ;; *) echo "claude-airlock: AIRLOCK_ENG
 # install lock, held to the end: an install (make refresh, say) builds under the same
 # per-commit tags this borrows for the save, and must not move the live tags in between.
 INSTALL_ROOT="${AIRLOCK_INSTALL_ROOT:-$HOME/.local/share/claude-airlock}"
-[ -d "$INSTALL_ROOT" ] || { echo "claude-airlock: nothing installed (make install first)" >&2; exit 1; }
+[ -d "$INSTALL_ROOT" ] || { echo "claude-airlock: nothing installed (make install-airlock first)" >&2; exit 1; }
 exec 9>"$INSTALL_ROOT/.lock"
 if ! flock -n 9; then
   echo "==> An install is running; waiting up to 10 minutes for it to finish"
   flock -w 600 9 || { echo "claude-airlock: $INSTALL_ROOT/.lock is still held; see fuser -v $INSTALL_ROOT/.lock" >&2; exit 1; }
 fi
-cur="$(readlink "$INSTALL_ROOT/current" 2>/dev/null)" || { echo "claude-airlock: nothing installed (make install first)" >&2; exit 1; }
+cur="$(readlink "$INSTALL_ROOT/current" 2>/dev/null)" || { echo "claude-airlock: nothing installed (make install-airlock first)" >&2; exit 1; }
 VER="$INSTALL_ROOT/$cur"
 REV="$(sed -n 's/^commit \([0-9a-f]\{12\}\)$/\1/p' "$VER/VERSION" 2>/dev/null | head -1)"
 [ -n "$REV" ] || { echo "claude-airlock: the live install ($cur) is not a git commit's; bundles carry commits only" >&2; exit 1; }
-[ -f "$VER/IMAGES" ] || { echo "claude-airlock: $cur has no image record (installed before bundles existed): make install again" >&2; exit 1; }
+[ -f "$VER/IMAGES" ] || { echo "claude-airlock: $cur has no image record (installed before bundles existed): make install-airlock again" >&2; exit 1; }
 _id() { "$AIRLOCK_ENGINE" image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
 for t in base os dev; do
   want="$(awk -v t="$t" '$1 == t { print $2 }' "$VER/IMAGES")"
   have="$(_id "claude-airlock:$t")"
   if [ -z "$want" ] || [ "$have" != "$want" ]; then
-    echo "claude-airlock: claude-airlock:$t is ${have:-missing}, not the ${want:-unrecorded} image $REV went live with: make install again" >&2
+    echo "claude-airlock: claude-airlock:$t is ${have:-missing}, not the ${want:-unrecorded} image $REV went live with: make install-airlock again" >&2
     exit 1
   fi
 done
