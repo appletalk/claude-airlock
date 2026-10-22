@@ -929,7 +929,8 @@ if { [ -e "$ROOT/etc/sssd/sssd.conf" ] || sed 's/#.*//' "$ROOT/etc/nsswitch.conf
     pause "users come from a directory service (SSSD, winbind or LDAP): check the agents' uids and subordinate id ranges don't overlap its ID mapping, then accept id-ranges in agents.conf"
 fi
 # The agents' boxes run on crun (runc fails under their ProtectProc).
-command -v crun >/dev/null || pause "crun is not installed; the agents' boxes need it (apt install crun / pacman -S crun)"
+# (AGENTS_CRUN: the name looked up, for the tests: a CI runner can have the real one on PATH)
+command -v "${AGENTS_CRUN:-crun}" >/dev/null || pause "crun is not installed; the agents' boxes need it (apt install crun / pacman -S crun)"
 # An allow list for cron or at that names an agent user (they get no jobs).
 for f in cron at; do
     [ -f "$ROOT/etc/$f.allow" ] || continue

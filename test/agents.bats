@@ -1061,6 +1061,7 @@ Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
     c="$REPO/agents/share/containers.conf"
     [ "$(grep -v '^#' "$c" | grep -v '^$')" = $'[engine]\nruntime = "crun"' ]
     rm "$T/bin/crun"
+    export AGENTS_CRUN=crun-not-on-this-path    # a host's own crun (a CI runner's) must not count
     run "$P"
     [ "$status" -eq 1 ]; [[ "$output" == *"paused, nothing changed"*"crun is not installed"* ]] || { echo "$output"; return 1; }
     run "$P" --confirm
