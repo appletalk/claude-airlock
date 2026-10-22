@@ -82,7 +82,8 @@ real throwaway box and makes it *prove* containment: an allowed host must be rea
 a denied host must not be. If that fails, the install says so loudly.
 
 This is level 1 of [docs/setup.md](docs/setup.md), which
-lists the optional levels above it: airlock-envoy, then agent users.
+lists the optional levels above it: airlock-envoy, then agent users. It also covers locking down
+the Claude you run directly on the host, which every level relies on.
 
 What the install does in detail, and how updates work: [docs/install.md](docs/install.md).
 
