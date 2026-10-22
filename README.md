@@ -534,14 +534,20 @@ If the proxy writes a client manifest next to its socket (`<name>.clients` besid
   matches a repo's ssh or https remote to it by host. The launcher mounts it read-only and the
   entrypoint copies it to `~/.config/tea` (tea reads nothing else), so an image built before
   this has no tea login. Your own tea config is never mounted (`.config/tea` is on the deny list).
+- **kubectl**: for each Kubernetes API server (rules `kubernetes-read`) the proxy has a
+  credential for, a read-only box kubeconfig (`KUBECONFIG=/etc/airlock-box/kube/config`) with
+  `server: http://<host>` and no user or token: kubectl goes through the proxy variables and
+  the proxy adds the token. One context per server, the first current. A `KUBECONFIG` secret
+  takes its place (the launch says so). When the proxy's token has expired, kubectl reports
+  "the server has asked for the client to provide credentials"; renew it on the host.
 - **curl and the rest**: use `http://<host>/` URLs; the proxy variables already point there.
 
-The clients themselves (git, gh, tea) are in `:dev` and the images built on it. A `:base`
+The clients themselves (git, gh, tea, kubectl) are in `:dev` and the images built on it. A `:base`
 box gets the same config files but has no client to read them.
 
 `airlock egress show` lists the hosts. The manifest ends up in git config, so it is used only
 if it is root's, writable only by root, in a root-owned directory, at most 64 KiB, and every
-line is `<host> <port> <rules> yes|no` with a valid lowercase host name. Otherwise the launch
+line is `<host> <port> <rules> yes|no` with a valid lowercase host name or IPv4 address. Otherwise the launch
 says why and goes on with no client set up. No manifest, nothing changes.
 
 ## Host config — `~/.config/claude-airlock/config`

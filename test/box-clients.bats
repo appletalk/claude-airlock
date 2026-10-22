@@ -47,6 +47,7 @@ if [ "\${1:-}" = run ]; then
       *:/home/dev/.gitconfig:rw) cp "\${a%%:*}" "$SNAP/gitconfig"; echo "\${a%%:*}" > "$SNAP/gitconfig.src" ;;
       *:/etc/airlock-box/gh:ro) cp -r "\${a%%:*}" "$SNAP/gh"; echo "\${a%%:*}" > "$SNAP/gh.src" ;;
       *:/etc/airlock-box/tea:ro) cp -r "\${a%%:*}" "$SNAP/tea"; echo "\${a%%:*}" > "$SNAP/tea.src" ;;
+      *:/etc/airlock-box/kube:ro) cp -r "\${a%%:*}" "$SNAP/kube"; echo "\${a%%:*}" > "$SNAP/kube.src" ;;
     esac
   done
 fi
@@ -83,6 +84,8 @@ no_clients() {
   refute arg_matches '^GH_CONFIG_DIR='
   refute arg_matches 'airlock-box/gh'
   refute arg_matches 'airlock-box/tea'
+  refute arg_matches 'airlock-box/kube'
+  refute arg_matches '^KUBECONFIG='
 }
 
 @test "no manifest: the box's git and gh are left alone" {
@@ -212,7 +215,10 @@ AIRLOCK_GIT_EMAIL=box@example.org'
     '-x.example.org 443 git yes\n' \
     'x..example.org 443 git yes\n' \
     'localhost 443 git yes\n' \
-    '10.0.0.1 443 git yes\n' \
+    '10.0.0.256 6443 kubernetes-read yes\n' \
+    '010.0.0.1 6443 kubernetes-read yes\n' \
+    '10.0.1 6443 kubernetes-read yes\n' \
+    '10.0.0.1.5 6443 kubernetes-read yes\n' \
     'git.example.org 0443 git yes\n' \
     'git.example.org 443 git maybe\n' \
     'git.example.org 443 Git yes\n' \
@@ -361,4 +367,49 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   [[ "$output" == *"no credential for git.example.org, so tea is not set up"* ]]
   refute arg_matches 'airlock-box/tea'
   [ "$(box_url git@git.example.org:o/r.git)" = http://git.example.org/o/r.git ]
+}
+
+@test "a Kubernetes API server (kubernetes-read) with a credential: a read-only box kubeconfig at http://, no user or token" {
+  manifest '10.0.0.10 6443 kubernetes-read yes\nmetrics.example.org 443 victoria-metrics no\n'
+  run _launch "$P"
+  launched
+  arg_matches '/box-config\.[0-9]*\.[0-9]*/kube:/etc/airlock-box/kube:ro$'
+  has_arg KUBECONFIG=/etc/airlock-box/kube/config
+  grep -qx '    server: http://10.0.0.10' "$SNAP/kube/config"
+  grep -qx 'current-context: 10.0.0.10' "$SNAP/kube/config"
+  grep -qx '  user: {}' "$SNAP/kube/config"
+  [ -z "$(grep -v '^#' "$SNAP/kube/config" | grep -i -e token -e password -e client-key -e exec:)" ]
+  [[ "$output" != *"kubectl is not set up"* ]]
+  refute arg_matches 'airlock-box/gh'
+  # kubectl itself reads it that way.
+  if command -v kubectl >/dev/null; then
+    [ "$(kubectl --kubeconfig "$SNAP/kube/config" config view -o jsonpath='{.clusters[0].cluster.server} {.current-context}')" = "http://10.0.0.10 10.0.0.10" ]
+  fi
+}
+
+@test "two API servers: a context each, the first current" {
+  manifest '10.0.0.10 6443 kubernetes-read yes\nkube.example.org 443 kubernetes-read yes\n'
+  _launch "$P" >/dev/null 2>&1 || true
+  [ "$(grep -c '^- name: ' "$SNAP/kube/config")" = 5 ]   # two clusters, two contexts, one user
+  grep -qx '    server: http://kube.example.org' "$SNAP/kube/config"
+  grep -qx 'current-context: 10.0.0.10' "$SNAP/kube/config"
+}
+
+@test "an API server without a credential: no kubeconfig (said)" {
+  manifest '10.0.0.10 6443 kubernetes-read no\n'
+  run _launch "$P"
+  launched
+  [[ "$output" == *"no credential for 10.0.0.10, so kubectl is not set up"* ]]
+  refute arg_matches 'airlock-box/kube'
+  refute arg_matches '^KUBECONFIG='
+}
+
+@test "a KUBECONFIG secret wins over the box kubeconfig, and the launch says so" {
+  manifest '10.0.0.10 6443 kubernetes-read yes\n'
+  _launch "$P" secret set KUBECONFIG /home/dev/.kube-claude/config >/dev/null
+  run _launch "$P"
+  launched
+  [[ "$output" == *"a KUBECONFIG secret is set and used instead"* ]]
+  refute arg_matches 'airlock-box/kube'
+  refute arg_matches '^KUBECONFIG=/etc/airlock-box'
 }

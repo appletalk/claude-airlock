@@ -334,6 +334,8 @@ _egress_proxy_socket() {
 # strict form, or none of it is used. Sets _CLIENT_HOSTS ("<host> <rules> <yes|no>" lines).
 # No manifest is not an error: the proxy may not write one.
 _airlock_hostname_ok() {
+  local o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  [[ "$1" =~ ^$o\.$o\.$o\.$o$ ]] && return 0   # an IPv4 address (a Kubernetes API server's)
   [ "${#1}" -le 253 ] && [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
 }
 _airlock_client_manifest() {
@@ -2961,6 +2963,36 @@ if [ "${#_fj_hosts[@]}" -gt 0 ]; then
     done
   } > "$BOX_CFG/tea/config.yml"
   args+=( -v "$BOX_CFG/tea:/etc/airlock-box/tea:ro" )
+fi
+
+# kubectl, for each Kubernetes API server the proxy serves (kubernetes-read rules) with a
+# credential: a box-only kubeconfig at http://<host>, through the proxy, which adds the token. It
+# names no user and holds no token. Read-only: the launcher owns it. A KUBECONFIG secret is left
+# to win (and named).
+_kube_hosts=()
+while IFS= read -r _h; do [ -n "$_h" ] && _kube_hosts+=( "$_h" ); done \
+  < <(awk '$2 == "kubernetes-read" && $3 == "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
+while IFS= read -r _h; do
+  [ -n "$_h" ] && echo "claude-airlock: the proxy has no credential for $_h, so kubectl is not set up for it" >&2
+done < <(awk '$2 == "kubernetes-read" && $3 != "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
+if [ "${#_kube_hosts[@]}" -gt 0 ] && grep -qE '^KUBECONFIG=' "$ENV_FILE"; then
+  echo "claude-airlock: the proxy adds the Kubernetes token for ${_kube_hosts[*]}, yet a KUBECONFIG secret is set and used instead (airlock secret rm KUBECONFIG)" >&2
+elif [ "${#_kube_hosts[@]}" -gt 0 ]; then
+  (umask 077; mkdir -p "$BOX_CFG/kube")
+  { echo "# Written by claude-airlock for this box: kubectl speaks plain HTTP through the proxy, which"
+    echo "# adds the token (none here)."
+    echo "apiVersion: v1"
+    echo "kind: Config"
+    echo "clusters:"
+    for _h in "${_kube_hosts[@]}"; do printf -- '- name: %s\n  cluster:\n    server: http://%s\n' "$_h" "$_h"; done
+    echo "contexts:"
+    for _h in "${_kube_hosts[@]}"; do printf -- '- name: %s\n  context:\n    cluster: %s\n    user: airlock-proxy\n' "$_h" "$_h"; done
+    printf 'current-context: %s\n' "${_kube_hosts[0]}"
+    echo "users:"
+    echo "- name: airlock-proxy"
+    echo "  user: {}"
+  } > "$BOX_CFG/kube/config"
+  args+=( -v "$BOX_CFG/kube:/etc/airlock-box/kube:ro" -e "KUBECONFIG=/etc/airlock-box/kube/config" )
 fi
 
 # With the proxy holding credentials, a GitHub token among the secrets puts one in the box
