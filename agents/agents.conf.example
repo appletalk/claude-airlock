@@ -14,6 +14,10 @@
 #   internal-name <domain>...   names a research question must not carry (your domains)
 #   internal-host <name>...     host names a research question must not carry
 #   daily-cap <n>            research runs a day at most (default 40)
+#   external <part>...       parts your own config repo manages: nftables, polkit, profile. Not
+#                            written here; checked live (--render shows what they must provide)
+#   accept <finding>...      findings you accept, so they don't pause an apply: wsl-interop,
+#                            wsl-drives, generic-dropins
 
 operator alice
 agent    claude        uid 1100 subuid 1100000 home 30G

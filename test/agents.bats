@@ -26,7 +26,7 @@ setup() {
     # The site file and each user's claude-airlock config, where apply reads them (under the root).
     E="$R/etc/claude-airlock/agents"; mkdir -p "$E"
     site_file 1G 1G 1G
-    for u in agent agent-web agent-guard; do echo "# $u" > "$E/$u.conf"; done
+    for u in agent agent-web agent-guard; do "$REPO/agents/airlock-agents-apply" --user-conf "$u" > "$E/$u.conf"; done
     # The operator command's names, as apply renders them (its inbox and queue under the test dir).
     export AIRLOCK_AGENTS_ENV="$T/agents.env"
     "$REPO/agents/airlock-agents-apply" --env > "$AIRLOCK_AGENTS_ENV"
@@ -1599,7 +1599,7 @@ S
 @test "a file it would write that isn't its own is refused, never overwritten; nothing changes" {
     mkdir -p "$R/usr/local/bin"; echo '#!/bin/sh' > "$R/usr/local/bin/agent"      # someone else's tool
     run "$P" --confirm
-    [ "$status" -ne 0 ]; [[ "$output" == *"not this toolkit's"*"/usr/local/bin/agent"* ]] || { echo "$output"; return 1; }
+    [ "$status" -ne 0 ]; [[ "$output" == *"paused, nothing changed"*"aren't its own"*"/usr/local/bin/agent"* ]] || { echo "$output"; return 1; }
     [ "$(cat "$R/usr/local/bin/agent")" = '#!/bin/sh' ]; [ ! -s "$LOG" ]
     # its own (its header) is fine to replace
     printf '#!/bin/sh\n# Rendered by airlock-agents-apply: old\n' > "$R/usr/local/bin/agent"
@@ -1634,7 +1634,7 @@ S
     for f in cron at; do [ "$(wc -l < "$R/etc/$f.deny")" = 3 ]; done
     echo agent-web > "$R/etc/cron.allow"
     run "$P" --confirm
-    [ "$status" -ne 0 ]; [[ "$output" == *"/etc/cron.allow names agent-web"* ]]
+    [ "$status" -ne 0 ]; [[ "$output" == *"/etc/cron.allow names agent-web"* ]] || { echo "$output"; return 1; }
 }
 
 @test "the nft file alone changing restarts its unit; the live table must hold every user's drop" {
@@ -1668,21 +1668,65 @@ S
     [ ! -s "$LOG" ]
 }
 
-@test "the queue's lib/ holds only what is rendered: anything else is removed" {
+@test "the queue's lib/ holds only what is rendered: anything else pauses the rollout, untouched" {
     fake_queue_state
     echo stale > "$R/srv/agent-web/lib/old_tool.py"
     run "$P" --confirm
+    [ "$status" -eq 1 ]; [[ "$output" == *"/srv/agent-web/lib/old_tool.py is not the toolkit's"* ]] || { echo "$output"; return 1; }
+    [ -f "$R/srv/agent-web/lib/old_tool.py" ]
+}
+
+@test "an own file changed or removed by hand since apply installed it pauses the rollout; a site change is installed" {
+    run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ ! -e "$R/srv/agent-web/lib/old_tool.py" ]; [ -f "$R/srv/agent-web/lib/web.py" ]
+    run "$P" --confirm; [ "$status" -eq 0 ]                         # converged
+    echo "# local edit" >> "$R/etc/profile.d/airlock-agents.sh"
+    rm "$R/etc/systemd/system/home-agent\x2dguard.mount"
+    run "$P" --confirm
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"/etc/profile.d/airlock-agents.sh was changed since apply installed it"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"home-agent\x2dguard.mount was removed since apply installed it"* ]]
+    grep -q "local edit" "$R/etc/profile.d/airlock-agents.sh"              # left as found
+}
+
+@test "a part managed elsewhere is never written, and its own copy is withdrawn" {
+    run "$P" --confirm; [ "$status" -eq 0 ]
+    [ -f "$R/etc/airlock-agents.nft" ] && [ -f "$R/etc/profile.d/airlock-agents.sh" ]
+    printf 'external nftables profile\n' >> "$E/agents.conf"
+    : > "$LOG"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$R/etc/airlock-agents.nft" ] && [ ! -e "$R/etc/profile.d/airlock-agents.sh" ]
+    grep -qx 'systemctl disable --now airlock-agents-nft.service' "$LOG"
+    [[ "$output" == *"nftables is managed elsewhere"* ]]
+    # --render still shows what the site must provide
+    "$P" --render "$T/r2" >/dev/null
+    [ -f "$T/r2/external/etc/airlock-agents.nft" ] && [ ! -e "$T/r2/etc/airlock-agents.nft" ]
+    # and a file of the site's own at one of those paths is left alone
+    echo '# the site' > "$R/etc/profile.d/airlock-agents.sh"
+    run "$P" --confirm; [ "$status" -eq 0 ]
+    [ "$(cat "$R/etc/profile.d/airlock-agents.sh")" = '# the site' ]
+}
+
+@test "accept: a finding the operator accepts no longer pauses; unknown ones are refused" {
+    mkdir -p "$R/etc/systemd/system/user@.service.d"; : > "$R/etc/systemd/system/user@.service.d/90-site.conf"
+    run "$P"; [ "$status" -eq 1 ]
+    printf 'accept generic-dropins\n' >> "$E/agents.conf"
+    run "$P"; [[ "$output" != *"paused"* ]] || { echo "$output"; return 1; }
+    printf 'accept everything\n' >> "$E/agents.conf"
+    run "$P"; [ "$status" -ne 0 ]; [[ "$output" == *"unknown accept 'everything'"* ]]
 }
 
 @test "a user's missing claude-airlock config is written from the default; an existing one is kept" {
-    rm "$E/agent-guard.conf"; echo "# mine" > "$E/agent.conf"
+    rm "$E/agent-guard.conf"
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -qx 'AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/agent-guard/agent-guard-anthropic.sock' "$E/agent-guard.conf"
+    # an agent config of the site's that doesn't mount the queue pauses the rollout, unchanged
+    echo "# mine" > "$E/agent.conf"
+    run "$P" --confirm
+    [ "$status" -eq 1 ]; [[ "$output" == *"paused, nothing changed"*"agent.conf doesn't mount the queue"* ]]
     [ "$(cat "$E/agent.conf")" = "# mine" ]
-    [[ "$output" == *"agent.conf doesn't mount the queue"* ]]
 }
 
 @test "a command name that shadows a system tool is refused" {
@@ -1728,7 +1772,8 @@ S
 @test "a unit file replacing an agent's manager or slice is refused; generic drop-ins are named" {
     mkdir -p "$R/etc/systemd/system/user@.service.d"; : > "$R/etc/systemd/system/user@.service.d/90-site.conf"
     run "$P"
-    [[ "$output" == *"note: /etc/systemd/system/user@.service.d/90-site.conf applies to every user's manager"* ]] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ]; [[ "$output" == *"/etc/systemd/system/user@.service.d/90-site.conf applies to every user's manager"* ]] || { echo "$output"; return 1; }
+    rm "$R/etc/systemd/system/user@.service.d/90-site.conf"
     : > "$R/etc/systemd/system/user@1101.service"
     run "$P"
     [ "$status" -ne 0 ]; [[ "$output" == *"/etc/systemd/system/user@1101.service replaces the system's unit"* ]]

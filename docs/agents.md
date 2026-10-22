@@ -81,6 +81,31 @@ To change limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see th
 `--confirm` to apply it. `--check` reports drift; `sudo /usr/local/lib/airlock-agents/host-test.sh`
 checks the whole setup live, as each user.
 
+### When apply stops
+
+Apply never overwrites a file it didn't write, and never changes anything when something looks
+wrong. It stops, says "paused, nothing changed", and lists what it found, for example:
+
+- a file it would write that someone else wrote (move it away, or mark that part external);
+- one of its own files changed or deleted by hand (put it back; make changes in `agents.conf`);
+- a home image whose size no longer matches `agents.conf`;
+- on WSL, interop on or Windows drives readable by the agents.
+
+A few findings you can decide to live with: add `accept wsl-interop`, `accept wsl-drives` or
+`accept generic-dropins` to `agents.conf`.
+
+### Parts you manage yourself
+
+If your config repo already manages the firewall, polkit or shell profile, say so in
+`agents.conf`, for example `external nftables`. Apply then never writes that part and checks the
+live result instead (the firewall must drop each agent user; polkit must let you open a shell as
+them). `sudo airlock-agents-apply --render /tmp/out` shows what each part must provide, under
+`/tmp/out/external/`.
+
+Files the toolkit owns aren't edited locally: changes come with a toolkit update.
+
+### Renaming and resizing
+
 Renaming a user isn't supported. A home image only grows by hand: `truncate -s 50G
 /var/lib/<user>/home.img`, `losetup -c /dev/loopN`, `xfs_growfs /home/<user>`, then update
 `agents.conf` to match. XFS can't shrink.
@@ -116,6 +141,7 @@ Each question goes through three steps:
   - Interop lets any Linux user run Windows programs as you. Turn it off with `enabled=false`
     under `[interop]`, or decide you accept it.
 - **Moving a hand-built setup over:** write `agents.conf` with the same names and uids. Unit names
-  and state follow the user names, so sessions and history carry over. Move your old drop-ins,
-  units, polkit and tmpfiles files away first: apply refuses to overwrite or sit beside files
-  it didn't write, and lists them.
+  and state follow the user names, so sessions and history carry over. Move your old drop-ins
+  and units away first: apply stops on files at its own paths and on other drop-ins for the
+  agent users. Old files under other names (a polkit rule, tmpfiles entries) it can't recognise:
+  remove those yourself, or keep them and mark that part external.
