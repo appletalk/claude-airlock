@@ -771,7 +771,7 @@ if [ -n "${EXTERNAL[nftables]:-}" ]; then
         /^[[:space:]]*chain / { out = 0; open_ = 1; next }
         /type filter hook output / { out = 1; next }
         # (even ct state established: replies on a socket an agent listens on are established too)
-        out && open_ { print; r = $0; sub(/ comment ".*$/, "", r)
+        out && open_ { print; r = $0; sub(/ comment "[^"]*"[[:space:]]*$/, "", r)
                        if (r ~ /(^|[[:space:]])(accept|return|jump|goto|queue)([[:space:]]|$)/) open_ = 0 }')" || live=""
     for r in "${ROLES[@]}"; do
         id=${UID_OF[$r]} s0=${SUB[$r]}
