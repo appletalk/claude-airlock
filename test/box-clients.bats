@@ -378,18 +378,21 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   grep -qx '    server: http://10.0.0.10' "$SNAP/kube/config"
   grep -qx 'current-context: 10.0.0.10' "$SNAP/kube/config"
   grep -qx '  user: {}' "$SNAP/kube/config"
-  [ -z "$(grep -v '^#' "$SNAP/kube/config" | grep -i -e token -e password -e client-key -e exec:)" ]
   [[ "$output" != *"kubectl is not set up"* ]]
   refute arg_matches 'airlock-box/gh'
   # kubectl itself reads it that way.
   if command -v kubectl >/dev/null; then
     [ "$(kubectl --kubeconfig "$SNAP/kube/config" config view -o jsonpath='{.clusters[0].cluster.server} {.current-context}')" = "http://10.0.0.10 10.0.0.10" ]
   fi
+  # Last: run replaces $output.
+  run bash -c 'grep -v "^#" "$1" | grep -i -e token -e password -e client-key -e exec:' _ "$SNAP/kube/config"
+  [ "$status" = 1 ] && [ -z "$output" ]
 }
 
 @test "two API servers: a context each, the first current" {
   manifest '10.0.0.10 6443 kubernetes-read yes\nkube.example.org 443 kubernetes-read yes\n'
   _launch "$P" >/dev/null 2>&1 || true
+  launched
   [ "$(grep -c '^- name: ' "$SNAP/kube/config")" = 5 ]   # two clusters, two contexts, one user
   grep -qx '    server: http://kube.example.org' "$SNAP/kube/config"
   grep -qx 'current-context: 10.0.0.10' "$SNAP/kube/config"
