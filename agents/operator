@@ -205,14 +205,6 @@ last_stage() {  # last_stage <web>|<guard> <id>: read like any queue file (a FIF
     { qread 67108864 "log/$1/stages.jsonl" || true; } | grep -aF "\"id\":\"$2\"" | tail -1 \
         | sed -n 's/.*"stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1: \2/p'
 }
-# Every id's last stage line in one pass over a stage log on stdin: "id<TAB>stage: result"
-# (the same fields and pattern as last_stage).
-last_stages() {
-    # (as last_stage: an id's last line counts even when it doesn't fit the pattern, as "")
-    LC_ALL=C sed -n -e 's/.*"id":"\([0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{6\}\)","stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1\t\2: \3/p' -e 't' \
-            -e 's/.*"id":"\([0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{6\}\)".*/\1\t/p' \
-        | awk -F'\t' '{ last[$1] = $2 } END { for (i in last) print i "\t" last[i] }'
-}
 # One word for where an id stands, from what the operator can see. (STAGE_WEB and STAGE_GUARD, when
 # set, are the id's last stage lines, read once for many ids by the caller.)
 web_state() { web_state_set "$1"; printf '%s\n' "$STATE"; }  # web_state <id>
@@ -238,6 +230,79 @@ web_state_set() {  # web_state_set <id>
             *) STATE="researching ($last)" ;;
         esac
     fi
+}
+# The candidates for `_complete ids <verb>` ("C<TAB>id", newest first) and their last stage lines
+# ("W|G<TAB>id<TAB>stage: result", read exactly as last_stage reads them), in one pass. Only ids
+# with a request count, the logs are read as qread reads them (no link, regular files, 64 MB at
+# most) and only when the verb needs them; at most 2000 candidates (show: 50).
+complete_ids() {  # complete_ids <verb>
+    python3 -I -c 'import os, re, stat, sys
+root, verb, web, guard = sys.argv[1:5]
+ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}")
+def names(d, suffix):
+    try:
+        ents = os.listdir(os.path.join(root, d))
+    except OSError:
+        return set()
+    out = set()
+    for e in ents:
+        if suffix and not e.endswith(suffix):
+            continue
+        n = e[: -len(suffix)] if suffix else e
+        if ID.fullmatch(n):
+            out.add(n)
+    return out
+def read_log(user):
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        for p in ("log", user):
+            fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        f = os.open("stages.jsonl", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        if not stat.S_ISREG(os.fstat(f).st_mode):
+            return b""
+        data, cap = b"", 67108864
+        while len(data) < cap:
+            c = os.read(f, cap - len(data))
+            if not c:
+                break
+            data += c
+        return data
+    except OSError:
+        return b""
+STAGE = re.compile(rb""".*"stage":"([a-z]*)","result":"([a-z0-9 ,;()\x27-]*)".*""", re.S)
+IDREF = re.compile(rb"\x22id\x22:\x22([0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})\x22")
+def last_stages(user, want):
+    last = {}
+    for line in read_log(user).split(b"\n"):
+        ids = set(m.decode() for m in IDREF.findall(line)) & want
+        if not ids:
+            continue
+        m = STAGE.fullmatch(line)
+        st = (m.group(1) + b": " + m.group(2)).decode() if m else ""
+        for i in ids:
+            last[i] = st
+    return last
+reqs = names("requests", ".json")
+w = g = {}
+if verb in ("approve", "reject"):
+    cands = names("held", ".json") & reqs
+elif verb == "release":
+    cands = names("quarantine", "") & reqs
+    g = last_stages(guard, cands)
+elif verb == "retry":
+    w, g = last_stages(web, reqs), last_stages(guard, reqs)
+    cands = {i for i, st in w.items() if "gave up" in st or "changed" in st} | {i for i, st in g.items() if "gave up" in st}
+else:
+    cands = set(sorted(reqs, reverse=True)[:50])
+    w, g = last_stages(web, cands), last_stages(guard, cands)
+out = sorted(cands, reverse=True)[:2000]
+keep = set(out)
+for i in out:
+    print("C\t" + i)
+for k, m in (("W", w), ("G", g)):
+    for i, st in m.items():
+        if i in keep:
+            print(k + "\t" + i + "\t" + st)' "$QUEUE" "$1" "$WEB" "$GUARD"
 }
 web_decide() {  # web_decide approve|reject|release <id>
     local what=$1 id=$2 f held sum=""
@@ -442,26 +507,21 @@ case "$cmd" in
                 web_running | while IFS= read -r n; do name_ok "$n" && printf '%s\trunning\n' "$n"; done || true ;;
             ids)
                 # Newest first, at most 50, each id one the verb accepts (its state as web_state
-                # says, in this process: no fork per id). Candidates come from where each verb's ids
-                # live, not from requests/ (the agent writes that, and could bury them): approve and
-                # reject from held/, release from quarantine/, retry from the ids a worker gave up on
-                # (or that changed); show is the newest requests.
+                # says). Candidates come from where each verb's ids live (held/, quarantine/, the
+                # stage logs; requests/ for show), only ids that have a request, gathered in one
+                # bounded pass (complete_ids) that reads only the logs the verb needs: no file the
+                # agent or the workers write can bury the real ones or blow up the work here.
                 [ -n "$WEB" ] || exit 0
                 verb="${2:-show}"
+                case "$verb" in show|approve|reject|release|retry) ;; *) exit 0 ;; esac
                 declare -A wl=() gl=()
-                while IFS=$'\t' read -r i st; do wl[$i]=$st; done < <({ qread 67108864 "log/$WEB/stages.jsonl" || true; } | last_stages)
-                while IFS=$'\t' read -r i st; do gl[$i]=$st; done < <({ qread 67108864 "log/$GUARD/stages.jsonl" || true; } | last_stages)
-                case "$verb" in
-                    approve|reject) cands() { for f in "$QUEUE"/held/*.json; do f=${f##*/}; printf '%s\n' "${f%.json}"; done; } ;;
-                    release) cands() { for f in "$QUEUE"/quarantine/*; do printf '%s\n' "${f##*/}"; done; } ;;
-                    retry) cands() { for i in "${!wl[@]}"; do case "${wl[$i]}" in *"gave up"*|*changed*) printf '%s\n' "$i" ;; esac; done
-                                     for i in "${!gl[@]}"; do case "${gl[$i]}" in *"gave up"*) printf '%s\n' "$i" ;; esac; done; } ;;
-                    show) cands() { for f in "$QUEUE"/requests/*.json; do f=${f##*/}; printf '%s\n' "${f%.json}"; done; } ;;
-                    *) exit 0 ;;
-                esac
+                cands=()
+                while IFS=$'\t' read -r k i st; do
+                    case "$k" in C) cands+=("$i") ;; W) wl[$i]=$st ;; G) gl[$i]=$st ;; esac
+                done < <(complete_ids "$verb")
                 n=0
-                while IFS= read -r id; do
-                    [[ "$id" =~ $ID_RE ]] && [ -e "$QUEUE/requests/$id.json" ] || continue
+                for id in "${cands[@]}"; do
+                    [[ "$id" =~ $ID_RE ]] || continue
                     STAGE_WEB="${wl[$id]:-}" STAGE_GUARD="${gl[$id]:-}"
                     web_state_set "$id"
                     case "$verb:$STATE" in
@@ -471,7 +531,7 @@ case "$cmd" in
                     esac
                     printf '%s\t%s\n' "$id" "$(printf '%s' "$STATE" | clean | tr -cd '[:print:]' | cut -c1-60)"
                     n=$((n + 1)); [ "$n" -lt 50 ] || break
-                done < <(cands | sort -ru) ;;
+                done ;;
             *) die "usage: $CMD _complete sessions|web-sessions|ids [verb]" ;;
         esac ;;
     -h|--help|help)

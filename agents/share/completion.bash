@@ -4,20 +4,27 @@
 # The command's name is the site's (agents.env). Names are offered only for the bare command
 # name as typed, from the installed operator script (`operator _complete`, which checks and cleans
 # them), never from the word typed: `./<command> <Tab>` in a directory an agent can write must not
-# run that file. Both paths are fixed here (no environment can move them); the script runs only
-# while it and its directory are root's (or the operator's) and writable by no one else. Names are
-# checked again here and matched by prefix, never expanded (no compgen -W).
+# run that file. Both paths are fixed here, and the script runs without the environment variables
+# that could steer it; it runs only while it and every directory above it are root's, no links,
+# and writable by no one else (a sticky directory above its own excepted). Names are checked again
+# here and matched by prefix, never expanded (no compgen -W).
 _airlock_agents_env=/etc/claude-airlock/agents/agents.env
 _airlock_agents_bin=/usr/local/lib/airlock-agents/operator
+_airlock_agents_owners=0
 _airlock_agents_names() {  # _airlock_agents_names <what> [verb]: the installed script's names
     local bin=$_airlock_agents_bin f owner mode n _
     [ "${COMP_WORDS[0]}" = "$_airlock_agents_cmd" ] && [ -f "$bin" ] && [ ! -L "$bin" ] && [ -x "$bin" ] || return 0
-    for f in "$bin" "${bin%/*}"; do
+    f=$bin
+    while :; do
         [ ! -L "$f" ] || return 0
         owner=$(command stat -c %u -- "$f" 2>/dev/null) mode=$(command stat -c %a -- "$f" 2>/dev/null)
-        { [ "$owner" = 0 ] || [ "$owner" = "$UID" ]; } && [[ $mode =~ ^[0-7]+$ ]] && (( (8#$mode & 8#022) == 0 )) || return 0
+        [[ " $_airlock_agents_owners " == *" $owner "* && $mode =~ ^[0-7]+$ ]] || return 0
+        (( (8#$mode & 8#022) == 0 )) || { [ "$f" != "$bin" ] && [ "$f" != "${bin%/*}" ] && (( 8#$mode & 8#1000 )); } || return 0
+        [ "$f" = / ] && break
+        f=${f%/*}; f=${f:-/}
     done
-    command timeout 3 "$bin" _complete "$@" </dev/null 2>/dev/null | command head -n 200 | while IFS=$'\t' builtin read -r n _; do
+    command env -u AIRLOCK_AGENTS_ENV -u AGENTS_NODUMP_DIR -u BASH_ENV -u ENV \
+        timeout 3 "$bin" _complete "$@" </dev/null 2>/dev/null | command head -n 200 | while IFS=$'\t' builtin read -r n _; do
         [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$ ]] && builtin printf '%s\n' "$n"
     done
 }

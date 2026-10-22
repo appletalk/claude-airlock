@@ -2089,13 +2089,40 @@ S
     [[ "$("$O" web ls)" == *"20261021T120004Z-aaaaa4  queued"* ]]
 }
 
+@test "agent _complete ids: a worker's own floods (a big stage log, junk in held/) neither bury the real ids nor stall a Tab" {
+    op_stubs; web_queue
+    req 20261021T120001Z-aaaaa1 held; : > "$Q/held/20261021T120001Z-aaaaa1.json"
+    req 20261021T120004Z-aaaaa4 failed
+    python3 - "$Q" <<'P'
+import sys
+q = sys.argv[1]
+with open(q + "/log/agent-web/stages.jsonl", "w") as f:
+    for i in range(100000):
+        f.write('{"ts":"x","user":"agent-web","id":"20990101T%06dZ-ffffff","stage":"check","result":"failed, gave up","exit":2}\n' % i)
+    # fields apart, and two ids on one line: read as last_stage reads them
+    f.write('{"id":"20261021T120004Z-aaaaa4","user":"agent-web","stage":"check","result":"failed, gave up"}\n')
+for i in range(20000):
+    open(q + "/held/20990101T%06dZ-eeeeee.json" % i, "w").close()
+P
+    for v in approve retry show; do
+        SECONDS=0; out="$("$O" _complete ids "$v")"
+        [ "$SECONDS" -le 2 ] || { echo "$v took ${SECONDS}s"; return 1; }
+        eval "out_$v=\$out"
+    done
+    [ "$out_approve" = "$(printf '20261021T120001Z-aaaaa1\theld')" ] || { echo "approve: $out_approve"; return 1; }
+    [ "$out_retry" = "$(printf '20261021T120004Z-aaaaa4\tfailed (check: failed, gave up)')" ] || { echo "retry: $out_retry"; return 1; }
+    [[ "$("$O" web ls)" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]]
+}
+
 # A stand-in operator command for the completion scripts: `agent _complete <what> [verb]` answers
 # with fixed names.
 # completion_copies: the completion scripts with their two fixed paths pointed at the test's
 # (the root copies have no knob for them)
 completion_copies() {
     for sh in zsh bash; do
+        # (and the test's own uid trusted as an owner, beside root: the stand-in and $T are the test's)
         sed -e "s#/etc/claude-airlock/agents/agents.env#$T/c.env#" -e "s#/usr/local/lib/airlock-agents/operator#$T/clib/operator#" \
+            -e "s#^\(typeset -g \)\{0,1\}_airlock_agents_owners=0\$#&\\ $UID#" -e "s#_airlock_agents_owners=0\\ #_airlock_agents_owners='0 #" -e "/_airlock_agents_owners='0 /s#\$#'#" \
             "$REPO/agents/share/completion.$sh" > "$T/completion.$sh"
     done
 }
