@@ -2367,3 +2367,42 @@ Z
     [ "${lines[0]}" = "[proj.main p2.review]" ] || { echo "$output"; return 1; }
     [ "${lines[1]}" = "rematch=" ]
 }
+
+
+@test "agent _complete ids: a worker's worst floods stay quick; far-future ids and stale flags can't take over" {
+    op_stubs; web_queue
+    mkdir -p "$Q/log/agent-guard"
+    for i in $(seq 10 59); do req "20261021T1200${i}Z-aaaa${i}" q; mkdir -p "$Q/quarantine/20261021T1200${i}Z-aaaa${i}"; done
+    R=20261021T120005Z-ccccc5; req "$R" real
+    echo "{\"id\":\"$R\",\"stage\":\"publish\",\"result\":\"published\"}" >> "$Q/log/agent-web/stages.jsonl"
+    echo "{\"id\":\"$R\",\"stage\":\"gate\",\"result\":\"failed, gave up\"}" >> "$Q/log/agent-guard/stages.jsonl"
+    [[ "$("$O" web ls)" == *"$R  gate failed"* ]]
+    # stale flags: newer ids once flagged, ok now (they must not fill retry's list)
+    for i in $(seq 10 59); do printf '{"id":"20261021T1200%sZ-aaaa%s","note":"changed"}\n{"id":"20261021T1200%sZ-aaaa%s","stage":"check","result":"ok"}\n' $i $i $i $i; done >> "$Q/log/agent-web/stages.jsonl"
+    run "$O" _complete ids retry
+    [[ "$output" == *"$R"* ]] || { echo "retry: $output"; return 1; }
+    # far-future names from the agent don't push the real ones out of show
+    for n in $(seq 10 70); do req "20991231T2359${n}Z-ffffff" junk; done
+    sleep 1; touch "$Q/requests/$R.json"; req 20261021T120006Z-ddddd6 newest
+    run "$O" _complete ids show
+    [[ "$output" == *20261021T120006Z-ddddd6* ]] || { echo "show: $output"; return 1; }
+    # the floods from round 6, ~24 MB each: many distinct flagged ids, a buffer of id prefixes,
+    # one endless line of gave up
+    python3 - "$Q" <<'P'
+import sys
+q = sys.argv[1]
+with open(q + "/log/agent-web/stages.jsonl", "ab") as f:
+    f.write(b"".join(b'gave up"id":"20990101T%06dZ-%06x"\n' % (i, i) for i in range(600000)))
+with open(q + "/log/agent-guard/stages.jsonl", "ab") as f:
+    f.write(b'"id":"20261021T' * 1500000 + b"\n" + b'{"id":"20261021T120005Z-ccccc5"}' + b" gave up" * 3000000)
+P
+    for v in retry show release; do
+        SECONDS=0; "$O" _complete ids "$v" >/dev/null; [ "$SECONDS" -le 2 ] || { echo "$v took ${SECONDS}s"; return 1; }
+    done
+}
+
+@test "bash completion: a Tab leaves the user's BASH_REMATCH as it was" {
+    completion_stub
+    run env T="$T" bash -c '[[ xy =~ (x)(y) ]]; source "$T/completion.bash"; COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "${COMPREPLY[*]}|${BASH_REMATCH[*]}"'
+    [ "$output" = "proj.main p2.review|xy x y" ] || { echo "$output"; return 1; }
+}

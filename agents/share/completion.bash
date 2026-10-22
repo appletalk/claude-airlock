@@ -30,7 +30,9 @@ _airlock_agents_names() {  # _airlock_agents_names <what> [verb]: the installed 
     /usr/bin/env -i PATH=/usr/bin:/bin HOME="${HOME-}" USER="${USER-}" LOGNAME="${LOGNAME-}" LANG=C.UTF-8 \
         /usr/bin/timeout -k 1 3 "$bin" _complete "$@" </dev/null 2>/dev/null \
         | /usr/bin/timeout -k 1 4 /usr/bin/head -c 65536 | /usr/bin/head -n 200 | while IFS=$'\t' builtin read -t 5 -r n _; do
-        [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$ ]] && builtin printf '%s\n' "$n"
+        # (patterns, not =~: the user's BASH_REMATCH stays as it was)
+        case $n in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) continue ;; esac
+        [ "${#n}" -le 129 ] && builtin printf '%s\n' "$n"
     done
 }
 _airlock_agents() {

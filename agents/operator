@@ -242,89 +242,87 @@ complete_ids() {  # complete_ids <verb>
 root, verb, web, guard = sys.argv[1:5]
 ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}")
 def names(d, suffix):
+    # id -> when the file appeared (ctime: its owner can set mtime, not this), live entries only
     try:
         ents = os.listdir(os.path.join(root, d))
     except OSError:
-        return set()
-    out = set()
+        return {}
+    out = {}
     for e in ents:
         if suffix and not e.endswith(suffix):
             continue
         n = e[: -len(suffix)] if suffix else e
-        if ID.fullmatch(n) and os.path.exists(os.path.join(root, d, e)):
-            out.add(n)
+        if ID.fullmatch(n):
+            try:
+                out[n] = os.stat(os.path.join(root, d, e)).st_ctime
+            except OSError:
+                pass
     return out
-def read_log(user):
+# The last 1 MiB of a stage log, from a line start, read as qread reads (no link, a regular file).
+# Completion is a convenience: a worker that floods its log can hide ids from it, never from
+# the commands, which read the whole log and check again.
+TAIL = 1048576
+def read_tail(user):
     try:
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         for p in ("log", user):
             fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         f = os.open("stages.jsonl", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-        if not stat.S_ISREG(os.fstat(f).st_mode):
+        st = os.fstat(f)
+        if not stat.S_ISREG(st.st_mode):
             return b""
-        data, cap = b"", 67108864
-        while len(data) < cap:
-            c = os.read(f, cap - len(data))
+        start = max(0, min(st.st_size, 67108864) - TAIL)
+        os.lseek(f, start, os.SEEK_SET)
+        data = b""
+        while len(data) < TAIL:
+            c = os.read(f, TAIL - len(data))
             if not c:
                 break
             data += c
+        if start:
+            data = data[data.find(b"\n") + 1:] if b"\n" in data else b""
         return data
     except OSError:
         return b""
 STAGE = re.compile(rb""".*"stage":"([a-z]*)","result":"([a-z0-9 ,;()\x27-]*)".*""")
-# The state of an id comes from the last line holding its reference, as last_stage reads it
-# (grep -F "\"id\":\"<id>\"" | tail -1): rfind, which also sees references sharing a quote.
-def line_of(data, i):
-    p = data.rfind(b"\x22id\x22:\x22" + i.encode() + b"\x22")
-    if p < 0:
-        return None
-    a = data.rfind(b"\n", 0, p) + 1
-    b = data.find(b"\n", p)
-    m = STAGE.fullmatch(data, a, len(data) if b < 0 else b)
-    return (m.group(1) + b": " + m.group(2)).decode() if m else ""
-def stages(data, ids):
-    out = {}
-    for i in ids:
-        st = line_of(data, i)
-        if st is not None:
-            out[i] = st
-    return out
-# Ids on lines that say a step gave up or changed (the only ones retry can take): found from
-# those words, so a log of other lines, however many, costs nothing here.
 REF = re.compile(rb"(?=\x22id\x22:\x22([0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})\x22)")
-def flagged(data, words):
-    out, seen = set(), set()
-    for w in words:
-        for m in re.finditer(re.escape(w), data):
-            a = data.rfind(b"\n", 0, m.start()) + 1
-            if a in seen:
-                continue
-            seen.add(a)
-            b = data.find(b"\n", m.end())
-            out.update(x.decode() for x in REF.findall(data, a, len(data) if b < 0 else b))
-    return out
+# Each id with the stage of the last line referring to it, as last_stage reads it (grep -F of
+# the reference, tail -1): one pass over the lines, overlapping references included.
+def stages(user, want):
+    last = {}
+    for line in read_tail(user).split(b"\n"):
+        ids = [x.decode() for x in REF.findall(line)]
+        ids = [i for i in ids if i in want]
+        if not ids:
+            continue
+        m = STAGE.fullmatch(line)
+        st = (m.group(1) + b": " + m.group(2)).decode() if m else ""
+        for i in ids:
+            last[i] = st
+    return last
 reqs = names("requests", ".json")
-w = g = {}
-newest = lambda ids, n: sorted(ids, reverse=True)[:n]
+newest = lambda ids, n: sorted(ids, key=lambda i: (reqs[i], i), reverse=True)[:n]
+w, g = {}, {}
 if verb in ("approve", "reject"):
-    cands = newest(names("held", ".json") & reqs, 2000)
+    cands = newest(set(names("held", ".json")) & set(reqs), 200)
 elif verb == "release":
-    cands = newest(names("quarantine", "") & reqs, 200)
-    g = stages(read_log(guard), cands)
+    q = set(names("quarantine", "")) & set(reqs)
+    g = stages(guard, q)
+    cands = newest([i for i in q if "release failed, gave up" not in g.get(i, "")], 50)
 elif verb == "retry":
-    wd, gd = read_log(web), read_log(guard)
-    pool = newest((flagged(wd, (b"gave up", b"changed")) | flagged(gd, (b"gave up",))) & reqs, 200)
-    w, g = stages(wd, pool), stages(gd, pool)
-    cands = [i for i in pool if "gave up" in w.get(i, "") or "changed" in w.get(i, "") or "gave up" in g.get(i, "")]
+    w, g = stages(web, reqs), stages(guard, reqs)
+    ok = [i for i in reqs if any(x in w.get(i, "") for x in ("gave up", "changed")) or "gave up" in g.get(i, "")]
+    cands = newest(ok, 50)
 else:
     cands = newest(reqs, 50)
-    wd, gd = read_log(web), read_log(guard)
-    w, g = stages(wd, cands), stages(gd, cands)
+    w, g = stages(web, set(cands)), stages(guard, set(cands))
+keep = set(cands)
 for i in cands:
     print("C\t" + i)
 for k, m in (("W", w), ("G", g)):
     for i, st in m.items():
-        print(k + "\t" + i + "\t" + st)' "$QUEUE" "$1" "$WEB" "$GUARD"
+        if i in keep:
+            print(k + "\t" + i + "\t" + st)' "$QUEUE" "$1" "$WEB" "$GUARD"
 }
 web_decide() {  # web_decide approve|reject|release <id>
     local what=$1 id=$2 f held sum=""
