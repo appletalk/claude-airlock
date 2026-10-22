@@ -2,12 +2,17 @@
 # operator's zshrc after compinit:
 #   source /usr/local/share/airlock-agents/completion.zsh
 # The command's name is the site's (agents.env). Names are offered only for the bare command
-# name as typed, from the installed command (<bindir>/<command> _complete, which checks and cleans
-# them), never from the word typed: `./<command> <Tab>` in a directory an agent can write must not run
-# that file. Each name is checked again here, descriptions stripped of control characters.
+# name as typed, from the installed operator script (`operator _complete`, which checks and cleans
+# them), never from the word typed: `./<command> <Tab>` in a directory an agent can write must not
+# run that file. Both paths are fixed here (no environment can move them); the script runs only
+# while it and its directory are root's (or the operator's) and writable by no one else. Each name
+# is checked again here, descriptions cut to printable ASCII.
+typeset -g _airlock_agents_env=/etc/claude-airlock/agents/agents.env
+typeset -g _airlock_agents_bin=/usr/local/lib/airlock-agents/operator
 () {
     emulate -L zsh
-    local env=${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env} line cmd=
+    setopt no_bash_rematch    # (emulate leaves it as the user set it; $match needs it off)
+    local env=$_airlock_agents_env line cmd=
     local -a match mbegin mend
     [[ -f $env && -r $env ]] || return 0
     for line in "${(@f)$(<$env)}"; do
@@ -21,16 +26,20 @@
 # _airlock_agents_items <what> [verb]: the installed command's names as name:description
 _airlock_agents_items() {
     # (no emulate here: compsys has set its own options, and _describe needs them)
-    local bin=${AIRLOCK_AGENTS_BINDIR:-/usr/local/bin}/$_airlock_agents_cmd line n d owner mode
+    local bin=$_airlock_agents_bin line n d f owner mode
     local -a items
-    # only the bare name, and only a program root's or the operator's own that no one else can write
-    [[ $words[1] == $_airlock_agents_cmd && -f $bin && -x $bin ]] || return 1
-    owner=$(command stat -Lc %u -- $bin 2>/dev/null) mode=$(command stat -Lc %a -- $bin 2>/dev/null)
-    [[ ( $owner == 0 || $owner == $UID ) && $mode == <-> && $(( 8#$mode & 8#022 )) -eq 0 ]] || return 1
-    for line in "${(@f)$(command timeout 5 $bin _complete "$@" </dev/null 2>/dev/null | command head -n 200)}"; do
+    # only the bare name, and only a plain file (no link) that it and its directory are root's or
+    # the operator's own, writable by no one else
+    [[ $words[1] == $_airlock_agents_cmd && -f $bin && ! -L $bin && -x $bin ]] || return 1
+    for f in $bin ${bin:h}; do
+        [[ ! -L $f ]] || return 1
+        owner=$(command stat -c %u -- $f 2>/dev/null) mode=$(command stat -c %a -- $f 2>/dev/null)
+        [[ ( $owner == 0 || $owner == $UID ) && $mode == <-> && $(( 8#$mode & 8#022 )) -eq 0 ]] || return 1
+    done
+    for line in "${(@f)$(command timeout 3 $bin _complete "$@" </dev/null 2>/dev/null | command head -n 200)}"; do
         n=${line%%$'\t'*} d=${line#*$'\t'}
         [[ $line == *$'\t'* && $n =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$' ]] || continue
-        items+=("$n:${${d//[[:cntrl:]]/}[1,60]}")
+        items+=("$n:${${d//[^ -~]/}[1,60]}")
     done
     _describe -t names "${1//-/ }" items
 }

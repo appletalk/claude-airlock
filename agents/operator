@@ -208,30 +208,34 @@ last_stage() {  # last_stage <web>|<guard> <id>: read like any queue file (a FIF
 # Every id's last stage line in one pass over a stage log on stdin: "id<TAB>stage: result"
 # (the same fields and pattern as last_stage).
 last_stages() {
-    LC_ALL=C sed -n 's/.*"id":"\([0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{6\}\)","stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1\t\2: \3/p' \
+    # (as last_stage: an id's last line counts even when it doesn't fit the pattern, as "")
+    LC_ALL=C sed -n -e 's/.*"id":"\([0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{6\}\)","stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1\t\2: \3/p' -e 't' \
+            -e 's/.*"id":"\([0-9]\{8\}T[0-9]\{6\}Z-[0-9a-f]\{6\}\)".*/\1\t/p' \
         | awk -F'\t' '{ last[$1] = $2 } END { for (i in last) print i "\t" last[i] }'
 }
 # One word for where an id stands, from what the operator can see. (STAGE_WEB and STAGE_GUARD, when
 # set, are the id's last stage lines, read once for many ids by the caller.)
-web_state() {  # web_state <id>
+web_state() { web_state_set "$1"; printf '%s\n' "$STATE"; }  # web_state <id>
+# The same, into STATE, without a subshell (completion takes many ids at once).
+web_state_set() {  # web_state_set <id>
     local id=$1 last
     if [ -e "$QUEUE/answers/$id.md" ]; then
-        if [ -e "$QUEUE/quarantine/$id" ]; then echo "released by $AGENTS_OPERATOR"; else echo answered; fi
+        if [ -e "$QUEUE/quarantine/$id" ]; then STATE="released by $AGENTS_OPERATOR"; else STATE=answered; fi
     elif [ -e "$QUEUE/quarantine/$id" ]; then
         last="${STAGE_GUARD-$(last_stage "$GUARD" "$id")}"
-        case "$last" in *"release failed, gave up"*) echo "quarantined, release failed ($last)" ;; *) echo quarantined ;; esac
-    elif [ -e "$QUEUE/decisions/$id.reject" ]; then echo rejected
-    elif [ -e "$QUEUE/held/$id.json" ] && [ ! -e "$QUEUE/decisions/$id.approve" ]; then echo held
+        case "$last" in *"release failed, gave up"*) STATE="quarantined, release failed ($last)" ;; *) STATE=quarantined ;; esac
+    elif [ -e "$QUEUE/decisions/$id.reject" ]; then STATE=rejected
+    elif [ -e "$QUEUE/held/$id.json" ] && [ ! -e "$QUEUE/decisions/$id.approve" ]; then STATE=held
     else
         last="${STAGE_WEB-$(last_stage "$WEB" "$id")}"
         case "$last" in
-            *"gave up"*) echo "failed ($last)" ;;
-            *changed*) echo "changed after its check ($last)" ;;
+            *"gave up"*) STATE="failed ($last)" ;;
+            *changed*) STATE="changed after its check ($last)" ;;
             "publish: published"*)
                 last="${STAGE_GUARD-$(last_stage "$GUARD" "$id")}"
-                case "$last" in *"gave up"*) echo "gate failed ($last)" ;; *) echo gating ;; esac ;;
-            "") echo queued ;;
-            *) echo "researching ($last)" ;;
+                case "$last" in *"gave up"*) STATE="gate failed ($last)" ;; *) STATE=gating ;; esac ;;
+            "") STATE=queued ;;
+            *) STATE="researching ($last)" ;;
         esac
     fi
 }
@@ -437,35 +441,37 @@ case "$cmd" in
                 [ -n "$WEB" ] || exit 0
                 web_running | while IFS= read -r n; do name_ok "$n" && printf '%s\trunning\n' "$n"; done || true ;;
             ids)
-                # Newest first; the first 50 that the verb accepts (filtered before the cap: a flood
-                # of other requests can't push them out). approve, reject and release need only the
-                # queue's files; show and retry read each worker's stage log once.
+                # Newest first, at most 50, each id one the verb accepts (its state as web_state
+                # says, in this process: no fork per id). Candidates come from where each verb's ids
+                # live, not from requests/ (the agent writes that, and could bury them): approve and
+                # reject from held/, release from quarantine/, retry from the ids a worker gave up on
+                # (or that changed); show is the newest requests.
                 [ -n "$WEB" ] || exit 0
                 verb="${2:-show}"
-                case "$verb" in show|approve|reject|release|retry) ;; *) exit 0 ;; esac
                 declare -A wl=() gl=()
-                if [ "$verb" = show ] || [ "$verb" = retry ]; then
-                    while IFS=$'\t' read -r i st; do wl[$i]=$st; done < <({ qread 67108864 "log/$WEB/stages.jsonl" || true; } | last_stages)
-                    while IFS=$'\t' read -r i st; do gl[$i]=$st; done < <({ qread 67108864 "log/$GUARD/stages.jsonl" || true; } | last_stages)
-                fi
+                while IFS=$'\t' read -r i st; do wl[$i]=$st; done < <({ qread 67108864 "log/$WEB/stages.jsonl" || true; } | last_stages)
+                while IFS=$'\t' read -r i st; do gl[$i]=$st; done < <({ qread 67108864 "log/$GUARD/stages.jsonl" || true; } | last_stages)
+                case "$verb" in
+                    approve|reject) cands() { for f in "$QUEUE"/held/*.json; do f=${f##*/}; printf '%s\n' "${f%.json}"; done; } ;;
+                    release) cands() { for f in "$QUEUE"/quarantine/*; do printf '%s\n' "${f##*/}"; done; } ;;
+                    retry) cands() { for i in "${!wl[@]}"; do case "${wl[$i]}" in *"gave up"*|*changed*) printf '%s\n' "$i" ;; esac; done
+                                     for i in "${!gl[@]}"; do case "${gl[$i]}" in *"gave up"*) printf '%s\n' "$i" ;; esac; done; } ;;
+                    show) cands() { for f in "$QUEUE"/requests/*.json; do f=${f##*/}; printf '%s\n' "${f%.json}"; done; } ;;
+                    *) exit 0 ;;
+                esac
                 n=0
-                for f in "$QUEUE"/requests/*.json; do
-                    id="${f##*/}"; id="${id%.json}"
-                    [[ "$id" =~ $ID_RE ]] && printf '%s\n' "$id"
-                done | sort -r | while IFS= read -r id; do
-                    case "$verb" in
-                        approve|reject) [ -e "$QUEUE/held/$id.json" ] && [ ! -e "$QUEUE/answers/$id.md" ] && [ ! -e "$QUEUE/quarantine/$id" ] \
-                                            && [ ! -e "$QUEUE/decisions/$id.reject" ] && [ ! -e "$QUEUE/decisions/$id.approve" ] || continue
-                                        st=held ;;
-                        release) [ -e "$QUEUE/quarantine/$id" ] && [ ! -e "$QUEUE/answers/$id.md" ] || continue
-                                 case "${gl[$id]:-}" in *"release failed, gave up"*) continue ;; esac
-                                 st=quarantined ;;
-                        *) st="$(STAGE_WEB="${wl[$id]:-}" STAGE_GUARD="${gl[$id]:-}" web_state "$id")"
-                           [ "$verb" = show ] || case "$st" in failed*|changed*|"gate failed"*|"quarantined, release failed"*) ;; *) continue ;; esac ;;
+                while IFS= read -r id; do
+                    [[ "$id" =~ $ID_RE ]] && [ -e "$QUEUE/requests/$id.json" ] || continue
+                    STAGE_WEB="${wl[$id]:-}" STAGE_GUARD="${gl[$id]:-}"
+                    web_state_set "$id"
+                    case "$verb:$STATE" in
+                        show:*|approve:held|reject:held|release:quarantined) ;;
+                        retry:failed*|retry:changed*|"retry:gate failed"*|"retry:quarantined, release failed"*) ;;
+                        *) continue ;;
                     esac
-                    printf '%s\t%s\n' "$id" "$(printf '%s' "$st" | clean | tr -cd '[:print:]' | cut -c1-60)"
+                    printf '%s\t%s\n' "$id" "$(printf '%s' "$STATE" | clean | tr -cd '[:print:]' | cut -c1-60)"
                     n=$((n + 1)); [ "$n" -lt 50 ] || break
-                done ;;
+                done < <(cands | sort -ru) ;;
             *) die "usage: $CMD _complete sessions|web-sessions|ids [verb]" ;;
         esac ;;
     -h|--help|help)

@@ -2,15 +2,22 @@
 # operator's bashrc:
 #   source /usr/local/share/airlock-agents/completion.bash
 # The command's name is the site's (agents.env). Names are offered only for the bare command
-# name as typed, from the installed command (<bindir>/<command> _complete, which checks and cleans
-# them), never from the word typed: `./<command> <Tab>` in a directory an agent can write must not run
-# that file. Names are checked again here and matched by prefix, never expanded (no compgen -W).
-_airlock_agents_names() {  # _airlock_agents_names <what> [verb]: the installed command's names
-    local bin=${AIRLOCK_AGENTS_BINDIR:-/usr/local/bin}/$_airlock_agents_cmd owner mode n _
-    [ "${COMP_WORDS[0]}" = "$_airlock_agents_cmd" ] && [ -f "$bin" ] && [ -x "$bin" ] || return 0
-    owner=$(command stat -Lc %u -- "$bin" 2>/dev/null) mode=$(command stat -Lc %a -- "$bin" 2>/dev/null)
-    { [ "$owner" = 0 ] || [ "$owner" = "$UID" ]; } && [[ $mode =~ ^[0-7]+$ ]] && (( (8#$mode & 8#022) == 0 )) || return 0
-    command timeout 5 "$bin" _complete "$@" </dev/null 2>/dev/null | command head -n 200 | while IFS=$'\t' builtin read -r n _; do
+# name as typed, from the installed operator script (`operator _complete`, which checks and cleans
+# them), never from the word typed: `./<command> <Tab>` in a directory an agent can write must not
+# run that file. Both paths are fixed here (no environment can move them); the script runs only
+# while it and its directory are root's (or the operator's) and writable by no one else. Names are
+# checked again here and matched by prefix, never expanded (no compgen -W).
+_airlock_agents_env=/etc/claude-airlock/agents/agents.env
+_airlock_agents_bin=/usr/local/lib/airlock-agents/operator
+_airlock_agents_names() {  # _airlock_agents_names <what> [verb]: the installed script's names
+    local bin=$_airlock_agents_bin f owner mode n _
+    [ "${COMP_WORDS[0]}" = "$_airlock_agents_cmd" ] && [ -f "$bin" ] && [ ! -L "$bin" ] && [ -x "$bin" ] || return 0
+    for f in "$bin" "${bin%/*}"; do
+        [ ! -L "$f" ] || return 0
+        owner=$(command stat -c %u -- "$f" 2>/dev/null) mode=$(command stat -c %a -- "$f" 2>/dev/null)
+        { [ "$owner" = 0 ] || [ "$owner" = "$UID" ]; } && [[ $mode =~ ^[0-7]+$ ]] && (( (8#$mode & 8#022) == 0 )) || return 0
+    done
+    command timeout 3 "$bin" _complete "$@" </dev/null 2>/dev/null | command head -n 200 | while IFS=$'\t' builtin read -r n _; do
         [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$ ]] && builtin printf '%s\n' "$n"
     done
 }
@@ -39,7 +46,7 @@ _airlock_agents() {
     for w in "${words[@]}"; do [[ $w == "$cur"* ]] && COMPREPLY+=("$w"); done
 }
 _airlock_agents_register() {
-    local env=${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env} line cmd=
+    local env=$_airlock_agents_env line cmd=
     [ -f "$env" ] && [ -r "$env" ] || return 0
     while IFS= builtin read -r line; do
         [[ $line =~ ^AGENTS_COMMAND=([a-z_][a-z0-9_-]{0,31})$ ]] && cmd=${BASH_REMATCH[1]}
