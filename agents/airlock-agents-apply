@@ -64,7 +64,7 @@ site="${site:-$ROOT$ETC/agents.conf}"
 
 # ---- parse ------------------------------------------------------------------------------------
 
-OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40
+OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off
 ROLES=(agent web guard)
 declare -A NAME=() UID_OF=() SUB=() SIZE=() MEMHIGH=() MEMMAX=() TASKS=() CPU=()
 INTERNAL_NAMES=() INTERNAL_HOSTS=()
@@ -82,6 +82,12 @@ while IFS= read -r line || [ -n "$line" ]; do
     [ "${#w[@]}" -gt 0 ] || continue
     where="$site:$n"
     case "${w[0]}" in
+        clipboard)
+            # on: Claude's copy (OSC 52) in a session reaches the operator's terminal clipboard.
+            # Off by default: the session's tmux is the agent user's, so this lets that user write
+            # the operator's clipboard.
+            [ "${#w[@]}" = 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: clipboard on|off"
+            CLIPBOARD=${w[1]} ;;
         operator|command|inbox|queue|daily-cap)
             [ "${#w[@]}" = 2 ] || die "$where: want: ${w[0]} <value>"
             v=${w[1]}
@@ -134,7 +140,7 @@ while IFS= read -r line || [ -n "$line" ]; do
             # Findings the operator has looked at and accepts: they no longer pause an apply.
             [ "${#w[@]}" -gt 1 ] || die "$where: accept lists nothing"
             for v in "${w[@]:1}"; do
-                case "$v" in wsl-interop|wsl-drives|generic-dropins) ACCEPT[$v]=1 ;; *) die "$where: unknown accept '$v' (wsl-interop, wsl-drives, generic-dropins)" ;; esac
+                case "$v" in wsl-interop|wsl-drives|generic-dropins|sssd-ranges) ACCEPT[$v]=1 ;; *) die "$where: unknown accept '$v' (wsl-interop, wsl-drives, generic-dropins, sssd-ranges)" ;; esac
             done ;;
         internal-host)
             [ "${#w[@]}" -gt 1 ] || die "$where: internal-host lists nothing"
@@ -179,6 +185,8 @@ for r in "${ROLES[@]}"; do
 done
 
 # ---- render ----------------------------------------------------------------------------------
+
+TMUX_CONF=tmux.conf; [ "$CLIPBOARD" = off ] || TMUX_CONF=tmux-clipboard.conf
 
 # A path as systemd names its mount unit (only the characters the parser lets through).
 mount_unit() { local p=${1#/}; p=${p//-/\\x2d}; printf '%s.mount' "${p//\//-}"; }
@@ -235,6 +243,13 @@ PrivateNetwork=yes
 PrivateTmp=yes
 PrivateIPC=yes
 TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev /dev/mqueue:mode=1777,nosuid,nodev
+# Its own /run, empty but for what it needs: the host's sockets there (systemd-resolved's, nscd's,
+# the system bus, avahi, ...) answer anyone who can reach them, and some reach the network for
+# their caller. Bound back: its runtime dir, PID 1's notify socket (the manager reports ready
+# through it), journald's sockets, the marker podman checks for systemd, and airlock-envoy's
+# sockets (each user's directory is closed to the others by its own ACL).
+TemporaryFileSystem=/run:mode=0755,nosuid,nodev
+BindReadOnlyPaths=/run/systemd/notify -/run/systemd/journal/socket -/run/systemd/journal/stdout -/run/systemd/journal/dev-log -/run/systemd/system -/run/airlock-envoy
 # Other users' processes invisible in /proc (their command lines carry repo paths and
 # arguments, free text an agent could leave for another). Needs crun as the box runtime
 # (containers.conf): runc's rootless detection reads the bus owner through /proc and, hidden
@@ -250,7 +265,8 @@ BindPaths=/home/$u /run/user/$id
 # (cron and at also deny it in cron.deny and at.deny).
 ProtectSystem=strict
 ReadWritePaths=/home/$u /run/user/$id${rw:+ $rw}
-InaccessiblePaths=-/run/dbus/system_bus_socket
+# SSSD's NSS socket lives outside /run (directory lookups, AD recon).
+InaccessiblePaths=-/var/lib/sss/pipes
 EOF
     local ia=""
     for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
@@ -455,7 +471,7 @@ ConditionUser=$AGENT
 
 [Service]
 Type=forking
-ExecStart=/usr/bin/tmux -f $SHARE/tmux.conf -S %t/$AGENT-%i.sock new-session -d -s main $LIBDIR/session-run %i
+ExecStart=/usr/bin/tmux -f $SHARE/$TMUX_CONF -S %t/$AGENT-%i.sock new-session -d -s main $LIBDIR/session-run %i
 # Stops the tmux server and waits (60 s at most) for the panes' processes, in their own scopes,
 # to exit; it kills nothing: the next run waits for whatever is left.
 ExecStop=$LIBDIR/session-stop %t/$AGENT-%i.sock %t/$AGENT-%i.cg
@@ -481,7 +497,7 @@ ConditionUser=$WEB
 
 [Service]
 Type=forking
-ExecStart=/usr/bin/tmux -f $SHARE/tmux.conf -S %t/$WEB-%i.sock new-session -d -s main $LIBDIR/web-session-run %i
+ExecStart=/usr/bin/tmux -f $SHARE/$TMUX_CONF -S %t/$WEB-%i.sock new-session -d -s main $LIBDIR/web-session-run %i
 ExecStop=$LIBDIR/session-stop %t/$WEB-%i.sock
 TimeoutStopSec=90
 RuntimeMaxSec=12h
@@ -614,6 +630,9 @@ if [ "$mode" = userconf ]; then
 fi
 if [ "$mode" = render ]; then
     [ -n "$out" ] || die "--render needs a directory"
+    # A directory of its own, made now: writing into one that exists could follow a link someone
+    # left there (and as root, anywhere).
+    mkdir -m 0755 "$out" 2>/dev/null || die "--render wants a new directory: $out exists (or can't be made)"
     while read -r p m; do
         mkdir -p "$out$(dirname "$p")"
         render_file "$p" > "$out$p"; chmod "$m" "$out$p"
@@ -625,7 +644,9 @@ if [ "$mode" = render ]; then
             polkit) set -- /etc/polkit-1/rules.d/50-airlock-agents.rules ;;
             profile) set -- /etc/profile.d/airlock-agents.sh ;;
         esac
-        mkdir -p "$out/external$(dirname "$1")"; render_file "$1" > "$out/external$1"
+        mkdir -p "$out/external$(dirname "$1")"
+        # not the toolkit's own once the site installs it: a header that says so
+        render_file "$1" | sed 's/Rendered by airlock-agents-apply/From airlock-agents-apply --render, for the site to install and keep/' > "$out/external$1"
     done
     echo "rendered into $out${EXTERNAL[*]:+ (managed elsewhere, for reference: $out/external)}"
     exit 0
@@ -714,19 +735,29 @@ if [ -f "$ROOT$SHARE/TOOLKIT.sha256" ]; then
     fi
 fi
 # Parts the site manages itself: not written here, so they must be in place, live.
-if [ -n "${EXTERNAL[nftables]:-}" ] && [ -z "$ROOT" ]; then
-    live="$(nft -n list ruleset 2>/dev/null)" || live=""
+if [ -n "${EXTERNAL[nftables]:-}" ]; then
+    # Only rules of chains hooked on output count, and never this toolkit's own table (it is
+    # about to be withdrawn: it can't be what the site provides).
+    live="$(nft -n list ruleset 2>/dev/null | awk '
+        /^table / { skip = ($0 ~ /^table inet airlock-agents /); out = 0; next }
+        skip { next }
+        /^[[:space:]]*chain / { out = 0; next }
+        /type filter hook output / { out = 1; next }
+        out { print }')" || live=""
     for r in "${ROLES[@]}"; do
         id=${UID_OF[$r]} s0=${SUB[$r]}
         grep -qE "meta skuid \{ $id, $s0-$((s0 + SUB_COUNT - 1)) \} counter( packets [0-9]+ bytes [0-9]+)? drop" <<< "$live" \
             || pause "nftables is managed elsewhere, but the live ruleset has no drop for ${NAME[$r]} (uid $id, subuids $s0+): add the rules from --render's external/etc/airlock-agents.nft"
     done
 fi
-if [ -n "${EXTERNAL[polkit]:-}" ] && [ -z "$ROOT" ]; then
+if [ -n "${EXTERNAL[polkit]:-}" ]; then
     for r in "${ROLES[@]}"; do
-        grep -lsF 'org.freedesktop.machine1.host-shell' /etc/polkit-1/rules.d/*.rules /usr/share/polkit-1/rules.d/*.rules \
-            | xargs -r grep -lsF "\"${NAME[$r]}\"" | xargs -r grep -qsF "\"$OPERATOR\"" \
-            || pause "polkit is managed elsewhere, but no rule lets $OPERATOR open a host shell as ${NAME[$r]}: see --render's external/etc/polkit-1/rules.d/50-airlock-agents.rules"
+        granted=0
+        for f in "$ROOT"/etc/polkit-1/rules.d/*.rules "$ROOT"/usr/share/polkit-1/rules.d/*.rules; do
+            [ -f "$f" ] && [ "${f##*/}" != 50-airlock-agents.rules ] || continue   # never the toolkit's own
+            grep -qF 'org.freedesktop.machine1.host-shell' "$f" && grep -qF "\"${NAME[$r]}\"" "$f" && grep -qF "\"$OPERATOR\"" "$f" && granted=1
+        done
+        [ "$granted" = 1 ] || pause "polkit is managed elsewhere, but no rule lets $OPERATOR open a host shell as ${NAME[$r]}: see --render's external/etc/polkit-1/rules.d/50-airlock-agents.rules"
     done
 fi
 # A home image that no longer matches agents.conf (it only grows by hand).
@@ -752,14 +783,32 @@ manifest="$ROOT$ETC/.installed"
 # home-a\x2db.mount as an escape)
 first_field_is() { cut -d' ' -f1 | grep -qxF -- "$1"; }
 in_manifest() { [ -f "$manifest" ] && first_field_is "$1" < "$manifest"; }
-ours() { in_manifest "$1" && return 0; grep -qs 'Rendered by airlock-agents-apply' "$ROOT$1"; }
+recorded() { [ -f "$manifest" ] && while read -r mp ms; do [ "$mp" != "$1" ] || { echo "$ms"; return; }; done < "$manifest"; }
+sum_of() { sha256sum < "$ROOT$1" | cut -d' ' -f1; }
+# Exactly what an apply wrote there (in the manifest, the same bytes).
+as_installed() { local r; r="$(recorded "$1")"; [ -n "$r" ] && [ -f "$ROOT$1" ] && [ ! -L "$ROOT$1" ] && [ "$(sum_of "$1")" = "$r" ]; }
+# Its own to overwrite: as installed, or (not yet in the manifest) carrying its header.
+ours() { as_installed "$1" && return 0; ! in_manifest "$1" && grep -qs 'Rendered by airlock-agents-apply' "$ROOT$1"; }
+# The paths of the parts the site manages itself.
+external_path() {
+    case "$1" in
+        /etc/airlock-agents.nft|/etc/systemd/system/airlock-agents-nft.service) [ -n "${EXTERNAL[nftables]:-}" ] ;;
+        /etc/polkit-1/rules.d/50-airlock-agents.rules) [ -n "${EXTERNAL[polkit]:-}" ] ;;
+        /etc/profile.d/airlock-agents.sh) [ -n "${EXTERNAL[profile]:-}" ] ;;
+        *) return 1 ;;
+    esac
+}
 # Its own files as it left them: one changed or deleted since is drift someone made by hand
-# (changes come from agents.conf or a toolkit update, which it renders itself).
+# (changes come from agents.conf or a toolkit update, which it renders itself). A file of a part
+# now managed elsewhere that someone changed is the site's now: left alone.
 if [ -f "$manifest" ]; then
     while read -r p sum; do
         [ -n "$sum" ] || continue
-        if [ ! -e "$ROOT$p" ]; then pause "$p was removed since apply installed it"
-        elif [ "$(sha256sum < "$ROOT$p" | cut -d' ' -f1)" != "$sum" ]; then pause "$p was changed since apply installed it (by hand?): put it back, or make the change in agents.conf"; fi
+        if [ ! -e "$ROOT$p" ] && [ ! -L "$ROOT$p" ]; then
+            external_path "$p" || pause "$p was removed since apply installed it"
+        elif ! as_installed "$p"; then
+            external_path "$p" || pause "$p was changed since apply installed it (by hand?): put it back, or make the change in agents.conf"
+        fi
     done < "$manifest"
 fi
 # The toolkit's files root's and writable by root alone (the agents' managers run its scripts).
@@ -771,6 +820,7 @@ fi
 if [ "$WEB_ON" = 1 ] && [ -d "$ROOT$QUEUE/lib" ] && [ ! -L "$ROOT$QUEUE/lib" ]; then
     while IFS= read -r f; do
         file_list | first_field_is "$QUEUE/lib/$f" && continue
+        in_manifest "$QUEUE/lib/$f" && continue      # an earlier apply's: removed below if still as it wrote it
         pause "$QUEUE/lib/$f is not the toolkit's (nothing else belongs there; it is mounted into the boxes): remove it"
     done < <(find -P "$ROOT$QUEUE/lib" -mindepth 1 -maxdepth 1 -printf '%f\n')
 fi
@@ -784,7 +834,7 @@ for r in "${ROLES[@]}"; do
     for d in "/etc/systemd/system/user@${UID_OF[$r]}.service.d" "/etc/systemd/system/user-${UID_OF[$r]}.slice.d"; do
         for f in "$ROOT$d"/*; do
             [ -e "$f" ] || continue
-            [ "${f##*/}" = 10-airlock-agents.conf ] || foreign="$foreign ${f#"$ROOT"}"
+            [ "${f##*/}" = 10-airlock-agents.conf ] || in_manifest "${f#"$ROOT"}" || foreign="$foreign ${f#"$ROOT"}"
         done
     done
 done
@@ -794,6 +844,7 @@ for d in "$INBOX" ${QUEUE:+"$QUEUE" "$QUEUE/lib"}; do
     [ -e "$ROOT$d" ] || [ -L "$ROOT$d" ] || continue
     if [ -L "$ROOT$d" ] || [ ! -d "$ROOT$d" ]; then die "$d is not a plain directory (a link?): move it away first"; fi
     if [ -z "$ROOT" ] && [ "$(stat -c %u "$d")" != 0 ]; then die "$d is $(stat -c %U "$d")'s, not root's: another program's? pick another path or move it"; fi
+    if [ -n "$(find "$ROOT$d" -maxdepth 0 -perm /022 -print)" ]; then pause "$d is writable by its group or others (it should be 0755): fix its mode"; fi
 done
 # A unit file of its own for an agent user's manager or slice would replace the system's, drop-ins
 # included; generic drop-ins for every user's manager are named (they apply to the agents too).
@@ -802,8 +853,17 @@ for r in "${ROLES[@]}"; do
         [ ! -e "$ROOT$f" ] || die "$f replaces the system's unit for ${NAME[$r]} (the sandbox drop-in would not apply as written): move it away"
     done
 done
-for f in "$ROOT"/etc/systemd/system/user@.service.d/* "$ROOT"/etc/systemd/system/user-.slice.d/*; do
-    [ -e "$f" ] && [ -z "${ACCEPT[generic-dropins]:-}" ] && pause "${f#"$ROOT"} applies to every user's manager, the agents' too: check it weakens nothing, then accept generic-dropins in agents.conf"
+for r in "${ROLES[@]}"; do
+    for d in /run/systemd/system /usr/local/lib/systemd/system; do
+        for f in "$ROOT$d/user@${UID_OF[$r]}.service.d"/* "$ROOT$d/user-${UID_OF[$r]}.slice.d"/* "$ROOT$d/user@${UID_OF[$r]}.service" "$ROOT$d/user-${UID_OF[$r]}.slice"; do
+            [ -e "$f" ] && foreign="$foreign ${f#"$ROOT"}"
+        done
+    done
+done
+for f in "$ROOT"/etc/systemd/system/user@.service.d/* "$ROOT"/etc/systemd/system/user-.slice.d/* \
+         "$ROOT"/etc/systemd/system/service.d/* "$ROOT"/etc/systemd/system/slice.d/* \
+         "$ROOT"/run/systemd/system/user@.service.d/* "$ROOT"/run/systemd/system/user-.slice.d/*; do
+    [ -e "$f" ] && [ -z "${ACCEPT[generic-dropins]:-}" ] && pause "${f#"$ROOT"} applies to every user's manager (or every unit), the agents' too: check it weakens nothing, then accept generic-dropins in agents.conf"
 done
 # Each home image lives in /var/lib/<user>: absent, or a real directory, root's and 0700 (a name
 # like an existing service's would be that service's state; a writable one could hold a link).
@@ -835,6 +895,45 @@ if [ -z "$ROOT" ] && grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; 
             fi
         done
     fi
+fi
+
+# Subordinate ids must be nobody's real id: a box's processes run as them on the host. Local users
+# and groups are checked; ids a directory service maps (SSSD, AD) can't be listed, so a host with
+# SSSD pauses until the operator has checked its ID ranges.
+for r in "${ROLES[@]}"; do
+    s0=${SUB[$r]}
+    clash="$(getent passwd | awk -F: -v s="$s0" -v e="$((s0 + SUB_COUNT))" '$3 >= s && $3 < e { print $1; exit }' || true)"
+    [ -z "$clash" ] || pause "user $clash has a uid inside ${NAME[$r]}'s subordinate ids ($s0+$SUB_COUNT): pick another subuid start"
+    clash="$(getent group | awk -F: -v s="$s0" -v e="$((s0 + SUB_COUNT))" '$3 >= s && $3 < e { print $1; exit }' || true)"
+    [ -z "$clash" ] || pause "group $clash has a gid inside ${NAME[$r]}'s subordinate ids ($s0+$SUB_COUNT): pick another subuid start"
+done
+if [ -e "$ROOT/etc/sssd/sssd.conf" ] && [ -z "${ACCEPT[sssd-ranges]:-}" ]; then
+    pause "SSSD is configured: check the agents' subordinate id ranges don't overlap its ID mapping (ldap_idmap_range_min/max, or the AD ranges), then accept sssd-ranges in agents.conf"
+fi
+# The agents' boxes run on crun (runc fails under their ProtectProc).
+command -v crun >/dev/null || pause "crun is not installed; the agents' boxes need it (apt install crun / pacman -S crun)"
+# An allow list for cron or at that names an agent user (they get no jobs).
+for f in cron at; do
+    [ -f "$ROOT/etc/$f.allow" ] || continue
+    for r in "${ROLES[@]}"; do
+        ! grep -qxF "${NAME[$r]}" "$ROOT/etc/$f.allow" || pause "/etc/$f.allow names ${NAME[$r]}: take it out (agent users get no $f jobs)"
+    done
+done
+# The operator's home must exist (made 0700 below: no agent may read it).
+OP_HOME="$(getent passwd "$OPERATOR" | cut -d: -f6)"
+[[ "$OP_HOME" == /* ]] && [ -d "$ROOT$OP_HOME" ] || pause "$OPERATOR has no home directory"
+
+# A user the last apply set up that agents.conf no longer has (web research turned off, a rename):
+# taking one away is not automatic. Its files would go, but the user, its linger and home would
+# stay, outside any sandbox. The steps are in docs/agents.md.
+if [ -f "$ROOT$ETC/agents.env" ]; then
+    for k in AGENTS_AGENT AGENTS_WEB AGENTS_GUARD; do
+        old="$(sed -n "s/^$k=//p" "$ROOT$ETC/agents.env")"
+        [ -n "$old" ] || continue
+        now=" ${NAME[*]} "
+        [[ "$now" == *" $old "* ]] || ! getent passwd "$old" >/dev/null \
+            || pause "$old was set up by an earlier apply and agents.conf no longer has it: remove a user by hand first (docs/agents.md, Removing a user)"
+    done
 fi
 
 # The stop: every finding at once, and nothing changed (the dry run and --check say the same).
@@ -875,17 +974,11 @@ for r in "${ROLES[@]}"; do
 done
 
 # The operator's home: no agent may read it.
-OP_HOME="$(getent passwd "$OPERATOR" | cut -d: -f6)"
-[[ "$OP_HOME" == /* ]] || die "no home directory for $OPERATOR"
 mode_h="$(stat -c %a "$ROOT$OP_HOME" 2>/dev/null || echo missing)"
 if [ "$mode_h" = 700 ]; then ok "$OP_HOME is 0700"
-elif [ "$mode_h" = missing ]; then die "$OPERATOR's home $OP_HOME doesn't exist"
 else step "chmod 0700 $OP_HOME (was $mode_h)" chmod 0700 "$ROOT$OP_HOME"; fi
 
-# The agents' boxes run on crun (runc fails under their ProtectProc).
-if command -v crun >/dev/null; then ok "crun installed (the agents' box runtime)"
-elif [ "$confirm" = 0 ]; then changes=$((changes + 1)); echo "would: install crun (apt install crun / pacman -S crun): the agents' boxes need it"
-else die "crun is not installed; the agents' boxes need it (apt install crun / pacman -S crun)"; fi
+
 
 # The rendered files, each installed when it differs (written beside and renamed in), and the
 # ones an earlier apply installed that this one no longer renders removed.
@@ -894,6 +987,12 @@ install_file() {  # install_file <rendered> <dest> <mode>: a missing directory i
     # existing one is left as it is (its owner and mode are someone's choice: polkit's on Arch)
     [ -d "$(dirname "$2")" ] || install -d -m 0755 "$(dirname "$2")"
     install -m "$3" -o root -g root "$1" "$2.new" && mv -f "$2.new" "$2"
+}
+# The manifest follows each change as it is made, so a run that stops half-way leaves it true.
+manifest_set() {  # manifest_set <path> [<sum>]: record (or, with no sum, forget) a file
+    [ "$confirm" = 1 ] || return 0
+    { [ ! -f "$manifest" ] || while read -r mp ms; do [ "$mp" = "$1" ] || echo "$mp $ms"; done < "$manifest"
+      [ -z "${2:-}" ] || echo "$1 $2"; } > "$manifest.new" && chmod 0644 "$manifest.new" && mv -f "$manifest.new" "$manifest"
 }
 : > "$work/now"
 while read -r p m; do
@@ -904,10 +1003,11 @@ while read -r p m; do
             && { [ -n "$ROOT" ] && [ "$(/usr/bin/stat -c %a "$ROOT$p")" = "${m#0}" ] || [ "$(stat -c %u:%a "$ROOT$p")" = "0:${m#0}" ]; }; then continue; fi
     cp "$work/f" "$work/f.$changes"
     step "install $p" install_file "$work/f.$changes" "$ROOT$p" "$m"
+    manifest_set "$p" "$(sha256sum < "$work/f" | cut -d' ' -f1)"
     case "$p" in /etc/systemd/system/*) units_changed=1 ;; /etc/systemd/user/*) user_units_changed=1 ;; /etc/airlock-agents.nft) nft_changed=1 ;; esac
 done < <(file_list)
 # nftables now managed elsewhere (checked live above): stop its own unit before its files go.
-if [ -n "${EXTERNAL[nftables]:-}" ] && [ -f "$ROOT/etc/systemd/system/airlock-agents-nft.service" ] && ours /etc/systemd/system/airlock-agents-nft.service; then
+if [ -n "${EXTERNAL[nftables]:-}" ] && as_installed /etc/systemd/system/airlock-agents-nft.service; then
     step "disable airlock-agents-nft.service (nftables is managed elsewhere now)" systemctl disable --now airlock-agents-nft.service
 fi
 if [ -f "$manifest" ]; then
@@ -918,12 +1018,15 @@ if [ -f "$manifest" ]; then
             /etc/systemd/*|/etc/polkit-1/rules.d/50-airlock-agents.rules|/etc/tmpfiles.d/airlock-agents-*|/etc/airlock-agents.nft|/etc/profile.d/airlock-agents.sh|/srv/*/lib/*|/usr/local/bin/*) ;;
             *) echo "note: $manifest names $p, which this toolkit never renders; left alone"; continue ;;
         esac
-        ours "$p" || { echo "note: $p is no longer rendered but isn't this toolkit's (no header); left alone"; continue; }
+        # only exactly what it wrote; anything else there is someone's (a site's own copy of a part
+        # now managed elsewhere, say), left alone and forgotten
+        if ! as_installed "$p"; then echo "note: $p is no longer rendered and isn't as apply wrote it: left alone"; manifest_set "$p"; continue; fi
         step "remove $p (no longer rendered)" rm -f "$ROOT$p"
+        manifest_set "$p"
         case "$p" in /etc/systemd/system/*) units_changed=1 ;; /etc/systemd/user/*) user_units_changed=1 ;; esac
     done < "$manifest"
 fi
-if [ "$confirm" = 1 ]; then install -m 0644 "$work/now" "$manifest"; fi
+if [ "$confirm" = 1 ]; then install -m 0644 "$work/now" "$manifest.new" && mv -f "$manifest.new" "$manifest"; fi
 if [ "$units_changed" = 1 ]; then
     # The system units it renders, checked as systemd reads them before the reload (the files
     # are in place; a rejected one stops here, before any manager runs it).
@@ -1014,9 +1117,6 @@ for f in cron at; do
     # at to every other user: with no list, only root may use it).
     if [ -z "$ROOT" ] && ! command -v "$tool" >/dev/null; then ok "$f not installed"; continue; fi
     if [ -f "$ROOT/etc/$f.allow" ]; then
-        for r in "${ROLES[@]}"; do
-            ! grep -qxF "${NAME[$r]}" "$ROOT/etc/$f.allow" || die "/etc/$f.allow names ${NAME[$r]}: take it out (agent users get no $f jobs)"
-        done
         ok "/etc/$f.allow names no agent user"
         continue
     fi

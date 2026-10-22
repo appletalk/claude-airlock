@@ -123,16 +123,22 @@ fi
 
 # ---- the toolkit ----------------------------------------------------------------------------------
 echo "==> installing the toolkit"
-put() { install -D -m "$1" -o root -g root "$2" "$3.new" && mv -f "$3.new" "$3"; }
+put() { install -D -m "$1" -o root -g root "$2" "$3.new" && mv -f "$3.new" "$3"; echo "$3" >> "$shipped"; }
+shipped="$(mktemp)"; trap 'rm -f "$shipped"' EXIT
 for f in session-run session-stop web-session-run web-worker guard-worker nodump-refresh; do put 0755 "$SRC/lib/$f" "$LIBDIR/$f"; done
 put 0755 "$SRC/host-test.sh" "$LIBDIR/host-test.sh"
 put 0644 "$SRC/lib/worker-common.sh" "$LIBDIR/worker-common.sh"
 put 0755 "$SRC/operator" "$LIBDIR/operator"
 put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
-for f in containers.conf tmux.conf managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
+for f in containers.conf tmux.conf tmux-clipboard.conf managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
 for f in "$SRC"/box/* "$SRC"/templates/*; do d=${f%/*}; put 0644 "$f" "$SHARE/${d##*/}/${f##*/}"; done
 put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
 # The execute-only copies' refresh after package upgrades: whichever package manager this is.
+# Files an earlier version installed that this one no longer ships go (the checksum record below
+# lists what is there, so it must be only what this version ships). lib/bin/ is the apply's.
+{ find "$LIBDIR" -maxdepth 1 -type f; find "$SHARE" -type f ! -name 'TOOLKIT.sha256*'; } | while IFS= read -r f; do
+    grep -qxF -- "$f" "$shipped" || { echo "==> removing $f (no longer part of the toolkit)"; rm -f -- "$f"; }
+done
 if [ -d /etc/pacman.d ]; then put 0644 "$SRC/hooks/airlock-agents-nodump.hook" /etc/pacman.d/hooks/airlock-agents-nodump.hook; fi
 if [ -d /etc/apt/apt.conf.d ]; then put 0644 "$SRC/hooks/80airlock-agents-nodump" /etc/apt/apt.conf.d/80airlock-agents-nodump; fi
 # What was installed, so the apply notices any later change to it (drift: put back by reinstalling).

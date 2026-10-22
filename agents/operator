@@ -59,12 +59,15 @@ nd_check() {
 # Every agent-side process goes through a host shell as the agent user (the one polkit action
 # the operator has) and from there into its user manager, so it gets the manager's sandbox.
 oexec() { nd_check; exec machinectl shell -q "$AS@" "$ND/systemd-run" --user --pty --wait --collect --quiet --same-dir -- "$@"; }
-# Text from the agents' side on its way to the operator's terminal: CSI and OSC sequences, C1 controls
+# Text from the agents' side on its way to the operator's terminal: NUL, bidi controls (which
+# reorder what the operator reads), CSI and OSC sequences, C1 controls
 # (U+0080-U+009F, which a terminal can read as ESC sequences) and every other control
 # character dropped; tab and newline stay. C0 goes before C1, and C1 as whole runs of 0xC2
 # and 0x80-0x9F bytes, so no deletion can join the two bytes of a C1 control around it.
 clean() {
-    LC_ALL=C sed -u -E $'s#\x1b\\[[0-?]*[ -/]*[@-~]##g; s#\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)##g; s#\xc2\x9b[0-?]*[ -/]*[@-~]##g; s#\xc2\x9d[^\x07\x1b\xc2]*(\x07|\x1b\\\\|\xc2\x9c)##g; s#[\x01-\x08\x0b-\x1f\x7f]##g; s#\xc2+[\x80-\x9f]+##g'
+    LC_ALL=C sed -u -E -e $'s#\x1b\\[[0-?]*[ -/]*[@-~]##g; s#\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)##g; s#\xc2\x9b[0-?]*[ -/]*[@-~]##g; s#\xc2\x9d[^\x07\x1b\xc2]*(\x07|\x1b\\\\|\xc2\x9c)##g; s#[\x01-\x08\x0b-\x1f\x7f]##g; s#\xc2+[\x80-\x9f]+##g' \
+        -e 's/\x00//g' \
+        -e $'s#\xe2\x80[\x8e\x8f\xaa-\xae]##g; s#\xe2\x81[\xa6-\xa9]##g; s#\xd8\x9c##g'
 }
 # machinectl shell doesn't return the remote exit status, and the remote side has a pty: no
 # pager, no colours, the status carried back on a marker line, the output cleaned.

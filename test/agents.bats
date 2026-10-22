@@ -44,9 +44,9 @@ setup() {
     # getent answers from the fake passwd/group files; alice (1000) always exists.
     cat > "$T/bin/getent" <<'S'
 #!/bin/bash
-db=$1 key=$2; f=$PASSWD; [ "$db" = group ] && f=$GROUP
+db=$1 key=${2:-}; f=$PASSWD; [ "$db" = group ] && f=$GROUP
 { [ "$db" = group ] && echo "alice:x:1000:" || echo "alice:x:1000:1000::/home/alice:/bin/zsh"; cat "$f"; } \
-    | awk -F: -v k="$key" '$1 == k || $3 == k { print; found = 1 } END { exit !found }'
+    | awk -F: -v k="$key" 'k == "" || $1 == k || $3 == k { print; found = 1 } END { exit !found }'
 S
     cat > "$T/bin/useradd" <<'S'
 #!/bin/bash
@@ -113,6 +113,7 @@ S
 #!/bin/bash
 # nft list: the live table, here the installed file (NFT_LOADED) or nothing loaded
 [ "$1" = -n ] && shift
+if [ "$1 ${2:-}" = "list ruleset" ]; then cat "${NFT_RULESET:-/dev/null}"; exit; fi
 if [ "$1" = list ]; then [ -n "${NFT_LOADED:-}" ] && cat "${NFT_LIVE:-$AIRLOCK_AGENTS_ROOT/etc/airlock-agents.nft}"; exit; fi
 echo "nft $*" >> "$LOG"
 S
@@ -542,7 +543,7 @@ S
     # its own home and runtime dir only; no system bus; the other agents' cgroups hidden
     grep -qx 'ProtectHome=tmpfs' "$d"
     grep -qx 'BindPaths=/home/agent /run/user/1100' "$d"
-    grep -qx 'InaccessiblePaths=-/run/dbus/system_bus_socket' "$d"
+    grep -qx 'TemporaryFileSystem=/run:mode=0755,nosuid,nodev' "$d"
     grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice' "$d"
     grep -qx 'After=user-1101.slice user-1102.slice' "$d"
     grep -qx 'ProtectSystem=strict' "$d"
@@ -570,7 +571,8 @@ S
     grep -q '^ExecStart=/usr/bin/tmux -f /usr/local/share/airlock-agents/tmux.conf ' "$RENDER/etc/systemd/user/agent-session@.service"
     c="$REPO/agents/share/tmux.conf"
     grep -qx 'set -g status off' "$c"
-    grep -qx 'set -g set-clipboard on' "$c"                     # Claude's copy goes on to foot
+    grep -qx 'set -g set-clipboard off' "$c"                    # by default nothing from the pane reaches the clipboard
+    grep -qx 'set -g set-clipboard on' "$REPO/agents/share/tmux-clipboard.conf"   # clipboard on: Claude's copy goes on to the terminal
     grep -qxF "set -as terminal-features 'foot*:clipboard'" "$c"
     grep -qx 'set -s get-clipboard off' "$c"                    # no answer to the pane's requests
     grep -qx 'set -g allow-passthrough off' "$c"
@@ -890,7 +892,7 @@ PY
         grep -qx 'ProtectHome=tmpfs' "$d"
         grep -qx "BindPaths=/home/$u /run/user/$n" "$d"
         grep -qx 'ProtectSystem=strict' "$d"
-        grep -qx 'InaccessiblePaths=-/run/dbus/system_bus_socket' "$d"
+        grep -qx 'TemporaryFileSystem=/run:mode=0755,nosuid,nodev' "$d"
         # writes only to its home, runtime dir and its own queue dirs (the ones the queue model gives it)
         rw="$(sed -n 's/^ReadWritePaths=//p' "$d" | tr ' ' '\n' | sed 's/^-//' | sort | tr '\n' ' ')"
         case $u in
@@ -1015,13 +1017,15 @@ PrivateNetwork=yes
 PrivateTmp=yes
 PrivateIPC=yes
 TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev /dev/mqueue:mode=1777,nosuid,nodev
+TemporaryFileSystem=/run:mode=0755,nosuid,nodev
+BindReadOnlyPaths=/run/systemd/notify -/run/systemd/journal/socket -/run/systemd/journal/stdout -/run/systemd/journal/dev-log -/run/systemd/system -/run/airlock-envoy
 ProtectProc=invisible
 Environment=CONTAINERS_CONF_OVERRIDE=/usr/local/share/airlock-agents/containers.conf
 ProtectHome=tmpfs
 BindPaths=/home/agent /run/user/1100
 ProtectSystem=strict
 ReadWritePaths=/home/agent /run/user/1100 -/srv/agent-web/requests
-InaccessiblePaths=-/run/dbus/system_bus_socket
+InaccessiblePaths=-/var/lib/sss/pipes
 InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
@@ -1037,13 +1041,15 @@ PrivateNetwork=yes
 PrivateTmp=yes
 PrivateIPC=yes
 TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev /dev/mqueue:mode=1777,nosuid,nodev
+TemporaryFileSystem=/run:mode=0755,nosuid,nodev
+BindReadOnlyPaths=/run/systemd/notify -/run/systemd/journal/socket -/run/systemd/journal/stdout -/run/systemd/journal/dev-log -/run/systemd/system -/run/airlock-envoy
 ProtectProc=invisible
 Environment=CONTAINERS_CONF_OVERRIDE=/usr/local/share/airlock-agents/containers.conf
 ProtectHome=tmpfs
 BindPaths=/home/$u /run/user/$n
 ProtectSystem=strict
 ReadWritePaths=/home/$u /run/user/$n $rw
-InaccessiblePaths=-/run/dbus/system_bus_socket
+InaccessiblePaths=-/var/lib/sss/pipes
 InaccessiblePaths=$cg
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
         f="$d/user@$n.service.d/10-airlock-agents.conf"
@@ -1056,7 +1062,7 @@ Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
     [ "$(grep -v '^#' "$c" | grep -v '^$')" = $'[engine]\nruntime = "crun"' ]
     rm "$T/bin/crun"
     run "$P"
-    [[ "$output" == *"would: install crun (apt install crun / pacman -S crun)"* ]] || { echo "$output"; return 1; }
+    [ "$status" -eq 1 ]; [[ "$output" == *"paused, nothing changed"*"crun is not installed"* ]] || { echo "$output"; return 1; }
     run "$P" --confirm
     [ "$status" -eq 1 ]; [[ "$output" == *"crun is not installed"* ]]
     [ ! -s "$LOG" ]                                                # refused before any change
@@ -1625,7 +1631,8 @@ S
 
 @test "cron and at: an existing deny list gets each agent user once; none is created; an allow list naming one is refused" {
     run "$P" --confirm
-    [ ! -e "$R/etc/cron.deny" ] && [ ! -e "$R/etc/at.deny" ]         # never created (at would open to everyone)
+    [ ! -e "$R/etc/cron.deny" ]         # never created (at would open to everyone)
+    [ ! -e "$R/etc/at.deny" ]
     : > "$R/etc/cron.deny"; : > "$R/etc/at.deny"
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1689,19 +1696,41 @@ S
     grep -q "local edit" "$R/etc/profile.d/airlock-agents.sh"              # left as found
 }
 
+# site_ruleset: a live ruleset as `nft -n list ruleset` prints it, the site's own output chain
+# dropping each agent user (and, as on a host, the toolkit's own table too)
+site_ruleset() {
+    export NFT_RULESET="$T/ruleset"
+    cat > "$NFT_RULESET" <<'EOF'
+table inet filter {
+	chain input {
+		type filter hook input priority filter; policy drop;
+	}
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta skuid { 1100, 1100000-1165535 } limit rate 10/minute burst 20 packets log prefix "site-drop: " level info
+		meta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop comment "agent"
+		meta skuid { 1101, 1200000-1265535 } counter packets 3 bytes 180 drop comment "agent-web"
+		meta skuid { 1102, 1300000-1365535 } counter packets 0 bytes 0 drop comment "agent-guard"
+	}
+}
+EOF
+}
+
 @test "a part managed elsewhere is never written, and its own copy is withdrawn" {
     run "$P" --confirm; [ "$status" -eq 0 ]
-    [ -f "$R/etc/airlock-agents.nft" ] && [ -f "$R/etc/profile.d/airlock-agents.sh" ]
+    [ -f "$R/etc/airlock-agents.nft" ]; [ -f "$R/etc/profile.d/airlock-agents.sh" ]
     printf 'external nftables profile\n' >> "$E/agents.conf"
     : > "$LOG"
+    site_ruleset
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ ! -e "$R/etc/airlock-agents.nft" ] && [ ! -e "$R/etc/profile.d/airlock-agents.sh" ]
+    [ ! -e "$R/etc/airlock-agents.nft" ]; [ ! -e "$R/etc/profile.d/airlock-agents.sh" ]
     grep -qx 'systemctl disable --now airlock-agents-nft.service' "$LOG"
     [[ "$output" == *"nftables is managed elsewhere"* ]]
     # --render still shows what the site must provide
     "$P" --render "$T/r2" >/dev/null
-    [ -f "$T/r2/external/etc/airlock-agents.nft" ] && [ ! -e "$T/r2/etc/airlock-agents.nft" ]
+    [ -f "$T/r2/external/etc/airlock-agents.nft" ]
+    [ ! -e "$T/r2/etc/airlock-agents.nft" ]
     # and a file of the site's own at one of those paths is left alone
     echo '# the site' > "$R/etc/profile.d/airlock-agents.sh"
     run "$P" --confirm; [ "$status" -eq 0 ]
@@ -1796,4 +1825,101 @@ S
     echo '# changed' >> "$R/usr/local/lib/airlock-agents/operator"
     run "$P"
     [ "$status" -eq 1 ]; [[ "$output" == *"toolkit files differ from the install"*"operator"* ]]
+}
+
+@test "external nftables: the toolkit's own table, or a drop outside an output chain, is not the site's drop" {
+    printf 'external nftables\n' >> "$E/agents.conf"
+    export NFT_RULESET="$T/ruleset"
+    # only the toolkit's own table (still loaded from before)
+    { echo 'table inet airlock-agents {'; echo '	chain output {'; echo '		type filter hook output priority filter; policy accept;'
+      echo '		meta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop'; echo '	}'; echo '}'; } > "$NFT_RULESET"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"no drop for agent (uid 1100"* ]] || { echo "$output"; return 1; }
+    # a drop in a chain no hook reaches
+    { echo 'table inet filter {'; echo '	chain spare {'; echo '		meta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop'; echo '	}'; echo '}'; } > "$NFT_RULESET"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"no drop for agent (uid 1100"* ]]
+}
+
+@test "external: a site's own copy at a part's path is never removed, even where the toolkit's copy was" {
+    run "$P" --confirm; [ "$status" -eq 0 ]
+    printf 'external nftables\n' >> "$E/agents.conf"; site_ruleset
+    "$P" --render "$T/r3" >/dev/null
+    cp "$T/r3/external/etc/airlock-agents.nft" "$R/etc/airlock-agents.nft"     # the site installs the rendered copy
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$R/etc/airlock-agents.nft" ]; grep -q 'for the site to install and keep' "$R/etc/airlock-agents.nft"
+    run "$P" --confirm; [ "$status" -eq 0 ]; [ -f "$R/etc/airlock-agents.nft" ]
+}
+
+@test "external polkit: a rule of the site's must grant the operator a shell as each user; the toolkit's own doesn't count" {
+    printf 'external polkit\n' >> "$E/agents.conf"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"no rule lets alice open a host shell as agent"* ]]
+    mkdir -p "$R/etc/polkit-1/rules.d"
+    printf 'polkit.addRule(function(action, subject) { if (action.id == "org.freedesktop.machine1.host-shell" && subject.user == "alice" && ["agent", "agent-web", "agent-guard"].indexOf(action.lookup("user")) >= 0) return polkit.Result.YES; });\n' > "$R/etc/polkit-1/rules.d/50-airlock-agents.rules"
+    run "$P"
+    [ "$status" -eq 1 ]                                              # the toolkit's file name: not counted
+    mv "$R/etc/polkit-1/rules.d/50-airlock-agents.rules" "$R/etc/polkit-1/rules.d/40-site.rules"
+    run "$P"
+    [[ "$output" != *"no rule lets alice"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a user the last apply set up and agents.conf no longer has pauses (removing one is by hand)" {
+    run "$P" --confirm; [ "$status" -eq 0 ]
+    sed -i '/^web /d; /^guard /d' "$E/agents.conf"
+    run "$P" --confirm
+    [ "$status" -eq 1 ]; [[ "$output" == *"agent-web was set up by an earlier apply"* && "$output" == *"agent-guard was set up"* ]]
+    # once the users are gone (removed by hand), the apply withdraws their files
+    sed -i '/^agent-web:/d; /^agent-guard:/d' "$PASSWD"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$R/etc/systemd/user/agent-web-worker.service" ]
+}
+
+@test "a run that stops half-way leaves a true manifest: the rerun finishes without pausing on its own files" {
+    chmod 0555 "$R/etc" 2>/dev/null; mkdir -p "$R/usr/local/bin"; chmod 0555 "$R/usr/local/bin"
+    run "$P" --confirm                                                # dies at the first file it can't write
+    chmod 0755 "$R/etc" "$R/usr/local/bin"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run "$P" --confirm; [ "$status" -eq 0 ]; [[ "$output" == *"nothing to change"* || "$output" == *"done"* ]]
+}
+
+@test "a lib file an earlier toolkit installed and this one doesn't ship is removed, not a pause" {
+    fake_queue_state
+    run "$P" --confirm; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    echo old > "$R/srv/agent-web/lib/old.py"
+    echo "/srv/agent-web/lib/old.py $(sha256sum < "$R/srv/agent-web/lib/old.py" | cut -d' ' -f1)" >> "$E/.installed"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$R/srv/agent-web/lib/old.py" ]
+}
+
+@test "--render wants a new directory (it never writes into one that exists)" {
+    mkdir -p "$T/r4/etc"; ln -s "$T/victim" "$T/r4/etc/claude-airlock"; mkdir -p "$T/victim"
+    run "$P" --render "$T/r4"
+    [ "$status" -ne 0 ]; [[ "$output" == *"wants a new directory"* ]]
+    [ -z "$(ls -A "$T/victim")" ]
+}
+
+@test "clipboard on: the sessions' tmux passes Claude's copy on; off (the default) doesn't" {
+    grep -q -- '-f /usr/local/share/airlock-agents/tmux.conf ' "$RENDER/etc/systemd/user/agent-session@.service"
+    printf 'clipboard on\n' >> "$E/agents.conf"
+    "$P" --render "$T/r5" >/dev/null
+    grep -q -- '-f /usr/local/share/airlock-agents/tmux-clipboard.conf ' "$T/r5/etc/systemd/user/agent-session@.service"
+    grep -q -- '-f /usr/local/share/airlock-agents/tmux-clipboard.conf ' "$T/r5/etc/systemd/user/agent-web-session@.service"
+}
+
+@test "subordinate ids that are someone's real id pause; so does SSSD until its ranges are checked" {
+    echo "dom:x:1100005:1100005::/home/dom:/bin/bash" >> "$PASSWD"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"user dom has a uid inside agent's subordinate ids"* ]] || { echo "$output"; return 1; }
+    : > "$PASSWD"
+    mkdir -p "$R/etc/sssd"; : > "$R/etc/sssd/sssd.conf"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"SSSD is configured"* ]]
+    printf 'accept sssd-ranges\n' >> "$E/agents.conf"
+    run "$P"
+    [[ "$output" != *"SSSD is configured"* ]]
 }

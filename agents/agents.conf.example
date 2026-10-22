@@ -17,7 +17,9 @@
 #   external <part>...       parts your own config repo manages: nftables, polkit, profile. Not
 #                            written here; checked live (--render shows what they must provide)
 #   accept <finding>...      findings you accept, so they don't pause an apply: wsl-interop,
-#                            wsl-drives, generic-dropins
+#                            wsl-drives, generic-dropins, sssd-ranges
+#   clipboard on|off         Claude's copy in a session reaches your terminal's clipboard
+#                            (default off: it also lets the agent user write your clipboard)
 
 operator alice
 agent    claude        uid 1100 subuid 1100000 home 30G

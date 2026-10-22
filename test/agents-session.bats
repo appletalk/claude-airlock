@@ -93,7 +93,8 @@ UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
     cleared=33333333-3333-4333-8333-333333333333 other=44444444-4444-4444-8444-444444444444
     printf '{"type":"custom-title","customTitle":"proj.main","sessionId":"%s"}\n' "$cleared" > "$(convs proj)/$cleared.jsonl"
     session proj.main
-    [ "$(calls)" = "--remote-control --name proj.main --resume $cleared" ] && [ "$(idof proj.main)" = "$cleared" ]
+    [ "$(calls)" = "--remote-control --name proj.main --resume $cleared" ]
+    [ "$(idof proj.main)" = "$cleared" ]
     # renamed away later: the last title counts; a newer one named for another session is not ours
     printf '{"type":"custom-title","customTitle":"proj.review","sessionId":"%s"}\n' "$other" > "$(convs proj)/$other.jsonl"
     session proj.main
@@ -180,7 +181,8 @@ stop() { PATH="$T/sb:$PATH" run "$S" "$@"; }
     start=$(date +%s%N)
     stop /x.sock "$T/run.cg"
     took=$(( ($(date +%s%N) - start) / 1000000 ))
-    [ "$status" -eq 0 ] && [ "$took" -ge 1400 ]
+    [ "$status" -eq 0 ]
+    [ "$took" -ge 1400 ]
 }
 
 @test "after the wait stop says what is still running and returns; it kills nothing, its own and non-pane cgroups are never waited on" {
@@ -325,7 +327,8 @@ stop() { PATH="$T/sb:$PATH" run "$S" "$@"; }
     : > "$(convs proj)/x$l.jsonl"                                       # not a uuid at the start
     session proj.main
     [[ "$(calls)" == *"--session-id "* && "$(calls)" != *"$l"* && "$(calls)" != *"$d"* ]] || { echo "$(calls)"; return 1; }
-    [ "$(idof proj.main)" != "$l" ] && [ "$(idof proj.main)" != "$d" ]   # not even recorded
+    [ "$(idof proj.main)" != "$l" ]   # not even recorded
+    [ "$(idof proj.main)" != "$d" ]
 }
 
 @test "the recorded id stays when an older conversation still carries the session's name" {

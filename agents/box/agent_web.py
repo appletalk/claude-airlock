@@ -261,13 +261,17 @@ def question_findings(text, field):
     # A private or CGNAT address or network: four octets (a version like 10.11.5 has three), the
     # sentence's own full stop allowed after it. Only the RFC blocks themselves (10.0.0.0/8 in a
     # how-to) pass.
-    for m in re.finditer(r"(?<![\d.])(10\.\d{1,3}|192\.168|172\.(1[6-9]|2\d|3[01])|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7]))\.\d{1,3}\.\d{1,3}(?!\.?\d)(/\d{1,2})?", text):
-        if m.group(0) in RFC_BLOCKS:
-            continue
+    # Checked as written and as folded (fullwidth or look-alike dots and digits, "dot" words).
+    private = False
+    for src in (text, spelled):
+        for m in re.finditer(r"(?<![\d.])(10\.\d{1,3}|192\.168|172\.(1[6-9]|2\d|3[01])|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7]))\.\d{1,3}\.\d{1,3}(?!\.?\d)(/\d{1,2})?", src):
+            if m.group(0) not in RFC_BLOCKS:
+                private = True
+                break
+    if private:
         f.append(f"{field}: private or CGNAT address")
-        break
     # A ULA address (fd00:5:6::10, fd00::5:6:10), not the bare prefix (fd00::/8, fc00::/7).
-    if re.search(r"(?i)\bf[cd][0-9a-f]{2}:[0-9a-f:]*:[0-9a-f]{1,4}\b(?!/)", text):
+    if any(re.search(r"(?i)\bf[cd][0-9a-f]{2}:[0-9a-f:]*:[0-9a-f]{1,4}\b(?!/)", src) for src in (text, spelled)):
         f.append(f"{field}: ULA address")
     if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text):
         f.append(f"{field}: email address")

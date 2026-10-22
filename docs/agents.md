@@ -19,7 +19,8 @@ You get:
 Each agent user has:
 
 - its own uid, no groups, a locked password, and a fixed-size home (it can't fill your disk);
-- a sandboxed user manager: no network, its own `/tmp`, can't see other users' processes or homes;
+- a sandboxed user manager: no network, its own `/tmp` and `/run` (no host sockets such as the
+  DNS resolver's), can't see other users' processes or homes, writes only its own paths;
 - memory and CPU limits;
 - a firewall rule dropping any traffic from it on the host;
 - its own airlock-envoy listeners, so you decide what it can reach (the agent's own listeners
@@ -91,22 +92,41 @@ wrong. It stops, says "paused, nothing changed", and lists what it found, for ex
 - a home image whose size no longer matches `agents.conf`;
 - on WSL, interop on or Windows drives readable by the agents.
 
-A few findings you can decide to live with: add `accept wsl-interop`, `accept wsl-drives` or
-`accept generic-dropins` to `agents.conf`.
+A few findings you can decide to live with: add `accept wsl-interop`, `accept wsl-drives`,
+`accept generic-dropins` or `accept sssd-ranges` (on a host with SSSD, once you have checked the
+agents' subordinate id ranges don't overlap its ID mapping) to `agents.conf`.
 
 ### Parts you manage yourself
 
 If your config repo already manages the firewall, polkit or shell profile, say so in
 `agents.conf`, for example `external nftables`. Apply then never writes that part and checks the
 live result instead (the firewall must drop each agent user; polkit must let you open a shell as
-them). `sudo airlock-agents-apply --render /tmp/out` shows what each part must provide, under
-`/tmp/out/external/`.
+them). `airlock-agents-apply --render ~/agents-render` (as yourself, into a new directory) shows
+what each part must provide, under `external/`.
 
 Files the toolkit owns aren't edited locally: changes come with a toolkit update.
 
-### Renaming and resizing
+### The clipboard
 
-Renaming a user isn't supported. A home image only grows by hand: `truncate -s 50G
+By default nothing in a session reaches your clipboard. `clipboard on` in `agents.conf` passes
+Claude's copy (select, then Ctrl+C) on to your terminal. The session's tmux runs as the agent
+user, so this also lets that user write your clipboard: turn it on only if you want it.
+
+### Removing a user, renaming, resizing
+
+Apply won't remove a user for you: it pauses when one it set up is gone from `agents.conf`. To
+remove one (web research, say), as root:
+
+```
+loginctl disable-linger <user>
+systemctl stop user@<uid>.service home-<user>.mount
+userdel <user>; groupdel <user>
+sed -i '/^<user>:/d' /etc/subuid /etc/subgid
+rm -r /var/lib/<user> /etc/claude-airlock/agents/<user>.conf
+```
+
+Then edit `agents.conf` and run `sudo airlock-agents-apply --confirm`; it withdraws that user's
+files. Renaming is removing and adding. A home image only grows by hand: `truncate -s 50G
 /var/lib/<user>/home.img`, `losetup -c /dev/loopN`, `xfs_growfs /home/<user>`, then update
 `agents.conf` to match. XFS can't shrink.
 

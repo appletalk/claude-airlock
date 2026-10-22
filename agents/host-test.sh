@@ -249,6 +249,14 @@ for spec in $users; do
     rt="$(systemd-run --user -M "$u@" --wait --pipe --quiet --collect --expand-environment=no -- podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null)"
     [ "$rt" = crun ] && pass "user@$n: podman's runtime is crun" || fail "user@$n: podman's runtime is '$rt', not crun"
     mcheck missing denied "user@$n: no system bus" "$u" connect /run/dbus/system_bus_socket
+    # its own /run: no host socket that answers anyone (resolved can reach the network for its caller)
+    for sk in /run/systemd/resolve/io.systemd.Resolve /run/nscd/socket /var/lib/sss/pipes/nss /run/avahi-daemon/socket; do
+        [ -e "$sk" ] && mcheck missing denied "user@$n: no $sk" "$u" connect "$sk"
+    done
+    # ...but its airlock-envoy sockets are there (its only way out)
+    for sk in /run/airlock-envoy/"$u"/*.sock; do
+        [ -S "$sk" ] && mcheck ok "user@$n: reaches its Envoy socket ${sk##*/}" "$u" connect "$sk"
+    done
     for other in $users; do
         o=${other%:*} on=${other#*:}
         [ "$o" = "$u" ] && continue
