@@ -81,7 +81,7 @@ This links `airlock` into `~/.local/bin`, writes a default host config, builds t
 real throwaway box and makes it *prove* containment: an allowed host must be reachable and
 a denied host must not be. If that fails, the install says so loudly.
 
-There is no plain `make install`. This is level 1 of [docs/setup.md](docs/setup.md), which
+This is level 1 of [docs/setup.md](docs/setup.md), which
 lists the optional levels above it: airlock-envoy, then agent users.
 
 What the install does in detail, and how updates work: [docs/install.md](docs/install.md).

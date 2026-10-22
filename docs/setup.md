@@ -9,8 +9,6 @@ Install in levels. Stop at the one that gives you what you need.
 | 3. Agent users | the agent in its own Unix account, with sessions you attach to | `sudo make install-agents` |
 | 4. Web research | a separate user researches the web for the agent; answers are checked first | the same install, answering yes |
 
-There is no plain `make install`.
-
 ## 1. claude-airlock
 
 ```

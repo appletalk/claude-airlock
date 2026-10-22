@@ -38,12 +38,6 @@ install-airlock: ## install the launcher + build base/dev images for you (packag
 install-agents: ## (root, optional) agent users with their own sessions; needs airlock-envoy running (docs/setup.md)
 	@bash agents/install.sh
 
-install:
-	@echo "There is no plain 'make install'. Pick what to install (docs/setup.md):"
-	@echo "  make install-airlock   the launcher and images, for you (as yourself)"
-	@echo "  make install-agents    optional: agent users with their own sessions (as root, after airlock-envoy)"
-	@exit 1
-
 bundle: ## write the installed version (launcher + images) to DIR= for another account or an offline host
 	@test -n "$(DIR)" || { echo "usage: make bundle DIR=<directory the other account can read>"; exit 1; }
 	@bash bin/bundle.sh "$(DIR)"
@@ -105,4 +99,4 @@ hooks: ## install the git pre-commit hook (symlink)
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install install-airlock install-agents bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap
+.PHONY: help install-airlock install-agents bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap
