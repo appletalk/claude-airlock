@@ -1,0 +1,413 @@
+#!/bin/bash
+# The operator command (installed under the site's name, agents.conf `command`; default the agent
+# user's name): the operator's handle on the agent's Claude sessions (docs/agents.md). Each
+# session is <agent>-session@<project>.<name>.service in the agent's user manager: a tmux server
+# holding the boxed Claude for /home/<agent>/development/<project>. Run as the operator; polkit
+# lets the operator (only) open a shell as the agent users, and everything on their side runs
+# inside that user's manager (its own network namespace and /tmp), never in the login session
+# machinectl opens.
+#
+#   <command> ls | list                 sessions and their state (also plain `<command>`)
+#   <command> new <project> [name]      start one (name: main) and keep it across reboots
+#   <command> attach <project>[.name]   join its tmux (detach: Ctrl-b d; the session keeps running)
+#   <command> stop|restart <session>    stop it (and don't start it at boot) / restart it
+#                                       (a bare <project> only while it has a single session)
+#   <command> paste                     the clipboard image into the inbox's pastes/
+#   <command> update                    give the agent users the claude-airlock you have installed
+#                                       (a bundle through the inbox; they build nothing)
+#   <command> shell                     a shell as the agent, inside its user manager (setup work)
+#   <command> reload                    reload the agents' user units (after an apply changes them)
+#                                       and start the web research queue workers
+#
+# Web research (when agents.conf has web and guard users):
+#   <command> web [name]                attach to the interactive session (main, started if needed;
+#                                       a named one only while it runs); a fresh box, ends after 1 h idle
+#   <command> web new <name>            start another one and attach
+#   <command> web stop|restart [name]   end it / a fresh one now (a bare one only while one runs)
+#   <command> web ask "<question>"      queue a question as the operator
+#   <command> web ls                    each question: its state and the question
+#   <command> web show <id>             the answer, the quarantine findings, or the held question
+#   <command> web approve|reject <id>   a held question
+#   <command> web release <id>          a quarantined answer, after a look
+#   <command> web retry <id>            an id a worker gave up on, from the start
+#   <command> web login [research|gate|chat]   /login in each workspace's box (all three if none given)
+set -euo pipefail
+
+# The site's names (rendered by airlock-agents-apply from agents.conf).
+# shellcheck source=/dev/null
+. "${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env}"
+CMD=$AGENTS_COMMAND
+AGENT=$AGENTS_AGENT
+AS=$AGENT   # whose side oexec, octl and orun reach (update sets each user in turn)
+UNIT=$AGENT-session@
+INBOX=$AGENTS_INBOX
+die() { echo "$CMD: $*" >&2; exit 1; }
+# The processes a host shell as an agent user leaves in the host's own namespaces (the attach
+# client, octl's and orun's shell, systemctl and systemd-run) run from execute-only copies
+# (0711, root's: airlock-agents-apply, refreshed by a package manager hook). The user can't read
+# them, so the kernel makes those processes non-dumpable and the user's sandboxed code can't look
+# through /proc/<pid>/root into the host's unsandboxed tree (R1, docs/agents.md). Never the
+# readable originals.
+ND="${AGENTS_NODUMP_DIR:-$AGENTS_LIB/bin}"   # test knob: the tests point it at stubs
+nd_check() {
+    local b
+    for b in sh systemd-run systemctl; do
+        [ "$(stat -c %u:%g:%a "$ND/$b" 2>/dev/null)" = 0:0:711 ] \
+            || die "$ND/$b missing or not root's 0711: sudo airlock-agents-apply --confirm (the execute-only copies)"
+    done
+}
+# Every agent-side process goes through a host shell as the agent user (the one polkit action
+# the operator has) and from there into its user manager, so it gets the manager's sandbox.
+oexec() { nd_check; exec machinectl shell -q "$AS@" "$ND/systemd-run" --user --pty --wait --collect --quiet --same-dir -- "$@"; }
+# Text from the agents' side on its way to the operator's terminal: CSI and OSC sequences, C1 controls
+# (U+0080-U+009F, which a terminal can read as ESC sequences) and every other control
+# character dropped; tab and newline stay. C0 goes before C1, and C1 as whole runs of 0xC2
+# and 0x80-0x9F bytes, so no deletion can join the two bytes of a C1 control around it.
+clean() {
+    LC_ALL=C sed -u -E $'s#\x1b\\[[0-?]*[ -/]*[@-~]##g; s#\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)##g; s#\xc2\x9b[0-?]*[ -/]*[@-~]##g; s#\xc2\x9d[^\x07\x1b\xc2]*(\x07|\x1b\\\\|\xc2\x9c)##g; s#[\x01-\x08\x0b-\x1f\x7f]##g; s#\xc2+[\x80-\x9f]+##g'
+}
+# machinectl shell doesn't return the remote exit status, and the remote side has a pty: no
+# pager, no colours, the status carried back on a marker line, the output cleaned.
+octl() {
+    local out rc
+    nd_check
+    # shellcheck disable=SC2016  # expanded by the remote sh, on purpose
+    out="$(machinectl shell -q -E SYSTEMD_PAGER=cat -E SYSTEMD_COLORS=0 "$AS@" "$ND/sh" -c \
+        'nd=$1; shift; "$nd/systemctl" --user --no-pager "$@" 2>&1; echo "agent-rc=$?"' sh "$ND" "$@" | tr -d '\r')"
+    rc="$(printf '%s\n' "$out" | sed -n 's/^agent-rc=\([0-9][0-9]*\)$/\1/p' | tail -1)"
+    printf '%s\n' "$out" | LC_ALL=C grep -av '^agent-rc=[0-9]*$' | clean || true
+    return "${rc:-1}"
+}
+sock() { printf '/run/user/%s/%s-%s.sock' "$AGENTS_AGENT_UID" "$AGENT" "$1"; }
+# Run a command in $AS's user manager and return its exit status: its output streams back
+# cleaned, and the status comes on a marker line of its own, which only counts as the very
+# last line. Advisory: the agent controls what runs there, so it can claim any status; a false
+# one only costs the operator a kept or a removed bundle. A command killed by a signal fails (systemd
+# would count TERM, HUP, INT and PIPE as a clean exit).
+orun() {
+    local rc=1 line last="" have=0
+    nd_check
+    # shellcheck disable=SC2016  # expanded by the remote sh, on purpose
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ "$have" = 0 ] || printf '%s\n' "$last"
+        last=$line have=1
+    done < <(machinectl shell -q "$AS@" "$ND/sh" -c \
+        'nd=$1; shift; "$nd/systemd-run" --user --wait --pipe --collect --quiet -- /bin/sh -c '"'"'trap "exit 143" TERM HUP INT PIPE; "$@"'"'"' sh "$@" 2>&1; printf "\nagent-rc=%s\n" "$?"' sh "$ND" "$@" \
+        | clean)
+    if [[ "$last" =~ ^agent-rc=([0-9]{1,3})$ ]]; then rc=${BASH_REMATCH[1]}
+    elif [ "$have" = 1 ]; then printf '%s\n' "$last"; fi
+    return "$rc"
+}
+
+name_ok() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; }
+session() {  # session <project>[.name] or <project> <name> -> <project>.<name>
+    local p=${1%%.*} n=${2:-}
+    [[ "$1" != *. ]] || die "bad session name '$1' (<project>.<name>)"
+    [[ "$1" == *.* ]] && n=${1#*.}
+    n=${n:-main}
+    if ! name_ok "$p" || ! name_ok "$n"; then die "bad session name '$1${2:+ $2}' (letters, digits, - and _)"; fi
+    printf '%s.%s' "$p" "$n"
+}
+
+# The one session a stop, restart or attach means: <project>.<name> as given, or a bare
+# <project> only while that project has exactly one session, counting every one that ever ran
+# (its id file in the agent's ~/.local/state/<agent>-session) as well as the loaded units: a
+# stopped one drops out of systemd's list but is still one the operator may mean. With several, say which
+# (never guess: a restart or stop of the wrong one throws away its work).
+target() {
+    local p=$1 found
+    if [[ "$p" == *.* ]]; then session "$p"; return; fi
+    name_ok "$p" || die "bad session name '$p' (letters, digits, - and _)"
+    found="$( {
+        octl list-units --all --full --no-legend --plain "$UNIT$p.*.service" 2>/dev/null \
+            | awk -v pre="$UNIT" '{ u = $1; if (index(u, pre) == 1 && sub(/\.service$/, "", u)) print substr(u, length(pre) + 1) }'
+        # shellcheck disable=SC2016  # $HOME is the agent's: expanded on its side
+        orun /bin/sh -c 'ls -1 "$HOME/.local/state/$1-session" 2>/dev/null' sh "$AGENT" 2>/dev/null \
+            | sed -n 's/\.id$//p'
+    } | awk -v p="$p" 'index($0, p ".") == 1' | sort -u)" || true
+    case "$(printf '%s' "$found" | grep -c .)" in
+        0) [ "$p" != web ] || die "$WEB's sessions are $CMD web's: $CMD web"
+           die "no session for $p ($CMD ls); give its full name, <project>.<name>" ;;
+        1) session "$found" ;;
+        *) die "$p has several sessions ($(printf '%s' "$found" | tr '\n' ' ' | sed 's/ $//')): say which, e.g. $CMD $cmd $(printf '%s' "$found" | head -1)" ;;
+    esac
+}
+
+# --- web research ------------------------------------------------------------------------------
+# The operator's side of the queue: what the operator may read and write there directly (the
+# queue's ACLs), the rest through the web and guard users' managers. Everything shown from the
+# queue is the agent's or the web's text: it goes through clean, never raw to the terminal.
+QUEUE=$AGENTS_QUEUE
+WEB=$AGENTS_WEB GUARD=$AGENTS_GUARD
+ID_RE='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$'
+id_ok() { [[ "$1" =~ $ID_RE ]] || die "not an id: '$1' ($CMD web ls)"; }
+wsock() { printf '/run/user/%s/%s-%s.sock' "$AGENTS_WEB_UID" "$WEB" "$1"; }
+# The running interactive sessions' names. Every list-units here takes --full: machinectl's remote
+# side has a terminal, and systemctl cuts long unit names to its width ("<web>-session@main.servi...").
+web_running() {
+    AS=$WEB octl list-units --state=active --full --no-legend --plain "$WEB-session@*.service" 2>/dev/null \
+        | awk -v pre="$WEB-session@" '{ u = $1; if (index(u, pre) == 1 && sub(/\.service$/, "", u)) print substr(u, length(pre) + 1) }'
+}
+# The session a bare `<command> web stop|restart` means: the one running, never a guess.
+web_target() {  # web_target <cmd> [name]
+    local found
+    if [ -n "${2:-}" ]; then name_ok "$2" || die "bad session name '$2'"; printf '%s' "$2"; return; fi
+    found="$(web_running)"
+    case "$(printf '%s' "$found" | grep -c .)" in
+        0) die "no $WEB session is running" ;;
+        1) printf '%s' "$found" ;;
+        *) die "several $WEB sessions run ($(printf '%s' "$found" | tr '\n' ' ' | sed 's/ $//')): say which, e.g. $CMD web $1 $(printf '%s' "$found" | head -1)" ;;
+    esac
+}
+# A queue file's bytes, at most <cap>: only a regular file, reached without following a link
+# at any step below the queue (the agent users can plant links and FIFOs in the dirs they
+# write). Nothing on stdout otherwise, status 3. The caller cleans what it prints.
+qread() {  # qread <cap> <path below the queue>
+    python3 -I -c 'import os, stat, sys
+root, cap, rel = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+try:
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    parts = rel.split("/")
+    for p in parts[:-1]:
+        fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+    f = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    if not stat.S_ISREG(os.fstat(f).st_mode):
+        sys.exit(3)
+    data = b""
+    while len(data) < cap:
+        chunk = os.read(f, cap - len(data))
+        if not chunk:
+            break
+        data += chunk
+    sys.stdout.buffer.write(data)
+except OSError:
+    sys.exit(3)' "$QUEUE" "$1" "$2"
+}
+# The question of a request, one line (a newline in it can't make a row of its own).
+question_of() {  # question_of <id>
+    qread 16384 "requests/$1.json" | python3 -I -c 'import json, sys
+try:
+    q = json.loads(sys.stdin.buffer.read()).get("question", "")
+    print(" ".join(str(q).split())[:100])
+except Exception:
+    print("(unreadable request)")'
+}
+# The last stage line a worker logged for an id, "stage: result" (fields it wrote: ids
+# checked, words fixed, so the pattern holds them).
+last_stage() {  # last_stage <web>|<guard> <id>
+    grep -sF "\"id\":\"$2\"" "$QUEUE/log/$1/stages.jsonl" | tail -1 \
+        | sed -n 's/.*"stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1: \2/p'
+}
+# One word for where an id stands, from what the operator can see.
+web_state() {  # web_state <id>
+    local id=$1 last
+    if [ -e "$QUEUE/answers/$id.md" ]; then
+        if [ -e "$QUEUE/quarantine/$id" ]; then echo "released by $AGENTS_OPERATOR"; else echo answered; fi
+    elif [ -e "$QUEUE/quarantine/$id" ]; then
+        last="$(last_stage "$GUARD" "$id")"
+        case "$last" in *"release failed, gave up"*) echo "quarantined, release failed ($last)" ;; *) echo quarantined ;; esac
+    elif [ -e "$QUEUE/decisions/$id.reject" ]; then echo rejected
+    elif [ -e "$QUEUE/held/$id.json" ] && [ ! -e "$QUEUE/decisions/$id.approve" ]; then echo held
+    else
+        last="$(last_stage "$WEB" "$id")"
+        case "$last" in
+            *"gave up"*) echo "failed ($last)" ;;
+            *changed*) echo "changed after its check ($last)" ;;
+            "publish: published"*)
+                last="$(last_stage "$GUARD" "$id")"
+                case "$last" in *"gave up"*) echo "gate failed ($last)" ;; *) echo gating ;; esac ;;
+            "") echo queued ;;
+            *) echo "researching ($last)" ;;
+        esac
+    fi
+}
+web_decide() {  # web_decide approve|reject|release <id>
+    local what=$1 id=$2 f held sum=""
+    id_ok "$id"
+    case $what in
+        approve|reject) [ "$(web_state "$id")" = held ] || die "$id is not held ($(web_state "$id"))" ;;
+        release) [ "$(web_state "$id")" = quarantined ] || die "$id is not quarantined ($(web_state "$id"))" ;;
+    esac
+    if [ "$what" = approve ]; then
+        # An approval is of this text: its sha256 goes in the marker, and the worker researches the
+        # request only while it still hashes to that (the agent can rewrite it at any time).
+        held="$(qread 16384 "held/$id.json" | base64 -w0)" || die "$id: the held copy is not readable"
+        [ -n "$held" ] || die "$id: the held copy is empty"
+        sum="sha256 $(printf '%s' "$held" | base64 -d | sha256sum | cut -d' ' -f1)"
+        # Shown with every character outside printable ASCII escaped (\uXXXX): nothing in what is
+        # approved can be hidden from the screen (a control sequence clean would drop, bidi
+        # reordering, look-alike letters).
+        echo "approving exactly this request (characters outside ASCII shown as \\uXXXX):"
+        printf '%s' "$held" | base64 -d | python3 -I -c 'import json, sys
+data = sys.stdin.buffer.read()
+try:
+    print(json.dumps(json.loads(data), ensure_ascii=True, indent=1))
+except Exception:
+    print("(not JSON; the raw bytes)", ascii(data))' | clean; echo
+    fi
+    f="$QUEUE/decisions/$id.$what"
+    printf '%s%s' "$sum" "${sum:+$'\n'}" > "$f.tmp" && chmod 0640 "$f.tmp" && mv -f "$f.tmp" "$f"
+    echo "$id: $what recorded; the worker picks it up within minutes"
+}
+web() {
+    local sub="${1:-}" n id u ws
+    case "$sub" in ask|ls|show|approve|reject|release) ;; *) nd_check ;; esac   # loud, not "nothing running"
+    case "$sub" in
+        ask)
+            [ $# -ge 2 ] || die "usage: $CMD web ask \"<question>\""
+            python3 -I "$QUEUE/lib/web.py" ask "$2" --why "asked by the operator" --as "$AGENTS_OPERATOR" ;;
+        ls)
+            for f in "$QUEUE"/requests/*.json; do
+                [ -e "$f" ] || continue
+                id="${f##*/}"; id="${id%.json}"
+                [[ "$id" =~ $ID_RE ]] || continue
+                printf '%s  %-28s  %s\n' "$id" "$(web_state "$id")" "$(question_of "$id")"
+            done | clean ;;
+        show)
+            [ $# -ge 2 ] || die "usage: $CMD web show <id>"
+            id="$2"; id_ok "$id"
+            { if [ -e "$QUEUE/answers/$id.md" ]; then qread 1048576 "answers/$id.md" || echo "(not a plain file)"
+            elif [ -e "$QUEUE/quarantine/$id" ]; then
+                echo "== quarantined: findings"; qread 1048576 "quarantine/$id/findings.json" || echo "(not a plain file)"
+                echo; echo "== the report (normalized)"; qread 1048576 "quarantine/$id/normalized.md" || echo "(not a plain file)"
+            elif [ -e "$QUEUE/held/$id.json" ]; then
+                echo "== held: the request"; qread 16384 "held/$id.json" || echo "(not a plain file)"; echo
+            else echo "$id: $(web_state "$id")"; fi; } | clean ;;
+        approve|reject|release)
+            [ $# -ge 2 ] || die "usage: $CMD web $sub <id>"
+            web_decide "$sub" "$2" ;;
+        retry)
+            [ $# -ge 2 ] || die "usage: $CMD web retry <id>"
+            id="$2"; id_ok "$id"
+            # Only an id a worker gave up on (or that changed after its check). Started over, it is
+            # checked again: an earlier approval or rejection doesn't carry over (a re-held
+            # question is decided again); a release of a quarantined answer does.
+            case "$(web_state "$id")" in
+                failed*|changed*) rm -f -- "$QUEUE/decisions/$id.approve" "$QUEUE/decisions/$id.reject" ;;
+                "gate failed"*|"quarantined, release failed"*) ;;
+                *) die "$id is $(web_state "$id"): nothing to retry" ;;
+            esac
+            # Only an id a worker gave up on: its state goes, so the next pass starts it over.
+            # shellcheck disable=SC2016  # expanded on the worker's side
+            AS=$WEB orun /bin/sh -c 'f="$HOME/.local/state/$2-worker/$1"
+                case "$(cat "$f" 2>/dev/null)" in failed|changed) rm -f -- "$f"; echo "$2: $1 will be researched again" ;; esac' sh "$id" "$WEB" || true
+            # shellcheck disable=SC2016
+            AS=$GUARD orun /bin/sh -c 'f="$HOME/.local/state/$2-worker/$1"
+                case "$(cat "$f" 2>/dev/null)" in failed) rm -f -- "$f"; echo "$2: $1 will be gated again" ;;
+                    release-failed) printf "quarantined\n" > "$f.tmp" && mv -f "$f.tmp" "$f"; echo "$2: the operator'"'"'s release of $1 will be tried again" ;; esac' sh "$id" "$GUARD" || true ;;
+        login)
+            for u in research:$WEB gate:$GUARD chat:$WEB; do
+                ws=${u%%:*}
+                [ -z "${2:-}" ] || [ "$2" = "$ws" ] || continue
+                echo "==> ${u#*:}, workspace ~/$ws: in the box, /login, then /exit"
+                # shellcheck disable=SC2016  # expanded on that user's side
+                ( AS=${u#*:}; oexec /bin/bash -c 'mkdir -p "$HOME/$1" && cd "$HOME/$1" && exec "$HOME/.local/bin/airlock"' bash "$ws" ) \
+                    || echo "(${u#*:} ~/$ws: the box ended with an error)"
+            done ;;
+        stop)
+            n="$(web_target stop "${2:-}")" || exit 1
+            AS=$WEB octl stop "$WEB-session@$n.service" ;;
+        restart)
+            n="$(web_target restart "${2:-}")" || exit 1
+            AS=$WEB octl restart "$WEB-session@$n.service"
+            echo "a fresh $WEB session $n: $CMD web $n" ;;
+        new)
+            # another interactive session, by name (a typo'd `<command> web <name>` never starts one)
+            n="${2:-}"; name_ok "$n" || die "usage: $CMD web new <name> (letters, digits, - and _)"
+            AS=$WEB octl start "$WEB-session@$n.service"
+            AS=$WEB oexec /usr/bin/tmux -S "$(wsock "$n")" attach ;;
+        *)
+            # attach: the named session if it runs; with no name the one running, else main,
+            # started if needed
+            n="$sub"
+            if [ -z "$n" ]; then
+                n="$(web_running)"
+                [ "$(printf '%s' "$n" | grep -c .)" -le 1 ] || die "several $WEB sessions run ($(printf '%s' "$n" | tr '\n' ' ')): say which, $CMD web <name>"
+                n="${n:-main}"
+                AS=$WEB octl start "$WEB-session@$n.service"
+            else
+                name_ok "$n" || die "unknown command or bad session name '$n' ($CMD --help)"
+                web_running | grep -qx "$n" || die "no $WEB session $n is running (start one: $CMD web new $n)"
+            fi
+            AS=$WEB oexec /usr/bin/tmux -S "$(wsock "$n")" attach ;;
+    esac
+}
+
+cmd="${1:-ls}"; shift || true
+case "$cmd" in
+    ls|list)
+        octl list-units --all --full --no-legend --plain "$UNIT*.service" 2>/dev/null \
+            | awk -v pre="$UNIT" '{ u=$1; if (index(u, pre) == 1) u = substr(u, length(pre) + 1); sub(/\.service$/,"",u); printf "%-40s %s/%s\n", u, $3, $4 }' ;;
+    new)
+        [ $# -ge 1 ] || die "usage: $CMD new <project> [name]"
+        s="$(session "$@")"
+        octl enable --now "$UNIT$s.service"
+        echo "started $s: $CMD attach $s" ;;
+    attach)
+        [ $# -ge 1 ] || die "usage: $CMD attach <project>[.name]"
+        s="$(target "$1")" || exit 1
+        oexec /usr/bin/tmux -S "$(sock "$s")" attach ;;
+    stop)
+        [ $# -ge 1 ] || die "usage: $CMD stop <project>[.name]"
+        s="$(target "$1")" || exit 1
+        octl disable --now "$UNIT$s.service" ;;
+    restart)
+        [ $# -ge 1 ] || die "usage: $CMD restart <project>[.name]"
+        s="$(target "$1")" || exit 1
+        octl reset-failed "$UNIT$s.service" 2>/dev/null || true
+        octl restart "$UNIT$s.service" ;;
+    paste)
+        # Wayland (wl-clipboard), else X11 (xclip).
+        if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-paste >/dev/null; then
+            cb_get() { wl-paste --type image/png; }; cb_put() { wl-copy; }
+        elif [ -n "${DISPLAY:-}" ] && command -v xclip >/dev/null; then
+            cb_get() { xclip -selection clipboard -t image/png -o; }; cb_put() { xclip -selection clipboard; }
+        else die "no clipboard tool: wl-clipboard (Wayland) or xclip (X11)"; fi
+        [ -d "$INBOX/pastes" ] && [ -w "$INBOX/pastes" ] || die "$INBOX/pastes missing or not writable (airlock-agents-apply)"
+        f="$INBOX/pastes/$(date +%Y%m%d-%H%M%S%3N).png"
+        cb_get > "$f.tmp" && [ -s "$f.tmp" ] || { rm -f "$f.tmp"; die "no image on the clipboard"; }
+        chmod 0640 "$f.tmp" && mv "$f.tmp" "$f"
+        printf '%s' "$f" | cb_put
+        echo "$f (path on the clipboard)" ;;
+    update)
+        # Your installed version (what your own boxes run), not the checkout: bundled into the
+        # inbox, installed by the agent, then the web and guard users (when provisioned) from there,
+        # then removed. On any failure the bundle stays for a look (tmpfiles removes it within
+        # a day, or at the next boot).
+        bundle="$HOME/.local/share/claude-airlock/current/bin/bundle.sh"
+        [ -x "$bundle" ] || die "no installed claude-airlock with bundles ($bundle): make install-airlock in claude-airlock first"
+        [ -d "$INBOX/airlock" ] && [ -w "$INBOX/airlock" ] || die "$INBOX/airlock missing or not writable (airlock-agents-apply)"
+        "$bundle" "$INBOX/airlock"
+        failed=()
+        for AS in "$AGENT" $WEB $GUARD; do
+            if [ "$AS" != "$AGENT" ] && ! getent passwd "$AS" >/dev/null; then
+                echo "$AS: not provisioned, skipped"; continue
+            fi
+            echo "==> $AS"
+            if orun /bin/bash "$INBOX/airlock/install-bundle.sh"; then echo "$AS has it"
+            else failed+=("$AS"); fi
+        done
+        AS=$AGENT
+        [ ${#failed[@]} -eq 0 ] || die "the install failed for ${failed[*]} (above); the bundle stays in $INBOX/airlock for a look"
+        "$bundle" --clean "$INBOX/airlock"
+        echo "done; restart running sessions to use it ($CMD restart <session>)" ;;
+    shell)
+        oexec /bin/bash -l ;;
+    reload)
+        # Each user manager's units after an apply changes them; the web and guard users' workers'
+        # path and timer units started too (enabled by airlock-agents-apply).
+        rc=0
+        for AS in "$AGENT" $WEB $GUARD; do
+            if [ "$AS" != "$AGENT" ] && ! getent passwd "$AS" >/dev/null; then continue; fi
+            octl daemon-reload || rc=1
+            [ "$AS" = "$AGENT" ] || octl start "$AS-worker.path" "$AS-worker.timer" || rc=1
+        done
+        AS=$AGENT
+        exit "$rc" ;;
+    web)
+        [ -n "$WEB" ] || die "no web research here (agents.conf has no web and guard users)"
+        web "$@" ;;
+    -h|--help|help)
+        sed -n '2,/^set -euo/p' "$0" | sed "\$d; s/^# \\{0,1\\}//; s/<command>/$CMD/g" ;;
+    *) die "unknown command $cmd (see $CMD --help)" ;;
+esac

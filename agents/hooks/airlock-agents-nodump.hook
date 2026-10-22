@@ -1,0 +1,14 @@
+# pacman: refresh the agents' execute-only copies of sh, systemd-run, systemctl and install
+# (nodump-refresh) after the packages they come from change, so they never run a stale build.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = bash
+Target = systemd
+Target = coreutils
+
+[Action]
+Description = Refreshing the airlock agents' execute-only copies (sh, systemd-run, systemctl, install)...
+When = PostTransaction
+Exec = /usr/local/lib/airlock-agents/nodump-refresh

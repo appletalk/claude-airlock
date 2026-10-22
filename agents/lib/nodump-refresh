@@ -1,0 +1,21 @@
+#!/bin/bash
+# nodump-refresh: the execute-only copies (0711, root's) the operator command and the apply run
+# on the host's side as an agent user: sh (bash), systemd-run, systemctl and install, in
+# /usr/local/lib/airlock-agents/bin. The user can't read them, so the kernel makes their
+# processes non-dumpable: the user's sandboxed code can't reach the host's unsandboxed tree
+# through /proc/<pid>/root (R1, docs/agents.md). Run by airlock-agents-apply and by the package
+# manager hook (pacman or apt) after a systemd, bash or coreutils upgrade (a stale systemd-run
+# copy would lose its versioned libsystemd-shared). Each copy is written beside and renamed in.
+set -euo pipefail
+ND="${AGENTS_NODUMP_DIR:-/usr/local/lib/airlock-agents/bin}"
+SRC="${AGENTS_NODUMP_SRC:-/usr/bin}"   # test hooks
+[ "$(id -u)" = 0 ] || [ -n "${AGENTS_NODUMP_DIR:-}" ] || { echo "nodump-refresh: run as root" >&2; exit 1; }
+install -d -m 0755 "$ND"
+pairs="sh:bash systemd-run:systemd-run systemctl:systemctl install:install"
+# All written first, then all renamed in: a failure leaves the old set whole.
+for pair in $pairs; do
+    dst=${pair%%:*} src=$SRC/${pair#*:}
+    [ -f "$src" ] || { echo "nodump-refresh: no $src" >&2; rm -f "$ND"/.*.new; exit 1; }
+    install -m 0711 "$src" "$ND/.$dst.new"
+done
+for pair in $pairs; do mv -f "$ND/.${pair%%:*}.new" "$ND/${pair%%:*}"; done

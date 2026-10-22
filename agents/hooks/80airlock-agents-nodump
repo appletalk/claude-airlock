@@ -1,0 +1,3 @@
+// apt: refresh the airlock agents' execute-only copies of sh, systemd-run, systemctl and
+// install after every dpkg run (cheap: four copies), so they never run a stale build.
+DPkg::Post-Invoke { "if [ -x /usr/local/lib/airlock-agents/nodump-refresh ]; then /usr/local/lib/airlock-agents/nodump-refresh; fi"; };

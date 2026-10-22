@@ -20,7 +20,11 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bun
                  hooks/pre-commit scripts/bootstrap-tools.sh \
                  scripts/airlock-doctor.sh lib/host-dns.sh \
                  scripts/image-smoke.sh scripts/validator-checks.sh \
-                 scripts/run-tests.sh
+                 scripts/run-tests.sh \
+                 agents/install.sh agents/airlock-agents-apply agents/operator \
+                 agents/lib/session-run agents/lib/session-stop agents/lib/web-session-run \
+                 agents/lib/web-worker agents/lib/guard-worker agents/lib/worker-common.sh \
+                 agents/lib/nodump-refresh
 
 .DEFAULT_GOAL := help
 

@@ -42,6 +42,24 @@ sudo install/install-service.sh           # account, units, airlock-envoy-apply
   as the default in your host config (README § Egress through a host proxy).
 - Check: `airlock egress show` names the socket and its check; `sudo airlock-envoy-apply --status`.
 
-## 3. Agents (root) and 4. agent web research
+## 3. Agents (root)
 
-Not part of this version yet.
+[agents.md](agents.md) has the design and the details. Needs level 2 running.
+
+```
+sudo make install-agents     # asks for the names on the first run (default: claude)
+```
+
+- Give each agent user its airlock-envoy listeners (apply names the missing ones), then as
+  yourself: `<command> update`, `<command> reload`, `<command> shell` to log in once.
+- Check: `sudo airlock-agents-apply --check` says nothing to change; `<command> new <project>`
+  starts a session and `<command> attach <project>` reaches it.
+
+## 4. Agent web research
+
+The same install, answering yes to web research (or adding `web` and `guard` lines to
+`agents.conf` and running `sudo airlock-agents-apply --confirm`). Give the web user a listener with
+`web` and the guard Anthropic alone; then `<command> reload` and `<command> web login`.
+
+- Check: `<command> web ask "a question"` is answered (`<command> web ls`), and a question
+  carrying one of your internal names is held.

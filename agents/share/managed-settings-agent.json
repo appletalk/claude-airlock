@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "deny": [
+      "Artifact",
+      "ArtifactComments",
+      "ArtifactData",
+      "ArtifactCheck",
+      "RemoteTrigger"
+    ]
+  },
+  "crossSessionInbound": "refuse"
+}

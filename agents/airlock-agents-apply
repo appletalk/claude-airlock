@@ -1,0 +1,845 @@
+#!/bin/bash
+# airlock-agents-apply: agent users from a site file (docs/agents.md). Renders every system file
+# the agents need from /etc/claude-airlock/agents/agents.conf, installs them, and provisions
+# the users (home images, subordinate ids, linger, the inbox and the web queue). Idempotent;
+# shows what it would do unless --confirm.
+#
+#   airlock-agents-apply                dry run: what would change
+#   airlock-agents-apply --confirm      apply
+#   airlock-agents-apply --check        the dry run as a drift check: exit 1 if anything would change
+#   airlock-agents-apply --render DIR   write the rendered files under DIR (any user; nothing else)
+#   airlock-agents-apply --env          print the rendered agents.env (any user)
+#   airlock-agents-apply --user-conf U  print user U's default claude-airlock config (any user)
+#   [SITE]                              another site file (default /etc/claude-airlock/agents/agents.conf)
+#
+# The site file (agents.conf.example): who operates the agents, the agent users with their uids,
+# subordinate id ranges, home image sizes and resource ceilings, and for web research the web
+# and guard users, the inbox and queue paths and the names the question check holds back.
+# Names derive from the users: units <user>-session@, <web>-worker, the queue /srv/<web>, the
+# inbox /srv/<agent>-inbox, unless the site file says otherwise.
+# shellcheck disable=SC2016  # sh -c '...' _ args: expanded by the inner shell, on purpose
+set -euo pipefail
+umask 022
+export LC_ALL=C
+
+ETC=/etc/claude-airlock/agents
+SHARE=/usr/local/share/airlock-agents
+LIBDIR=/usr/local/lib/airlock-agents
+ND=$LIBDIR/bin
+SUB_COUNT=65536
+ROOT="${AIRLOCK_AGENTS_ROOT:-}"   # test hook: file paths go under it (commands are stubbed); never set in use
+die() { echo "airlock-agents-apply: $*" >&2; exit 1; }
+usage() { sed -n '2,/^# shellcheck/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+
+mode=dry site="" out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --confirm) mode=confirm ;;
+        --check) mode=check ;;
+        --render) [ $# -ge 2 ] || die "--render needs a directory"; mode=render out=$2; shift ;;
+        --env) mode="env" ;;
+        --user-conf) [ $# -ge 2 ] || die "--user-conf needs a user"; mode=userconf out=$2; shift ;;
+        -h|--help) usage; exit 0 ;;
+        -*) die "unknown option $1 (see --help)" ;;
+        *) [ -z "$site" ] || die "one site file"; site=$1 ;;
+    esac
+    shift
+done
+site="${site:-$ROOT$ETC/agents.conf}"
+[ -f "$site" ] && [ -r "$site" ] || die "no site file $site (agents/install.sh writes one on its first run; see agents.conf.example)"
+
+# ---- parse ------------------------------------------------------------------------------------
+
+OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40
+ROLES=(agent web guard)
+declare -A NAME=() UID_OF=() SUB=() SIZE=() MEMHIGH=() MEMMAX=() TASKS=() CPU=()
+INTERNAL_NAMES=() INTERNAL_HOSTS=()
+name_re='^[a-z_][a-z0-9_-]{0,31}$'
+size_ok() { [[ "$1" =~ ^[1-9][0-9]{0,5}[GT]$ ]]; }
+mem_ok() { [[ "$1" =~ ^[1-9][0-9]{0,6}[KMGT]?$ ]]; }
+path_ok() { [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$1" != */ && "$1" != *//* && "/$1/" != */../* && "/$1/" != */./* ]]; }
+domain_ok() { [ "${#1}" -le 253 ] && [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; }
+
+n=0
+while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1)); line=${line%%#*}
+    read -ra w <<< "$line"
+    [ "${#w[@]}" -gt 0 ] || continue
+    where="$site:$n"
+    case "${w[0]}" in
+        operator|command|inbox|queue|daily-cap)
+            [ "${#w[@]}" = 2 ] || die "$where: want: ${w[0]} <value>"
+            v=${w[1]}
+            case "${w[0]}" in
+                operator) [[ "$v" =~ $name_re ]] || die "$where: bad user name '$v'"; OPERATOR=$v ;;
+                command) [[ "$v" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "$where: bad command name '$v'"
+                    case "$v" in claude|airlock|claude-airlock|airlock-agents-apply) die "$where: '$v' is taken (another tool); pick another" ;; esac
+                    COMMAND=$v ;;
+                inbox|queue) path_ok "$v" || die "$where: bad path '$v' (absolute, no . or .. parts)"
+                    case "$v" in /|/etc|/etc/*|/usr|/usr/*|/home|/home/*|/root|/root/*|/tmp|/tmp/*|/var/tmp|/var/tmp/*|/run|/run/*|/proc*|/sys*|/dev*|/boot*) die "$where: $v is a system or home path; use one of its own, such as /srv/<name>" ;; esac
+                    if [ "${w[0]}" = inbox ]; then INBOX=$v; else QUEUE=$v; fi ;;
+                daily-cap) [[ "$v" =~ ^[1-9][0-9]{0,4}$ ]] || die "$where: bad daily-cap '$v'"; DAILY_CAP=$v ;;
+            esac ;;
+        agent|web|guard)
+            r=${w[0]}
+            [ -z "${NAME[$r]:-}" ] || die "$where: a second $r line"
+            [ "${#w[@]}" -ge 2 ] || die "$where: want: $r <user> uid <n> subuid <n> home <size> [memory-high X] [memory-max X] [tasks N] [cpu N%]"
+            [[ "${w[1]}" =~ $name_re ]] || die "$where: bad user name '${w[1]}'"
+            NAME[$r]=${w[1]}
+            i=2
+            while [ "$i" -lt "${#w[@]}" ]; do
+                k=${w[$i]} v=${w[$((i + 1))]:-}
+                [ -n "$v" ] || die "$where: $k needs a value"
+                case "$k" in
+                    uid) [[ "$v" =~ ^[1-9][0-9]{3,4}$ ]] && [ "$v" -le 60000 ] || die "$where: bad uid '$v' (1000 to 60000)"; UID_OF[$r]=$v ;;
+                    subuid) [[ "$v" =~ ^[1-9][0-9]{5,9}$ ]] && [ "$v" -le 4000000000 ] || die "$where: bad subuid start '$v' (100000 and up)"; SUB[$r]=$v ;;
+                    home) size_ok "$v" || die "$where: bad home size '$v' (like 30G)"; SIZE[$r]=$v ;;
+                    memory-high) mem_ok "$v" || die "$where: bad memory-high '$v'"; MEMHIGH[$r]=$v ;;
+                    memory-max) mem_ok "$v" || die "$where: bad memory-max '$v'"; MEMMAX[$r]=$v ;;
+                    tasks) [[ "$v" =~ ^[1-9][0-9]{1,6}$ ]] || die "$where: bad tasks '$v'"; TASKS[$r]=$v ;;
+                    cpu) [[ "$v" =~ ^[1-9][0-9]{1,5}%$ ]] || die "$where: bad cpu '$v' (like 400%)"; CPU[$r]=$v ;;
+                    *) die "$where: unknown option '$k' (uid, subuid, home, memory-high, memory-max, tasks, cpu)" ;;
+                esac
+                i=$((i + 2))
+            done
+            for k in uid subuid home; do
+                case $k in uid) v=${UID_OF[$r]:-} ;; subuid) v=${SUB[$r]:-} ;; home) v=${SIZE[$r]:-} ;; esac
+                [ -n "$v" ] || die "$where: $r ${NAME[$r]} needs $k"
+            done ;;
+        internal-name)
+            [ "${#w[@]}" -gt 1 ] || die "$where: internal-name lists nothing"
+            for v in "${w[@]:1}"; do domain_ok "$v" || die "$where: bad internal name '$v'"; INTERNAL_NAMES+=("$v"); done ;;
+        internal-host)
+            [ "${#w[@]}" -gt 1 ] || die "$where: internal-host lists nothing"
+            for v in "${w[@]:1}"; do [[ "$v" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "$where: bad internal host '$v'"; INTERNAL_HOSTS+=("$v"); done ;;
+        *) die "$where: unknown line '${w[0]}' (operator, command, agent, web, guard, inbox, queue, internal-name, internal-host, daily-cap)" ;;
+    esac
+done < "$site"
+
+[ -n "$OPERATOR" ] || die "$site: no operator line (the user who runs the agents)"
+[ -n "${NAME[agent]:-}" ] || die "$site: no agent line"
+if [ -n "${NAME[web]:-}" ] || [ -n "${NAME[guard]:-}" ]; then
+    [ -n "${NAME[web]:-}" ] && [ -n "${NAME[guard]:-}" ] || die "$site: web research needs both a web and a guard line"
+    WEB_ON=1
+else WEB_ON=0; ROLES=(agent); fi
+AGENT=${NAME[agent]} WEB=${NAME[web]:-} GUARD=${NAME[guard]:-}
+COMMAND=${COMMAND:-$AGENT}
+[ "$COMMAND" != claude ] || COMMAND=claude-agent
+INBOX=${INBOX:-/srv/$AGENT-inbox}
+[ "$WEB_ON" = 0 ] || QUEUE=${QUEUE:-/srv/$WEB}
+[ "$WEB_ON" = 1 ] || [ -z "$QUEUE" ] || die "$site: a queue without web research (no web and guard lines)"
+# Distinct users, uids and ranges; nobody is the operator; ranges apart.
+for a in "${ROLES[@]}"; do
+    [ "${NAME[$a]}" != "$OPERATOR" ] || die "$site: the operator can't be an agent user"
+    for b in "${ROLES[@]}"; do
+        [ "$a" \< "$b" ] || continue
+        [ "${NAME[$a]}" != "${NAME[$b]}" ] || die "$site: $a and $b are both ${NAME[$a]}"
+        [ "${UID_OF[$a]}" != "${UID_OF[$b]}" ] || die "$site: $a and $b share uid ${UID_OF[$a]}"
+        if [ "${SUB[$a]}" -lt $(( SUB[$b] + SUB_COUNT )) ] && [ "${SUB[$b]}" -lt $(( SUB[$a] + SUB_COUNT )) ]; then
+            die "$site: the subuid ranges of $a and $b overlap ($SUB_COUNT each)"
+        fi
+    done
+done
+[ "$INBOX" != "${QUEUE:-}" ] || die "$site: inbox and queue are the same path"
+
+# Defaults for the ceilings (sized for one agent at a time on a 20-core, 32 GB workstation).
+declare -A D_MH=([agent]=14G [web]=5G [guard]=2560M) D_MM=([agent]=16G [web]=6G [guard]=3G) \
+    D_T=([agent]=8192 [web]=4096 [guard]=2048) D_C=([agent]=1200% [web]=400% [guard]=200%)
+for r in "${ROLES[@]}"; do
+    MEMHIGH[$r]=${MEMHIGH[$r]:-${D_MH[$r]}} MEMMAX[$r]=${MEMMAX[$r]:-${D_MM[$r]}}
+    TASKS[$r]=${TASKS[$r]:-${D_T[$r]}} CPU[$r]=${CPU[$r]:-${D_C[$r]}}
+done
+
+# ---- render ----------------------------------------------------------------------------------
+
+# A path as systemd names its mount unit (only the characters the parser lets through).
+mount_unit() { local p=${1#/}; p=${p//-/\\x2d}; printf '%s.mount' "${p//\//-}"; }
+role_of() { local r; for r in "${ROLES[@]}"; do if [ "${NAME[$r]}" = "$1" ]; then echo "$r"; fi; done; }
+others_of() { local r; for r in "${ROLES[@]}"; do if [ "$r" != "$1" ]; then echo "${UID_OF[$r]}"; fi; done; }
+
+render_env() {
+    cat <<EOF
+# Rendered by airlock-agents-apply from $ETC/agents.conf. Edit that file, not this.
+AGENTS_OPERATOR=$OPERATOR
+AGENTS_COMMAND=$COMMAND
+AGENTS_AGENT=$AGENT
+AGENTS_AGENT_UID=${UID_OF[agent]}
+AGENTS_INBOX=$INBOX
+AGENTS_WEB=$WEB
+AGENTS_WEB_UID=${UID_OF[web]:-}
+AGENTS_GUARD=$GUARD
+AGENTS_GUARD_UID=${UID_OF[guard]:-}
+AGENTS_QUEUE=${QUEUE:-}
+AGENTS_DAILY_CAP=$DAILY_CAP
+AGENTS_LIB=$LIBDIR
+AGENTS_SHARE=$SHARE
+AGENTS_ETC=$ETC
+EOF
+}
+
+render_manager() {  # the user manager's sandbox for role $1
+    local r=$1 u=${NAME[$1]} id=${UID_OF[$1]} o after=""
+    for o in "${ROLES[@]}"; do [ "$o" = "$r" ] || after="$after user@${UID_OF[$o]}.service"; done
+    cat <<EOF
+# Rendered by airlock-agents-apply: $u (uid $id, the $r user). Its user manager, so every box
+# and session it starts, gets its own network namespace (loopback only: boxes reach out
+# through their Envoy Unix sockets, and abstract sockets in the host's namespace are out of
+# reach) and its own /tmp, /var/tmp, /dev/shm and /dev/mqueue.
+[Unit]
+RequiresMountsFor=/home/$u
+EOF
+    [ "$r" != agent ] || [ -z "${after# }" ] || {
+        echo "# The other agents' slices exist before it starts, so InaccessiblePaths below finds them."
+        echo "After=${after# }"
+    }
+    cat <<EOF
+
+[Service]
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateIPC=yes
+TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev /dev/mqueue:mode=1777,nosuid,nodev
+# Other users' processes invisible in /proc (their command lines carry repo paths and
+# arguments, free text an agent could leave for another). Needs crun as the box runtime
+# (containers.conf): runc's rootless detection reads the bus owner through /proc and, hidden
+# from it, takes itself for root and fails every box.
+ProtectProc=invisible
+Environment=CONTAINERS_CONF_OVERRIDE=$SHARE/containers.conf
+# Its view of the host is its own: no other user's home or runtime dir, no system bus (pid 1
+# would list other units' processes and command lines), no cgroup names the other agents chose.
+ProtectHome=tmpfs
+BindPaths=/home/$u /run/user/$id
+EOF
+    if [ "$r" != agent ]; then
+        local rw
+        if [ "$r" = web ]; then rw="-$QUEUE/held -$QUEUE/reports -$QUEUE/log/$u"
+        else rw="-$QUEUE/answers -$QUEUE/quarantine -$QUEUE/log/$u"; fi
+        cat <<EOF
+# It writes nowhere but its home, runtime dir and its queue dirs (no world-writable spot
+# elsewhere, such as /var/spool/mail, to leave text for the agent).
+ProtectSystem=strict
+ReadWritePaths=/home/$u /run/user/$id $rw
+EOF
+    fi
+    echo "InaccessiblePaths=-/run/dbus/system_bus_socket"
+    local ia=""
+    for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
+    [ -z "$ia" ] || echo "InaccessiblePaths=${ia# }"
+    cat <<EOF
+# Its claude-airlock config is root's: changed only by the operator.
+Environment=AIRLOCK_CONFIG=$ETC/$u.conf
+EOF
+}
+
+render_slice() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: ${NAME[$1]}'s ceiling, so a runaway can't take the host down.
+[Slice]
+MemoryHigh=${MEMHIGH[$1]}
+MemoryMax=${MEMMAX[$1]}
+TasksMax=${TASKS[$1]}
+CPUQuota=${CPU[$1]}
+EOF
+}
+
+render_mount() {
+    local u=${NAME[$1]}
+    cat <<EOF
+# Rendered by airlock-agents-apply: $u's home, a fixed-size XFS image, so a runaway can't fill
+# /home (a hard cap by construction). The image is made by the provisioning step.
+[Unit]
+Description=$u's home (fixed-size image)
+ConditionPathExists=/var/lib/$u/home.img
+Before=user@${UID_OF[$1]}.service
+
+[Mount]
+What=/var/lib/$u/home.img
+Where=/home/$u
+Type=xfs
+Options=loop,nodev,nosuid
+
+[Install]
+WantedBy=local-fs.target
+EOF
+}
+
+render_polkit() {
+    local list="" r
+    for r in "${ROLES[@]}"; do list="$list${list:+, }\"${NAME[$r]}\""; done
+    cat <<EOF
+// Rendered by airlock-agents-apply: $OPERATOR may open a shell as the agent users, and only as
+// them (the operator command runs every agent-side process through it). machined passes the
+// target user for host shells only.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.machine1.host-shell" &&
+        subject.user == "$OPERATOR" && subject.local && subject.active &&
+        [$list].indexOf(action.lookup("user")) >= 0) {
+        return polkit.Result.YES;
+    }
+});
+EOF
+}
+
+render_inbox_tmpfiles() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: $INBOX, what $OPERATOR hands $AGENT, transiently. The inbox
+# is root's, so the operator can't swap what's in it for a link elsewhere; each drop dir is the
+# operator's, setgid $AGENT (the agent reads, never writes). Emptied at every boot, and anything
+# older than a day goes at the next daily clean. Ids by number, so these lines hold before the
+# users exist.
+d $INBOX          0755 root  root -
+D $INBOX/pastes   2750 $OPERATOR ${UID_OF[agent]} 1d
+D $INBOX/airlock  2750 $OPERATOR ${UID_OF[agent]} 1d
+EOF
+    [ "$WEB_ON" = 0 ] || echo "a $INBOX/airlock  -    -     -    -   u:${UID_OF[web]}:r-x,u:${UID_OF[guard]}:r-x,d:u:${UID_OF[web]}:r--,d:u:${UID_OF[guard]}:r--"
+}
+
+# The web queue: path mode group ACL (getfacl -n form, the operator by name). Owner always root,
+# so no writer can chmod a dir, change its ACL or swap it. The tmpfiles file and the
+# provisioning check are both made from this table.
+queue_dirs() {
+    local qa=${UID_OF[agent]} qw=${UID_OF[web]} qg=${UID_OF[guard]} qo=$OPERATOR
+    cat <<EOF
+$QUEUE 0755 root -
+$QUEUE/lib 0755 root -
+$QUEUE/requests 3770 $qa user:$qw:r-x user:$qg:r-x user:$qo:rwx default:group::r-- default:user:$qw:r-- default:user:$qg:r-- default:user:$qo:r--
+$QUEUE/held 2770 $qw user:$qo:r-x default:user:$qo:r--
+$QUEUE/decisions 2770 $qo user:$qw:r-x user:$qg:r-x default:user:$qw:r-- default:user:$qg:r--
+$QUEUE/reports 2770 $qw user:$qg:r-x default:user:$qg:r-x
+$QUEUE/answers 2770 $qg user:$qa:r-x user:$qo:r-x default:user:$qa:r-- default:user:$qo:r--
+$QUEUE/quarantine 2770 $qg user:$qo:r-x default:user:$qo:r-x
+$QUEUE/log 0750 root user:$qw:r-x user:$qg:r-x user:$qo:r-x
+$QUEUE/log/$WEB 3770 $qw user:$qo:r-x default:user:$qo:r--
+$QUEUE/log/$WEB/transcripts 2770 $qw user:$qo:r-x default:user:$qo:r--
+$QUEUE/log/$GUARD 3770 $qg user:$qo:r-x default:user:$qo:r--
+$QUEUE/log/$GUARD/transcripts 2770 $qg user:$qo:r-x default:user:$qo:r--
+EOF
+}
+render_queue_tmpfiles() {
+    local p m g acl e age
+    cat <<EOF
+# Rendered by airlock-agents-apply: $QUEUE, $WEB's queue. Every dir is root's, so no writer can
+# chmod it, change its ACL or swap it; access is by group (setgid, so files keep it) and ACL,
+# and the default ACLs carry each reader down to new files. Records are kept 90 days.
+# requests/ has two writers ($AGENT, $OPERATOR): d:g::r-- so neither can rewrite the other's
+# request through the shared group. The log dirs are sticky: their writer could otherwise rename
+# the root-owned transcripts/ inside and put a link in its place. Each a line names its mask
+# (m::): left out, tmpfiles computes it from the named entries alone and masks away the owning
+# group's write. Writers chmod 0640 before the rename (0750 for a dir).
+EOF
+    while read -r p m g acl; do
+        [ "$m" = 0755 ] || [ "$m" = 0750 ] && age=- || age=90d
+        printf 'd %-40s %s root %s %s\n' "$p" "$m" "$g" "$age"
+        acl=${acl#-}; acl=${acl# }
+        [ -n "$acl" ] || continue
+        local out="" mask="m::rwx"
+        [ "$m" = 0750 ] && mask="m::r-x"
+        for e in $acl; do
+            e=${e/#default:/d:}; e=${e/#user:/u:}; e=${e/#group:/g:}; e=${e/d:user:/d:u:}; e=${e/d:group:/d:g:}
+            out="$out,$e"
+        done
+        printf 'a %-40s -    -    -     -   %s%s\n' "$p" "$mask" "$out"
+    done < <(queue_dirs)
+}
+
+render_nft() {
+    cat <<EOF
+#!/usr/sbin/nft -f
+# Rendered by airlock-agents-apply: the agent users and their boxes (rootless podman runs the
+# boxes' processes as the users' subordinate ids) get no network in the host's namespace,
+# loopback included. Their sessions run in their own network namespace (the user manager's
+# PrivateNetwork, where this doesn't apply) and reach out only through their Envoy Unix
+# sockets; this catches anything that starts outside it. A table of its own, beside whatever
+# firewall the host runs (a drop in any table is final). By number: a name that doesn't
+# resolve fails the ruleset at boot.
+table inet airlock-agents
+delete table inet airlock-agents
+table inet airlock-agents {
+  chain output {
+    type filter hook output priority filter; policy accept;
+EOF
+    local r u id s
+    for r in "${ROLES[@]}"; do
+        u=${NAME[$r]} id=${UID_OF[$r]} s=${SUB[$r]}
+        printf '    meta skuid { %s, %s-%s } limit rate 10/minute burst 20 packets log prefix "airlock-agents-%s-drop: " level info comment "log %s egress attempts"\n' "$id" "$s" "$((s + SUB_COUNT - 1))" "$u" "$u"
+        printf '    meta skuid { %s, %s-%s } counter drop comment "%s: no network in the host namespace"\n' "$id" "$s" "$((s + SUB_COUNT - 1))" "$u"
+    done
+    echo "  }"
+    echo "}"
+}
+render_nft_unit() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: loads the agents' nftables table (airlock-agents.nft), and
+# again whenever nftables.service (re)loads, since a host ruleset may begin with flush ruleset.
+[Unit]
+Description=airlock agents: no network for the agent users in the host namespace
+After=nftables.service
+PartOf=nftables.service
+Before=user@${UID_OF[agent]}.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/airlock-agents.nft
+ExecStop=/usr/sbin/nft delete table inet airlock-agents
+
+[Install]
+WantedBy=multi-user.target nftables.service
+EOF
+}
+
+render_profile() {
+    local r cases=""
+    for r in "${ROLES[@]}"; do cases="$cases${cases:+|}${UID_OF[$r]}"; done
+    cat <<EOF
+# Rendered by airlock-agents-apply: the agent users' login shells (the operator command's
+# shell). Here, not on the user manager: it sets its own PATH for what it starts.
+# - airlock: the operator command's update installs it in ~/.local/bin.
+# - prompt: the user in orange, so it never passes for the operator's or a box's.
+if [ -n "\${BASH_VERSION-}" ]; then
+    case "\$(id -u)" in
+        $cases)
+            case ":\$PATH:" in *:"\$HOME/.local/bin":*) ;; *) PATH="\$HOME/.local/bin:\$PATH" ;; esac
+            export PATH
+            PS1='\[\e[1;38;5;208m\]\u\[\e[0m\]@\h \[\e[1m\]\w\[\e[0m\] \\\$ ' ;;
+    esac
+fi
+EOF
+}
+
+render_session_unit() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: one Claude session of $AGENT's: $AGENT-session@<project>.<name>,
+# its own tmux server holding the boxed Claude for ~/development/<project>. Started and enabled
+# by \`$COMMAND new\`. Claude's own restarts are capped in session-run; Restart= covers the tmux
+# server dying. Not a security boundary: the agent can override its own user units; what bounds
+# it is the user and its user manager (PrivateNetwork, slice, nftables).
+[Unit]
+Description=$AGENT session %i
+ConditionUser=$AGENT
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/tmux -f $SHARE/tmux.conf -S %t/$AGENT-%i.sock new-session -d -s main $LIBDIR/session-run %i
+# Stops the tmux server and waits (60 s at most) for the panes' processes, in their own scopes,
+# to exit; it kills nothing: the next run waits for whatever is left.
+ExecStop=$LIBDIR/session-stop %t/$AGENT-%i.sock %t/$AGENT-%i.cg
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Install]
+WantedBy=default.target
+EOF
+}
+render_web_session_unit() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: the interactive $WEB session $WEB-session@<name>: a tmux
+# server holding a fresh boxed Claude with Remote Control, in $WEB's user manager only. Started
+# by \`$COMMAND web [name]\`, never enabled: it doesn't come back at boot. Ends when Claude exits,
+# after an hour idle (the runner), at \`$COMMAND web stop\`, or at this 12 h backstop.
+[Unit]
+Description=$WEB interactive session %i
+ConditionUser=$WEB
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/tmux -f $SHARE/tmux.conf -S %t/$WEB-%i.sock new-session -d -s main $LIBDIR/web-session-run %i
+ExecStop=$LIBDIR/session-stop %t/$WEB-%i.sock
+TimeoutStopSec=90
+RuntimeMaxSec=12h
+EOF
+}
+render_worker() {  # render_worker <user> <what> <script> <watched dirs> <timeout> path|service|timer
+    local u=$1 what=$2
+    case "$6" in
+        path) cat <<EOF
+# Rendered by airlock-agents-apply: starts $u-worker.service when the queue dirs it reads change.
+[Unit]
+Description=$u: $what (queue watch)
+ConditionUser=$u
+
+[Path]
+$(for d in $4; do echo "PathChanged=$QUEUE/$d"; done)
+Unit=$u-worker.service
+
+[Install]
+WantedBy=default.target
+EOF
+        ;;
+        service) cat <<EOF
+# Rendered by airlock-agents-apply: $u: $what. Runs in $u's user manager only; started by
+# $u-worker.path and .timer.
+[Unit]
+Description=$u: $what
+ConditionUser=$u
+
+[Service]
+Type=oneshot
+ExecStart=$LIBDIR/$3
+TimeoutStartSec=$5
+Nice=10
+EOF
+        ;;
+        timer) cat <<EOF
+# Rendered by airlock-agents-apply: the backstop for $u-worker.path: a missed change, a retry, a
+# decision made while it ran.
+[Unit]
+Description=$u: $what (periodic)
+ConditionUser=$u
+
+[Timer]
+OnStartupSec=2min
+OnUnitInactiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+        ;;
+    esac
+}
+
+render_site_json() {
+    python3 -I -c 'import json, sys
+a = sys.argv
+print(json.dumps({"operator": a[1], "agent": a[2], "web": a[3], "guard": a[4],
+                  "internal_names": a[5].split(), "internal_hosts": a[6].split()}, indent=1))' \
+        "$OPERATOR" "$AGENT" "$WEB" "$GUARD" "${INTERNAL_NAMES[*]}" "${INTERNAL_HOSTS[*]}"
+}
+# A prompt with the site's names: {agent}, {web}, {guard}, {operator}.
+render_prompt() { sed -e "s/{agent}/$AGENT/g" -e "s/{operator}/$OPERATOR/g" -e "s/{web}/$WEB/g" -e "s/{guard}/$GUARD/g" "$SHARE_SRC/box/$1"; }
+
+# Where the static files come from: the installed copy, or this checkout's (tests, --render).
+SHARE_SRC="$(dirname "$(readlink -f "$0")")"
+[ -d "$SHARE_SRC/box" ] || SHARE_SRC=$SHARE   # installed: box/ and templates/ there
+
+# Every rendered file: "<dest path> <mode>", content from render_file.
+file_list() {
+    local r u
+    echo "$ETC/agents.env 0644"
+    echo "/etc/polkit-1/rules.d/50-airlock-agents.rules 0644"
+    echo "/etc/tmpfiles.d/airlock-agents-inbox.conf 0644"
+    echo "/etc/airlock-agents.nft 0644"
+    echo "/etc/systemd/system/airlock-agents-nft.service 0644"
+    echo "/etc/profile.d/airlock-agents.sh 0644"
+    echo "/etc/systemd/user/$AGENT-session@.service 0644"
+    for r in "${ROLES[@]}"; do
+        u=${NAME[$r]}
+        echo "/etc/systemd/system/user@${UID_OF[$r]}.service.d/10-airlock-agents.conf 0644"
+        echo "/etc/systemd/system/user-${UID_OF[$r]}.slice.d/10-airlock-agents.conf 0644"
+        echo "/etc/systemd/system/$(mount_unit "/home/$u") 0644"
+    done
+    if [ "$WEB_ON" = 1 ]; then
+        echo "/etc/tmpfiles.d/airlock-agents-queue.conf 0644"
+        echo "/etc/systemd/user/$WEB-session@.service 0644"
+        for k in path service timer; do echo "/etc/systemd/user/$WEB-worker.$k 0644"; echo "/etc/systemd/user/$GUARD-worker.$k 0644"; done
+        echo "$QUEUE/lib/site.json 0644"
+        for f in research-prompt.md reader-prompt.md chat-prompt.md; do echo "$QUEUE/lib/$f 0644"; done
+        for f in web.py agent_web.py verdict.schema.json; do echo "$QUEUE/lib/$f 0644"; done
+    fi
+    echo "/usr/local/bin/$COMMAND 0755"
+}
+render_file() {  # render_file <dest path>
+    local p=$1 r
+    case "$p" in
+        "$ETC/agents.env") render_env ;;
+        */50-airlock-agents.rules) render_polkit ;;
+        */airlock-agents-inbox.conf) render_inbox_tmpfiles ;;
+        */airlock-agents-queue.conf) render_queue_tmpfiles ;;
+        /etc/airlock-agents.nft) render_nft ;;
+        */airlock-agents-nft.service) render_nft_unit ;;
+        /etc/profile.d/airlock-agents.sh) render_profile ;;
+        "/etc/systemd/user/$AGENT-session@.service") render_session_unit ;;
+        "/etc/systemd/user/$WEB-session@.service") render_web_session_unit ;;
+        "/etc/systemd/user/$WEB-worker."*) render_worker "$WEB" "research the queued questions" web-worker "requests decisions" 6h "${p##*.}" ;;
+        "/etc/systemd/user/$GUARD-worker."*) render_worker "$GUARD" "gate $WEB's reports" guard-worker "reports decisions" 2h "${p##*.}" ;;
+        /etc/systemd/system/user@*.service.d/*) r=$(role_by_uid "${p#/etc/systemd/system/user@}"); render_manager "$r" ;;
+        /etc/systemd/system/user-*.slice.d/*) r=$(role_by_uid "${p#/etc/systemd/system/user-}"); render_slice "$r" ;;
+        /etc/systemd/system/*.mount) for r in "${ROLES[@]}"; do if [ "$p" = "/etc/systemd/system/$(mount_unit "/home/${NAME[$r]}")" ]; then render_mount "$r"; fi; done ;;
+        "$QUEUE/lib/site.json") render_site_json ;;
+        "$QUEUE/lib/"*-prompt.md) render_prompt "${p##*/}" ;;
+        "$QUEUE/lib/"*) cat "$SHARE_SRC/box/${p##*/}" ;;
+        "/usr/local/bin/$COMMAND") printf '#!/bin/sh\n# Rendered by airlock-agents-apply: the operator command, as %s.\nexec %s/operator "$@"\n' "$COMMAND" "$LIBDIR" ;;
+        *) die "internal: no renderer for $p" ;;
+    esac
+}
+role_by_uid() { local id=${1%%[.]*} r; for r in "${ROLES[@]}"; do if [ "${UID_OF[$r]}" = "$id" ]; then echo "$r"; fi; done; }
+
+if [ "$mode" = env ]; then render_env; exit 0; fi
+if [ "$mode" = userconf ]; then
+    r="$(role_of "$out")"; [ -n "$r" ] || die "$out is not an agent user of this site"
+    tpl=("$SHARE_SRC/templates/$r.conf"); [ "$r" != agent ] || [ "$WEB_ON" = 0 ] || tpl+=("$SHARE_SRC/templates/agent-web-mounts.conf")
+    sed -e "s#{agent}#$AGENT#g" -e "s#{web}#$WEB#g" -e "s#{guard}#$GUARD#g" -e "s#{inbox}#$INBOX#g" \
+        -e "s#{queue}#${QUEUE:-}#g" -e "s#{command}#$COMMAND#g" "${tpl[@]}"
+    exit 0
+fi
+if [ "$mode" = render ]; then
+    [ -n "$out" ] || die "--render needs a directory"
+    while read -r p m; do
+        mkdir -p "$out$(dirname "$p")"
+        render_file "$p" > "$out$p"; chmod "$m" "$out$p"
+    done < <(file_list)
+    echo "rendered into $out"
+    exit 0
+fi
+
+# ---- apply (dry run, check, confirm) ----------------------------------------------------------
+
+[ "$(id -u)" = 0 ] || [ -n "$ROOT" ] || die "run as root"
+confirm=0 check=0
+[ "$mode" = confirm ] && confirm=1
+[ "$mode" = check ] && check=1
+changes=0
+step() {  # step <description> <command...>: run it (or say it would)
+    local what=$1; shift
+    changes=$((changes + 1))
+    if [ "$confirm" = 1 ]; then echo "==> $what"; "$@"; else echo "would: $what"; fi
+}
+ok() { echo "ok   $*"; }
+
+OP_UID="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
+OP_GID="$(getent group "$OPERATOR" | cut -d: -f3)" || true
+[[ "$OP_UID" =~ ^[0-9]+$ && "$OP_GID" =~ ^[0-9]+$ ]] || die "no user or group $OPERATOR (the operator)"
+
+# Agents need airlock-envoy: their boxes have no network but its sockets.
+if [ -z "$ROOT" ] && ! systemctl is-active --quiet airlock-envoy 2>/dev/null; then
+    die "airlock-envoy is not running: install it first (docs/setup.md, level 2); the agents' boxes have no other way out"
+fi
+
+# The refusals come before anything changes: every uid/gid free or already its user's, every
+# existing user exactly its numbers and in no other group, every subid range exactly its own or
+# free, and room for the images.
+for r in "${ROLES[@]}"; do
+    u=${NAME[$r]} n=${UID_OF[$r]} sub=${SUB[$r]}
+    if getent passwd "$n" >/dev/null && [ "$(getent passwd "$n" | cut -d: -f1)" != "$u" ]; then die "uid $n belongs to $(getent passwd "$n" | cut -d: -f1); refusing"; fi
+    if getent group "$n" >/dev/null && [ "$(getent group "$n" | cut -d: -f1)" != "$u" ]; then die "gid $n belongs to $(getent group "$n" | cut -d: -f1); refusing"; fi
+    if getent passwd "$u" >/dev/null && [ "$(getent passwd "$u" | cut -d: -f3,4)" != "$n:$n" ]; then die "user $u exists as uid:gid $(getent passwd "$u" | cut -d: -f3,4), not $n:$n; refusing"; fi
+    if getent group "$u" >/dev/null && [ "$(getent group "$u" | cut -d: -f3)" != "$n" ]; then die "group $u exists as gid $(getent group "$u" | cut -d: -f3), not $n; refusing"; fi
+    if getent passwd "$u" >/dev/null; then
+        extra="$(id -nG "$u" 2>/dev/null | tr ' ' '\n' | grep -vx "$u" || true)"
+        [ -z "$extra" ] || die "$u is in other groups ($extra); remove them"
+    fi
+    for f in subuid subgid; do
+        have="$(grep -E "^($u|$n):" "$ROOT/etc/$f" 2>/dev/null || true)"
+        if [ -n "$have" ] && [ "$have" != "$u:$sub:$SUB_COUNT" ]; then die "/etc/$f has '$(echo "$have" | tr '\n' ' ')', not exactly $u:$sub:$SUB_COUNT (the site file's range); fix one of them"; fi
+        if [ -z "$have" ] && awk -F: -v s="$sub" -v e="$((sub + SUB_COUNT))" '$2 < e && $2 + $3 > s { bad = 1 } END { exit !bad }' "$ROOT/etc/$f" 2>/dev/null; then
+            die "/etc/$f already uses part of $sub+$SUB_COUNT; pick another subuid start for $u"
+        fi
+    done
+    [ -f "$ROOT$ETC/$u.conf" ] || die "no $ETC/$u.conf ($u's claude-airlock config; agents/install.sh writes a default)"
+done
+
+want_k=0 sizes=""
+for r in "${ROLES[@]}"; do
+    u=${NAME[$r]}
+    [ -f "$ROOT/var/lib/$u/home.img" ] && continue
+    k=$(( ${SIZE[$r]%[GT]} * 1024 * 1024 )); [ "${SIZE[$r]: -1}" = T ] && k=$(( k * 1024 ))
+    want_k=$(( want_k + k )) sizes="$sizes${sizes:+ + }${SIZE[$r]} ($u)"
+done
+if [ "$want_k" -gt 0 ]; then
+    d="$ROOT/var/lib"; while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
+    free_k="$(df -Pk "$d" 2>/dev/null | awk 'NR == 2 { print $4 }')" || true
+    if ! [[ "$free_k" =~ ^[0-9]+$ ]]; then
+        echo "airlock-agents-apply: can't tell how much is free under $d (df); refusing to create images" >&2
+        [ "$confirm" = 0 ] || exit 1
+    elif [ "$free_k" -lt "$want_k" ]; then
+        echo "airlock-agents-apply: $d has $((free_k / 1024 / 1024))G free, less than the ceilings $sizes; free space or lower the sizes" >&2
+        [ "$confirm" = 0 ] || exit 1
+    fi
+fi
+
+# The operator's home: no agent may read it.
+mode_h="$(stat -c %a "$ROOT/home/$OPERATOR" 2>/dev/null || echo missing)"
+if [ "$mode_h" = 700 ]; then ok "/home/$OPERATOR is 0700"
+else step "chmod 0700 /home/$OPERATOR (was $mode_h)" chmod 0700 "$ROOT/home/$OPERATOR"; fi
+
+# The agents' boxes run on crun (runc fails under their ProtectProc).
+if command -v crun >/dev/null; then ok "crun installed (the agents' box runtime)"
+elif [ "$confirm" = 0 ]; then changes=$((changes + 1)); echo "would: install crun (apt install crun / pacman -S crun): the agents' boxes need it"
+else die "crun is not installed; the agents' boxes need it (apt install crun / pacman -S crun)"; fi
+
+# The rendered files, each installed when it differs (written beside and renamed in), and the
+# ones an earlier apply installed that this one no longer renders removed.
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+manifest="$ROOT$ETC/.installed"
+units_changed=0 user_units_changed=0
+install_file() {  # install_file <rendered> <dest> <mode>
+    install -d -m 0755 "$(dirname "$2")"
+    install -m "$3" -o root -g root "$1" "$2.new" && mv -f "$2.new" "$2"
+}
+: > "$work/now"
+while read -r p m; do
+    echo "$p" >> "$work/now"
+    render_file "$p" > "$work/f"
+    # (owners can't be root under the test root: the mode alone there)
+    if [ -f "$ROOT$p" ] && cmp -s "$work/f" "$ROOT$p" \
+            && { [ -n "$ROOT" ] && [ "$(/usr/bin/stat -c %a "$ROOT$p")" = "${m#0}" ] || [ "$(stat -c %u:%a "$ROOT$p")" = "0:${m#0}" ]; }; then continue; fi
+    cp "$work/f" "$work/f.$changes"
+    step "install $p" install_file "$work/f.$changes" "$ROOT$p" "$m"
+    case "$p" in /etc/systemd/system/*) units_changed=1 ;; /etc/systemd/user/*) user_units_changed=1 ;; esac
+done < <(file_list)
+if [ -f "$manifest" ]; then
+    while IFS= read -r p; do
+        grep -qxF "$p" "$work/now" && continue
+        [ -e "$ROOT$p" ] || continue
+        step "remove $p (no longer rendered)" rm -f "$ROOT$p"
+        case "$p" in /etc/systemd/system/*) units_changed=1 ;; /etc/systemd/user/*) user_units_changed=1 ;; esac
+    done < "$manifest"
+fi
+if [ "$confirm" = 1 ]; then install -m 0644 "$work/now" "$manifest"; fi
+if [ "$units_changed" = 1 ]; then step "systemctl daemon-reload" systemctl daemon-reload; fi
+
+# The firewall table, loaded now and at every boot and nftables reload.
+if systemctl is-enabled --quiet airlock-agents-nft.service 2>/dev/null && nft list table inet airlock-agents >/dev/null 2>&1 \
+        && [ "$units_changed" = 0 ]; then ok "the agents' nftables table is loaded, its unit enabled"
+else step "enable and (re)start airlock-agents-nft.service (the agents' nftables table)" \
+    sh -c 'systemctl enable airlock-agents-nft.service && systemctl restart airlock-agents-nft.service'; fi
+
+# The R1 execute-only copies: present, 0711 root's, the same bytes as the originals.
+nd_ok=1
+for pair in sh:bash systemd-run:systemd-run systemctl:systemctl install:install; do
+    dst=$ROOT$ND/${pair%%:*} src=$ROOT/usr/bin/${pair#*:}
+    if [ "$(stat -c %u:%g:%a "$dst" 2>/dev/null)" != 0:0:711 ] || ! cmp -s "$src" "$dst"; then nd_ok=0; fi
+done
+if [ "$nd_ok" = 1 ]; then ok "$ND: execute-only copies of sh, systemd-run, systemctl, install, current"
+else step "$ND: execute-only copies of sh, systemd-run, systemctl, install (nodump-refresh)" "$ROOT$LIBDIR/nodump-refresh"; fi
+
+declare -A GECOS=([agent]="Claude (airlock)" [web]="Claude web research (airlock)" [guard]="Claude answer gate (airlock)")
+provision_user() {
+    local r=$1 u=${NAME[$1]} n=${UID_OF[$1]} size=${SIZE[$1]} sub=${SUB[$1]}
+    local img="/var/lib/$u/home.img" home="/home/$u" f have extra
+    if [ -f "$ROOT$img" ]; then ok "$img exists ($(du -h --apparent-size "$ROOT$img" | cut -f1) ceiling, $(du -h "$ROOT$img" | cut -f1) used)"
+    else
+        # Formatted under a temporary name: a failed mkfs never leaves an image a later run accepts.
+        step "create $img: sparse $size, XFS" sh -c 'install -d -m 0700 "$(dirname "$1")" && rm -f "$1.new" && truncate -s "$2" "$1.new" && chmod 0600 "$1.new" && mkfs.xfs -q -L "$3" "$1.new" && mv "$1.new" "$1"' _ "$ROOT$img" "$size" "${u:0:12}"
+    fi
+    if mountpoint -q "$ROOT$home"; then ok "$home mounted"
+    else step "enable and start $(mount_unit "$home")" systemctl enable --now "$(mount_unit "$home")"; fi
+    if getent group "$u" >/dev/null; then ok "group $u"
+    else step "groupadd -g $n $u" groupadd -g "$n" "$u"; fi
+    if getent passwd "$u" >/dev/null; then ok "user $u ($(id "$u"))"
+    else
+        step "useradd $u (uid $n, home $home, no other groups)" \
+            useradd -u "$n" -g "$u" -d "$home" -M -s /bin/bash -c "${GECOS[$r]}" -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 "$u"
+    fi
+    if [ "$confirm" = 1 ] || getent passwd "$u" >/dev/null; then
+        extra="$(id -nG "$u" 2>/dev/null | tr ' ' '\n' | grep -vx "$u" || true)"
+        [ -z "$extra" ] || die "$u is in other groups ($extra); remove them"
+        if [ "$(passwd -S "$u" 2>/dev/null | awk '{print $2}')" = L ]; then ok "$u's password is locked"
+        else step "lock $u's password" passwd -q -l "$u"; fi
+    fi
+    # Root touches only the home's top directory (the mount root); anything inside is the user's.
+    if [ "$(stat -c %u:%a "$ROOT$home" 2>/dev/null)" = "$n:700" ]; then ok "$home owned by $u, 0700"
+    else step "own $home (top only) by $u, 0700" sh -c 'chown -h "$1:$1" "$2" && chmod 0700 "$2"' _ "$n" "$ROOT$home"; fi
+    for f in subuid subgid; do
+        have="$(grep -E "^($u|$n):" "$ROOT/etc/$f" 2>/dev/null || true)"
+        if [ "$have" = "$u:$sub:$SUB_COUNT" ]; then ok "/etc/$f has $have"
+        else step "/etc/$f: $u:$sub:$SUB_COUNT" sh -c 'echo "$1" >> "$2"' _ "$u:$sub:$SUB_COUNT" "$ROOT/etc/$f"; fi
+    done
+    if [ -e "$ROOT/var/lib/systemd/linger/$u" ]; then ok "linger on for $u"
+    else step "loginctl enable-linger $u" loginctl enable-linger "$u"; fi
+}
+for r in "${ROLES[@]}"; do provision_user "$r"; done
+
+# A directory's ACL as getfacl -n prints it, against what we want (see queue_dirs).
+acl_named() {  # acl_named <path> <want-defaults 0|1>
+    getfacl -cpnE "$1" 2>/dev/null | grep -E '^(default:)?(user|group):[0-9]+:|^default:(group|other)::' \
+        | { if [ "$2" = 1 ]; then cat; else grep -v '^default:'; fi; } | sort || true
+}
+perm() { local d=$1; printf '%s%s%s' "$( ((d & 4)) && echo r || echo -)" "$( ((d & 2)) && echo w || echo -)" "$( ((d & 1)) && echo x || echo -)"; }
+acl_want() {  # acl_want <mode> <entry...>
+    local mode=$1 e defaults=0 group=0; shift
+    {
+        for e in "$@"; do
+            [[ "$e" == default:* ]] && defaults=1
+            [[ "$e" == default:group::* ]] && group=1
+            echo "${e/:$OPERATOR:/:$OP_UID:}"
+        done
+        if [ "$defaults" = 1 ]; then
+            echo "default:other::---"
+            [ "$group" = 1 ] || echo "default:group::$(perm "${mode: -2:1}")"
+        fi
+    } | sort
+}
+has_defaults() { [[ " $* " == *" default:"* ]] && echo 1 || echo 0; }
+gid_of() { case "$1" in root) echo 0 ;; "$OPERATOR") echo "$OP_GID" ;; *) echo "$1" ;; esac; }
+
+# The drop box: the operator writes, the agent reads, never writes.
+inbox_acl="" inbox_what="$INBOX root 0755, pastes/ and airlock/ $OPERATOR:$AGENT 2750"
+[ "$WEB_ON" = 0 ] || inbox_what="$inbox_what, airlock/ readable by $WEB and $GUARD"
+[ "$WEB_ON" = 0 ] || inbox_acl="user:${UID_OF[web]}:r-x user:${UID_OF[guard]}:r-x default:user:${UID_OF[web]}:r-- default:user:${UID_OF[guard]}:r--"
+# shellcheck disable=SC2086  # the ACL list splits on purpose
+if [ "$(stat -c %u:%g:%a "$ROOT$INBOX" 2>/dev/null)" = "0:0:755" ] \
+        && [ "$(stat -c %u:%g:%a "$ROOT$INBOX/pastes" 2>/dev/null)" = "$OP_UID:${UID_OF[agent]}:2750" ] \
+        && [ "$(stat -c %u:%g:%a "$ROOT$INBOX/airlock" 2>/dev/null)" = "$OP_UID:${UID_OF[agent]}:2750" ] \
+        && [ "$(acl_named "$ROOT$INBOX/pastes" 1)" = "" ] \
+        && { [ -z "$inbox_acl" ] && [ "$(acl_named "$ROOT$INBOX/airlock" 1)" = "" ] || [ "$(acl_named "$ROOT$INBOX/airlock" 1)" = "$(acl_want 2750 $inbox_acl)" ]; }; then
+    ok "$inbox_what"
+else
+    step "$inbox_what" systemd-tmpfiles --create /etc/tmpfiles.d/airlock-agents-inbox.conf
+fi
+
+if [ "$WEB_ON" = 1 ]; then
+    queue_ok=1
+    while read -r p m g acl; do
+        # shellcheck disable=SC2086  # the ACL list splits on purpose
+        set -- $acl; [ "${1:-}" = - ] && shift
+        if [ "$(stat -c %u:%g:%a "$ROOT$p" 2>/dev/null)" != "0:$(gid_of "$g"):${m#0}" ] \
+                || [ "$(acl_named "$ROOT$p" "$(has_defaults "$@")")" != "$(acl_want "$m" "$@")" ]; then
+            queue_ok=0
+            [ "$confirm" = 1 ] || echo "     $p: $(stat -c %U:%G:%a "$ROOT$p" 2>/dev/null || echo missing), not root:$g:$m with its ACL"
+        fi
+    done < <(queue_dirs)
+    if [ "$queue_ok" = 1 ]; then ok "$QUEUE: every dir root's, groups, modes and ACLs as listed"
+    else step "$QUEUE: every dir root's, groups, modes and ACLs as listed" systemd-tmpfiles --create /etc/tmpfiles.d/airlock-agents-queue.conf; fi
+
+    workers_ok=1
+    for l in default.target.wants/$WEB-worker.path timers.target.wants/$WEB-worker.timer default.target.wants/$GUARD-worker.path timers.target.wants/$GUARD-worker.timer; do
+        [ "$(readlink "$ROOT/etc/systemd/user/$l" 2>/dev/null)" = "/etc/systemd/user/${l#*/}" ] || workers_ok=0
+    done
+    if [ "$workers_ok" = 1 ]; then ok "$WEB's and $GUARD's worker path and timer units enabled (global, ConditionUser)"
+    else step "enable $WEB's and $GUARD's worker path and timer units (systemctl --global)" \
+        systemctl --global enable "$WEB-worker.path" "$WEB-worker.timer" "$GUARD-worker.path" "$GUARD-worker.timer"; fi
+fi
+
+# Last, and as each user: the starter dirs (a failure is the user's own doing, so a warning).
+for r in "${ROLES[@]}"; do
+    u=${NAME[$r]} home="/home/${NAME[$r]}" missing=0 starter=".config .local .local/bin"
+    [ "$r" != agent ] || starter=".config development .local .local/bin"
+    for d in $starter; do [ -d "$ROOT$home/$d" ] || missing=1; done
+    if [ "$missing" = 0 ]; then ok "$home starter dirs"
+    elif [ "$check" = 1 ]; then echo "note: $home starter dirs missing ($u's own tree: not drift)"
+    else
+        changes=$((changes + 1))
+        if [ "$confirm" = 1 ]; then
+            echo "==> starter dirs in $home, created as $u"
+            dirs=(); for d in $starter; do dirs+=("$ROOT$home/$d"); done
+            setpriv --reuid="${UID_OF[$r]}" --regid="${UID_OF[$r]}" --clear-groups "$ROOT$ND/install" -d -m 0700 "${dirs[@]}" \
+                || echo "WARN: $u's starter dirs could not be created (something in $home is in the way); $u can create them itself" >&2
+        else echo "would: starter dirs in $home, created as $u"; fi
+    fi
+done
+
+# What airlock-envoy must give each agent user (its site file is the operator's to change).
+missing_socks=""
+if [ -z "$ROOT" ]; then
+    for r in "${ROLES[@]}"; do
+        ls "/run/airlock-envoy/${NAME[$r]}/"*.sock >/dev/null 2>&1 || missing_socks="$missing_socks ${NAME[$r]}"
+    done
+fi
+
+if [ "$changes" = 0 ]; then echo "==> the agents are provisioned; nothing to change"
+elif [ "$check" = 1 ]; then echo "==> $changes change(s): drifted from the site file"; exit 1
+elif [ "$confirm" = 0 ]; then echo "==> $changes change(s); run with --confirm to apply"
+else echo "==> done"; fi
+if [ -n "$missing_socks" ]; then
+    echo "note: no airlock-envoy socket yet for:$missing_socks. Give each a listener (docs/agents.md, Envoy), e.g. in /etc/airlock-envoy/site.conf:"
+    echo "  $AGENT-anthropic @anthropic"; echo "  client $AGENT-anthropic $AGENT"
+    if [ "$WEB_ON" = 1 ]; then
+        echo "  $WEB-web @anthropic web"; echo "  client $WEB-web $WEB"
+        echo "  $GUARD-anthropic @anthropic"; echo "  client $GUARD-anthropic $GUARD"
+    fi
+fi
+if [ "$confirm" = 1 ] && [ "$user_units_changed" = 1 ]; then echo "next: $COMMAND reload (the agents' user units changed), then $COMMAND update"; fi

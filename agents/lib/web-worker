@@ -1,0 +1,96 @@
+#!/bin/bash
+# web-worker: research the queued questions, one at a time (docs/agents.md, web research). Run
+# by <web>-worker.service in the web user's manager, started by its path unit when
+# requests/ or decisions/ change, and by its timer. Per new request:
+#
+#   check box     the question check; clean -> question.txt in the workspace, else a copy in held/;
+#                 prints the sha256 of the request it judged
+#   research box  claude -p in the workspace (web + Anthropic, the question file, two files out;
+#                 nothing mounted but the workspace, the scanner's rules included)
+#   publish box   report.md + sources.json + the request + meta into reports/<id>/, only if the
+#                 request is still the one the check judged
+#
+# A held request waits for the operator: decisions/<id>.approve runs it (the check again, which
+# then requires the request to be byte for byte the held copy the operator read),
+# decisions/<id>.reject closes it. At most daily-cap research runs a day (UTC; agents.conf); the
+# rest wait (checks and the operator's decisions still go through). Each id's state is in
+# ~/.local/state/<web>-worker.
+set -uo pipefail
+WORKER_ROLE=web WORKSPACE_NAME=research
+# shellcheck source-path=SCRIPTDIR source=worker-common.sh disable=SC2034  # WORKER_ROLE and WORKSPACE_NAME are read there
+. "${AGENTS_WEB_COMMON:-/usr/local/lib/airlock-agents/worker-common.sh}"
+LOGD="$QUEUE/log/$AGENTS_WEB"
+RESEARCH_TIMEOUT="${AGENTS_WEB_RESEARCH_TIMEOUT:-15m}"
+RESEARCH_TURNS=40
+DAILY_CAP="${AGENTS_WEB_DAILY_CAP:-${AGENTS_DAILY_CAP:-40}}"
+CAPPED=0
+
+# One more research run today, or no (the cap reached: the id keeps its state for tomorrow).
+take_run() {  # take_run <id>
+    local f n
+    f="$STATE/.runs-$(date -u +%Y%m%d)"
+    n="$(cat "$f" 2>/dev/null || echo 0)"; [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    if [ "$n" -ge "$DAILY_CAP" ]; then
+        [ "$CAPPED" = 1 ] || log_stage "$1" research "daily cap of $DAILY_CAP reached, waits"
+        CAPPED=1; return 1
+    fi
+    echo $((n + 1)) > "$f"
+}
+
+research() {  # research <id> <sha256>: the research box, then publish
+    local id=$1 sha=$2 uuid start end rc owner
+    take_run "$id" || return 0
+    uuid="$(new_uuid)" start="$(date +%s)"
+    (cd "$WS" && timeout -k 30s "$RESEARCH_TIMEOUT" "$AIRLOCK" \
+        -p "Research the question in ./question.txt. Write ./report.md and ./sources.json as your instructions say, then stop." \
+        --name "$AGENTS_WEB-$id" --session-id "$uuid" \
+        --restricted --strict-mcp-config \
+        --tools "WebSearch,WebFetch,Read,Write" \
+        --allowedTools "WebSearch,WebFetch,Read(./question.txt),Edit(./report.md),Edit(./sources.json)" \
+        --permission-mode dontAsk --max-turns "$RESEARCH_TURNS" \
+        --append-system-prompt "$(cat "$LIB/research-prompt.md")" \
+        --output-format json) </dev/null > "$LOGD/$id.result.json"
+    rc=$? end="$(date +%s)"
+    log_stage "$id" research "ran" "$rc"
+    copy_transcript "$uuid" "$id"
+    owner="$(stat -c %u -- "$QUEUE/requests/$id.json" 2>/dev/null)"; [[ "$owner" =~ ^[0-9]+$ ]] || owner=-1
+    box_step "$QUEUE/requests:ro $QUEUE/reports:rw" publish "$id" "$uuid" "$start" "$end" "$rc" "$sha" "$owner" >/dev/null
+    rc=$?
+    case $rc in
+        "$EXIT_OK")        set_state "$id" "done"; log_stage "$id" publish published ;;
+        "$EXIT_NO_REPORT") set_state "$id" "done"; log_stage "$id" publish "published without a report" "$rc" ;;
+        "$EXIT_CHANGED")   set_state "$id" changed; log_stage "$id" publish "the request changed after its check; not published" "$rc" ;;
+        *)                 failed "$id" publish "$rc" ;;
+    esac
+}
+
+check() {  # check <id> [approved]: the check box, then research if it passes
+    local id=$1 mounts="$QUEUE/requests:ro $QUEUE/held:rw" rc out sha
+    if [ -d "$QUEUE/reports/$id" ]; then                     # published before a crash
+        set_state "$id" "done"; log_stage "$id" publish "already published"; return 0
+    fi
+    [ -z "${2:-}" ] || mounts="$mounts $QUEUE/decisions:ro"
+    clear_ws || { log_stage "$id" check "workspace not empty, skipped"; return 0; }
+    out="$(box_step "$mounts" check "$id")"; rc=$?
+    sha="$(printf '%s\n' "$out" | sed -n 's/^sha256 \([0-9a-f]\{64\}\)$/\1/p' | tail -1)"
+    case $rc in
+        "$EXIT_OK")
+            if [ -z "$sha" ]; then failed "$id" check "$EXIT_ERROR"; return 0; fi
+            log_stage "$id" check "${2:-clean}"; research "$id" "$sha" ;;
+        "$EXIT_HELD")    set_state "$id" held; log_stage "$id" check held "$rc" ;;
+        "$EXIT_CHANGED") set_state "$id" changed; log_stage "$id" check "changed after the operator approved it; not researched" "$rc" ;;
+        *)               failed "$id" check "$rc" ;;
+    esac
+}
+
+for id in $(ids_in "$QUEUE/requests" .json); do
+    case "$(state_of "$id")" in
+        new|tries-*) check "$id" ;;
+        approved|approved-tries-*) check "$id" approved ;;
+        held)
+            if [ -e "$QUEUE/decisions/$id.reject" ]; then set_state "$id" rejected; log_stage "$id" decision rejected
+            elif [ -e "$QUEUE/decisions/$id.approve" ]; then set_state "$id" approved; check "$id" approved; fi ;;
+        *) ;;
+    esac
+done
+exit 0

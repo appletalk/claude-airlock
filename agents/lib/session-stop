@@ -1,0 +1,44 @@
+#!/bin/bash
+# ExecStop of <agent>-session@: stop the session's tmux server, then wait (60 s at most) until the
+# processes of its panes have exited, so `<command> stop` and `<command> restart` mean stopped. tmux moves
+# each pane into its own scope (tmux-spawn-*.scope), outside the service, so systemd alone would
+# call the session stopped while the old airlock launcher is still cleaning up (and the next one
+# finds it as a live peer). The panes come from tmux and from the cgroup session-run
+# recorded (when tmux died on its own there is no server to ask). Never its own (the service's)
+# cgroup. It kills nothing itself: after 60 s it says what is still running and returns, and the
+# session's next run waits until that is gone before it starts (session-run).
+#   session-stop <tmux socket> <recorded cgroup file>
+set -u
+sock="${1:?usage: session-stop <tmux socket> [<cgroup file>]}"
+cgfile="${2:-}"
+root="${AGENTS_STOP_ROOT:-}"   # test hooks: /proc and /sys/fs/cgroup under it, a shorter wait
+tries=$(( ${AGENTS_STOP_WAIT:-60} * 2 ))
+cg_of() { sed -n 's/^0:://p' "$root/proc/$1/cgroup" 2>/dev/null; }
+self="$(cg_of self)"
+cands=()
+for pid in $(tmux -S "$sock" list-panes -a -F '#{pane_pid}' 2>/dev/null); do
+    [[ "$pid" =~ ^[0-9]+$ ]] && cands+=("$(cg_of "$pid")")
+done
+[ -n "$cgfile" ] && [ -f "$cgfile" ] && cands+=("$(head -1 "$cgfile")")
+# Only pane scopes: a path of plain characters ending in tmux-spawn-*.scope, not ours.
+cgs=()
+for cg in "${cands[@]}"; do
+    [[ "$cg" =~ ^/[A-Za-z0-9@._/-]+/tmux-spawn-[A-Za-z0-9-]+\.scope$ && "$cg" != */../* ]] || continue
+    [ "$cg" != "$self" ] || continue
+    [[ " ${cgs[*]} " == *" $root/sys/fs/cgroup$cg "* ]] || cgs+=("$root/sys/fs/cgroup$cg")
+done
+tmux -S "$sock" kill-server 2>/dev/null
+busy_now() {
+    busy=()
+    for c in "${cgs[@]}"; do
+        # populated covers child cgroups too; a removed cgroup reads as not populated
+        grep -qx 'populated 1' "$c/cgroup.events" 2>/dev/null && busy+=("$c")
+    done
+    [ ${#busy[@]} -gt 0 ]
+}
+for _ in $(seq 1 "$tries"); do
+    busy_now || exit 0
+    sleep 0.5
+done
+echo "session-stop: still running after $((tries / 2)) s (the next run waits for it): ${busy[*]##*/}" >&2
+exit 0

@@ -1,0 +1,123 @@
+#!/bin/bash
+# The command an agent session runs inside its tmux session (<agent>-session@.service):
+# the boxed Claude for ~/development/<project>, named <project>.<name> (the Remote Control
+# list, the prompt box, the terminal title), with Remote Control on, resuming this session's
+# own conversation. If Claude exits it is started again after a pause, at most 5 times in 10
+# minutes; then the window stays open with the reason, so a crash loop is visible.
+#
+# Each session keeps its conversation id in ~/.local/state/<agent>-session/<project>.<name>.id
+# and resumes that id (--continue would take the newest conversation in the folder: another
+# session's, when two share a project). Before each start it also looks for the newest
+# conversation that carries its name (Claude records --name in the transcript), so one begun
+# after a /clear is the one resumed, if Claude kept the name. No id, or its transcript gone: a
+# fresh id. Never a conversation another session of the project has recorded as its own.
+# Once per project (a marker beside the transcripts, so clearing ~/.local/state doesn't re-arm
+# it), and only while no session of the project has ever recorded an id (the rollout, when only
+# <project>.main exists), <project>.main keeps the newest conversation that carries no
+# <project>.* name, as --continue would have.
+# A restart never runs beside the previous run of the same session: it waits, saying so in the
+# pane, until the processes of that run (its recorded cgroup) are gone. Nothing is killed.
+set -u
+# The site's names (rendered by airlock-agents-apply from agents.conf).
+# shellcheck source=/dev/null
+. "${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env}"
+inst="${1:?usage: session-run <project>.<name>}"
+project="${inst%%.*}" name="${inst#*.}"
+[[ "$project" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ && "$inst" == *.* && "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] \
+    || { echo "session-run: bad session '$inst' (<project>.<name>)" >&2; exit 2; }
+dir="$HOME/development/$project"
+[ -d "$dir" ] || { echo "session-run: no $dir (clone it first)"; exec sleep infinity; }
+cd "$dir" || exit 1
+states="$HOME/.local/state/$AGENTS_AGENT-session"
+state="$states/$inst.id"
+# The project's conversations, where airlock shares them with the box (its slug of $PWD).
+convs="$HOME/.claude/projects/${PWD//[^a-zA-Z0-9]/-}"
+uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+# The ids other sessions of this project have recorded (never ours to take).
+claimed() {
+    local f
+    for f in "$states/$project".*.id; do
+        [ -f "$f" ] && [ "$f" != "$state" ] && head -1 "$f"
+    done
+}
+# The newest uuid-named regular transcript, not another session's, that passes a test:
+# newest_conv <test>
+newest_conv() {
+    local f id others
+    others="$(claimed)"
+    while IFS= read -r f; do
+        id="${f%.jsonl}"
+        [[ "$id" =~ $uuid_re ]] || continue
+        grep -qxF "$id" <<<"$others" && continue
+        "$1" "$convs/$f" && { printf '%s\n' "$id"; return; }
+    done < <(find "$convs" -maxdepth 1 -type f -name '*.jsonl' -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+}
+title() { grep -o '"customTitle":"[^"]*"' "$1" 2>/dev/null | tail -1; }
+# from before sessions were named: no <project>.* name in it, ever
+unnamed() { ! grep -qF "\"customTitle\":\"$project." "$1" 2>/dev/null; }
+named() { [ "$(title "$1")" = "\"customTitle\":\"$inst\"" ]; }
+save_id() { mkdir -p "$states" && printf '%s\n' "$1" > "$state.tmp" && mv -f "$state.tmp" "$state"; }
+
+marker="$convs/.$AGENTS_AGENT-session-adopted"
+if [ "$name" = main ] && [ ! -e "$marker" ]; then
+    if ! compgen -G "$states/$project.*.id" >/dev/null; then
+        id="$(newest_conv unnamed)"
+        [ -n "$id" ] && save_id "$id"
+    fi
+    mkdir -p "$convs" && : > "$marker"
+fi
+# The previous run of this session (its recorded cgroup) must be gone before this one starts.
+cgfile="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$AGENTS_AGENT-$inst.cg"
+cgroot="${AGENTS_CGROUP_ROOT:-/sys/fs/cgroup}"   # test hook
+mine="$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)"
+prev="$(head -1 "$cgfile" 2>/dev/null)"
+if [[ "$prev" =~ ^/[A-Za-z0-9@._/-]+/tmux-spawn-[A-Za-z0-9-]+\.scope$ && "$prev" != */../* && "$prev" != "$mine" ]]; then
+    waited=0
+    # populated covers the scope's child cgroups too; a removed scope reads as not populated
+    while grep -qx 'populated 1' "$cgroot$prev/cgroup.events" 2>/dev/null; do
+        if (( waited % 30 == 0 )); then
+            echo "session-run: the previous run of $inst is still finishing (${prev##*/}); waiting, so two never run at once. Still there:"
+            # every process under the scope, child cgroups included; argv is printed with
+            # everything but printable ASCII removed (it goes into the operator's terminal)
+            { find "$cgroot$prev" -name cgroup.procs -exec cat {} + | while read -r p; do
+                [[ "$p" =~ ^[0-9]+$ ]] && printf '  %s %s\n' "$p" "$(tr '\0' ' ' < "${AGENTS_PROC_ROOT:-}/proc/$p/cmdline" | cut -c1-100 | LC_ALL=C tr -cd '[:print:]')"
+            done; } 2>/dev/null
+            echo "  (if one hangs: $AGENTS_COMMAND shell, then kill <pid>)"
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+fi
+# Where stop (and the next run) find this session's processes even when tmux is gone.
+printf '%s\n' "$mine" > "$cgfile" 2>/dev/null || true
+
+starts=()
+while :; do
+    now=$(date +%s)
+    recent=()
+    for t in "${starts[@]}"; do (( now - t < 600 )) && recent+=("$t"); done
+    starts=("${recent[@]}" "$now")
+    if (( ${#starts[@]} > 5 )); then
+        echo "session-run: Claude exited 5 times in 10 minutes; not restarting."
+        echo "Fix the cause, then: $AGENTS_COMMAND restart $inst"
+        exec sleep infinity
+    fi
+    id=""
+    [ -f "$state" ] && read -r id < "$state"
+    [[ "$id" =~ $uuid_re ]] && [ -f "$convs/$id.jsonl" ] && ! grep -qxF "$id" <<<"$(claimed)" || id=""
+    # a newer conversation under this session's name (begun after a /clear) wins
+    byname="$(newest_conv named)"
+    if [ -n "$byname" ] && { [ -z "$id" ] || [ "$convs/$byname.jsonl" -nt "$convs/$id.jsonl" ]; }; then
+        id=$byname; save_id "$id"
+    fi
+    if [ -n "$id" ]; then
+        conv=(--resume "$id")
+    else
+        id="$(cat /proc/sys/kernel/random/uuid)"
+        save_id "$id"
+        conv=(--session-id "$id")
+    fi
+    "$HOME/.local/bin/airlock" --remote-control --name "$inst" "${conv[@]}"
+    echo "session-run: Claude exited ($?) at $(date -Is); restarting in 10 s (Ctrl-C to stop)"
+    sleep 10
+done

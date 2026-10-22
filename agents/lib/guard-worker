@@ -1,0 +1,72 @@
+#!/bin/bash
+# guard-worker: gate each published report (docs/agents.md, web research). Run by
+# <guard>-worker.service in the guard user's manager, started by its path unit when
+# reports/ or decisions/ change, and by its timer. Per new report:
+#
+#   scan box     the scanner: findings, the normalized report, the reader's input (the question
+#                from the agent's own request, which the published copy must match)
+#   reader box   claude -p, no tools, a JSON verdict (skipped after a high finding)
+#   release box  scanner + verdict -> answers/<id>.md, or quarantine/<id>/
+#
+# A quarantined answer the operator releases (decisions/<id>.release) goes out through the
+# release box too. Each id's state is in ~/.local/state/<guard>-worker.
+set -uo pipefail
+WORKER_ROLE=guard WORKSPACE_NAME=gate
+# shellcheck source-path=SCRIPTDIR source=worker-common.sh disable=SC2034  # WORKER_ROLE and WORKSPACE_NAME are read there
+. "${AGENTS_WEB_COMMON:-/usr/local/lib/airlock-agents/worker-common.sh}"
+LOGD="$QUEUE/log/$AGENTS_GUARD"
+READER_TIMEOUT="${AGENTS_WEB_READER_TIMEOUT:-5m}"
+RELEASE_MOUNTS="$QUEUE/reports:ro $LOGD:ro $QUEUE/answers:rw $QUEUE/quarantine:rw"
+
+reader() {  # reader <id>: the verdict into the log (the release box parses it)
+    local id=$1 uuid rc
+    uuid="$(new_uuid)"
+    [ -f "$WS/reader-input.md" ] && [ ! -L "$WS/reader-input.md" ] || { log_stage "$id" reader "no input"; return 0; }
+    (cd "$WS" && timeout -k 30s "$READER_TIMEOUT" "$AIRLOCK" -p \
+        --name "$AGENTS_GUARD-$id" --session-id "$uuid" \
+        --restricted --strict-mcp-config --tools "" \
+        --permission-mode dontAsk --max-turns 3 \
+        --append-system-prompt "$(cat "$LIB/reader-prompt.md")" \
+        --json-schema "$(cat "$LIB/verdict.schema.json")" \
+        --output-format json) < "$WS/reader-input.md" > "$LOGD/$id.reader.json"
+    rc=$?
+    log_stage "$id" reader ran "$rc"
+    copy_transcript "$uuid" "$id"
+}
+
+gate() {  # gate <id>
+    local id=$1 rc
+    clear_ws || { log_stage "$id" scan "workspace not empty, skipped"; return 0; }
+    rm -f -- "$LOGD/$id.reader.json"                          # never a verdict from an earlier try
+    box_step "$QUEUE/requests:ro $QUEUE/reports:ro" scan "$id"; rc=$?
+    case $rc in
+        "$EXIT_OK")   log_stage "$id" scan clean; reader "$id" ;;
+        "$EXIT_HIGH") log_stage "$id" scan "high finding" "$rc" ;;
+        *)            failed "$id" scan "$rc"; return ;;
+    esac
+    box_step "$RELEASE_MOUNTS" release "$id"; rc=$?
+    case $rc in
+        "$EXIT_OK")         set_state "$id" released; log_stage "$id" release released ;;
+        "$EXIT_QUARANTINE") set_state "$id" quarantined; log_stage "$id" release quarantined "$rc" ;;
+        *)                  failed "$id" release "$rc" ;;
+    esac
+}
+
+for id in $(ids_in "$QUEUE/reports" /); do
+    case "$(state_of "$id")" in
+        new|tries-*) gate "$id" ;;
+        quarantined|quarantined-tries-*)
+            [ -e "$QUEUE/decisions/$id.release" ] || continue
+            clear_ws || continue
+            box_step "$QUEUE/decisions:ro $QUEUE/quarantine:ro $QUEUE/answers:rw" release-approved "$id"; rc=$?
+            if [ "$rc" = "$EXIT_OK" ]; then set_state "$id" released-by-operator; log_stage "$id" release "released by the operator"
+            elif [ "$rc" != "$EXIT_ERROR" ]; then log_stage "$id" release "box did not run, will retry" "$rc"
+            else
+                st="$(state_of "$id")"; n=1; case "$st" in *tries-[0-9]*) n=$(( ${st##*tries-} + 1 )) ;; esac
+                if [ "$n" -ge "$TRIES" ]; then set_state "$id" release-failed; log_stage "$id" release "the operator's release failed, gave up" "$rc"
+                else set_state "$id" "quarantined-tries-$n"; log_stage "$id" release "the operator's release failed, will retry" "$rc"; fi
+            fi ;;
+        *) ;;
+    esac
+done
+exit 0

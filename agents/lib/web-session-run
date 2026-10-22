@@ -1,0 +1,129 @@
+#!/bin/bash
+# web-session-run: the interactive web research session (docs/agents.md), run by
+# <web>-session@<name>.service in the pane of its tmux server. A fresh box every time: a new
+# conversation (never resumed), Remote Control on, named <web> (<web>.<name> for another), the
+# chat instructions appended to Claude's system prompt. It ends after an hour without activity
+# (its transcript unchanged: a message from the terminal or the app counts; a warning 10
+# minutes before), at `<command> web stop`, or at the unit's 12 h backstop. However it ends, its
+# transcript and a stage line go to the log. Anything off (no instructions, a workspace that
+# won't empty) and it doesn't start.
+set -u
+# The site's names (rendered by airlock-agents-apply from agents.conf).
+# shellcheck source=/dev/null
+. "${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env}"
+name="${1:?usage: web-session-run <name>}"
+[[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || { echo "web-session-run: bad name '$name'" >&2; exit 2; }
+label=$AGENTS_WEB; [ "$name" = main ] || label="$AGENTS_WEB.$name"
+ws="$HOME/chat"                                   # one workspace for every chat: one login
+lib="${AGENTS_WEB_LIB:-$AGENTS_QUEUE/lib}"
+logd="${AGENTS_WEB_QUEUE:-$AGENTS_QUEUE}/log/$AGENTS_WEB"
+run="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+idle="${AGENTS_WEB_IDLE:-3600}" warn="${AGENTS_WEB_IDLE_WARN:-600}" poll="${AGENTS_WEB_IDLE_POLL:-60}"   # test knobs
+stop() { echo "web-session-run: $*; not starting"; exec sleep 30; }
+prompt="$(cat "$lib/chat-prompt.md" 2>/dev/null)"
+[ -n "$prompt" ] || stop "no chat instructions at $lib/chat-prompt.md"
+{ mkdir -p "$ws" && cd "$ws"; } || stop "no workspace $ws"
+# Chat boxes still running (this user's containers running Claude as a web chat): one
+# from a stop or restart that is still ending counts as running, so a restart never empties the
+# workspace under it.
+# The command is read as its argument list in JSON (one line per container, each argument
+# quoted), so text inside an argument (the appended prompt) can never pass for one of its own.
+chat_boxes() {  # chat_boxes [label [session-id]]: ids of running chat containers (all, one label's, one run's)
+    local ids; ids="$(podman ps -q --no-trunc 2>/dev/null)"; [ -n "$ids" ] || return 0
+    # shellcheck disable=SC2086  # one id per word
+    podman inspect --format '{{.Id}} {{json .Config.Cmd}}' $ids 2>/dev/null | while read -r id cmd; do
+        [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || continue
+        if [ -n "${1:-}" ]; then [[ "$cmd" == *"\"--name\",\"$1\""* ]] || continue
+        else [[ "$cmd" =~ \"--name\",\"$AGENTS_WEB(\.[A-Za-z0-9_-]+)?\" ]] || continue; fi
+        [ -z "${2:-}" ] || [[ "$cmd" == *"\"--session-id\",\"$2\""* ]] || continue
+        printf '%s\n' "$id"
+    done
+}
+rm -f -- "$run/$AGENTS_WEB-$name.why"
+# The previous run of this chat may still be ending (its box gets a minute after a stop).
+for _ in $(seq "${AGENTS_WEB_PREV_WAIT:-60}"); do [ -z "$(chat_boxes "$label")" ] && break; sleep 1; done
+[ -z "$(chat_boxes "$label")" ] \
+    || stop "the previous $label box is still running; end it with: $AGENTS_COMMAND web stop, then (as $AGENTS_WEB) podman stop $(chat_boxes "$label" | head -1)"
+# Nothing from an earlier chat is left: not in the workspace (a CLAUDE.md or .claude/ there would
+# load into the next chat), not in its memory dir. Unless another chat is running in it now (its
+# tmux server answers, or its box still runs; a socket left by one that ended doesn't count).
+others=0
+for s in "$run/$AGENTS_WEB"-*.sock; do
+    [ -S "$s" ] && [ "$s" != "$run/$AGENTS_WEB-$name.sock" ] && tmux -S "$s" has-session 2>/dev/null && others=1
+done
+[ -z "$(chat_boxes)" ] || others=1
+if [ "$others" = 0 ]; then
+    find "$ws" -mindepth 1 -delete
+    [ -z "$(find "$ws" -mindepth 1 -print -quit)" ] || stop "the workspace $ws could not be emptied"
+    rm -rf -- "$HOME/.config/claude-airlock/state/$(printf '%s' "$ws" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')/box-memory"
+fi
+uuid="$(cat /proc/sys/kernel/random/uuid)" start="$(date +%s)"
+# The transcript, for the record: a regular file with one link, under 50 MB.
+transcript() { find -P "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name "$uuid.jsonl" -type f -links 1 -size -50M 2>/dev/null | head -1; }
+# Its last change, for the idle watch (any size; empty until it exists).
+active_at() { find -P "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name "$uuid.jsonl" -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1 | head -1; }
+# How the chat ends. The kernel sends a hangup (the tmux server going at stop or at the backstop)
+# only to this shell, the pane's session leader; the box is in this shell's process group, so the
+# handler passes the hangup on to the group, as a session leader's exit would. The launcher waits
+# for podman before it acts on a hangup, and Claude as the container's PID 1 may ignore it, so a
+# box still there after $grace seconds is stopped by its container (found by the session id it
+# was given), then killed. Then this shell writes the record. The box runs in the background and
+# is waited for, so the handler runs at once (bash runs a trap only after a foreground command
+# has finished); it starts with no signal ignored (a background job inherits INT and QUIT
+# ignored) and the pane's terminal as its stdin. This shell ignores Ctrl-C itself (a prompt of
+# the launcher's, in cooked mode, would otherwise end it and lose the record).
+grace="${AGENTS_WEB_STOP_GRACE:-15}"
+why='exit' hup=0
+trap 'why=${why/exit/stop}; hup=1; trap "" HUP; kill -HUP 0 2>/dev/null' HUP
+trap '' INT
+exec 3<&0
+( trap - HUP INT QUIT; exec "$HOME/.local/bin/airlock" --remote-control --name "$label" --session-id "$uuid" \
+    --append-system-prompt "$prompt" ) <&3 3<&- &
+box=$!
+exec 3<&-
+# The idle watch: the conversation's transcript is its activity (before it exists, the start).
+# Warn, then end the chat like a stop (a hangup to the group), once nothing has changed for $idle
+# seconds. Its sleep is waited for, so a TERM ends it at once.
+(
+    trap - HUP; trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+    warned=0 last="$start"
+    while :; do
+        sleep "$poll" & nap=$!; wait "$nap"
+        t="$(active_at)"; [ -z "$t" ] || last="$t"
+        quiet=$(( $(date +%s) - last ))
+        if [ "$quiet" -ge "$idle" ]; then
+            echo idle > "$run/$AGENTS_WEB-$name.why" 2>/dev/null
+            kill -HUP 0; exit 0
+        elif [ "$quiet" -ge $(( idle - warn )) ] && [ "$warned" = 0 ]; then
+            tmux -S "$run/$AGENTS_WEB-$name.sock" display-message -d 30000 \
+                "$AGENTS_WEB: idle; this chat ends in $(( (idle - quiet + 59) / 60 )) min unless you send a message" 2>/dev/null
+            warned=1
+        elif [ "$quiet" -lt $(( idle - warn )) ]; then warned=0; fi
+    done
+) </dev/null &
+watch=$!
+waited=0 rc=
+while kill -0 "$box" 2>/dev/null; do
+    if [ "$hup" = 0 ]; then wait "$box"; rc=$?; continue; fi    # a hangup interrupts the wait
+    sleep 1; waited=$((waited + 1))
+    if [ "$waited" -eq "$grace" ]; then
+        for c in $(chat_boxes "$label" "$uuid"); do podman stop -t 10 "$c" >/dev/null 2>&1 & done
+    elif [ "$waited" -ge $(( grace + 20 )) ]; then
+        for p in $(pgrep -g "$$"); do [ "$p" = "$$" ] || kill -KILL "$p" 2>/dev/null; done
+    fi
+done
+wait "$box" 2>/dev/null; r=$?; [ "$r" = 127 ] || rc=$r
+kill "$watch" 2>/dev/null; wait "$watch" 2>/dev/null
+[ ! -e "$run/$AGENTS_WEB-$name.why" ] || { why=idle; rm -f -- "$run/$AGENTS_WEB-$name.why"; }
+# A container this run started and couldn't end is said in the record (the next start of this
+# chat refuses until it is gone).
+left=""; [ -z "$(chat_boxes "$label" "$uuid")" ] || left=", its container still running"
+# The record: the transcript (a regular file with one link, under 50 MB, from where the
+# launcher shares the box's history) and one meta line.
+src="$(transcript)"
+if [ -n "$src" ]; then
+    dst="$logd/transcripts/web-$start.jsonl"
+    cp -- "$src" "$dst.tmp" && chmod 0640 "$dst.tmp" && mv -f -- "$dst.tmp" "$dst"
+fi
+printf '{"ts":"%s","user":"%s","id":"web-%s","stage":"chat","result":"%s ended (%s%s)","exit":%s,"session":"%s","seconds":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$AGENTS_WEB" "$start" "$label" "$why" "$left" "${rc:-0}" "$uuid" "$(( $(date +%s) - start ))" >> "$logd/stages.jsonl"

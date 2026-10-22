@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "deny": [
+      "SendMessage",
+      "ListAgents",
+      "Artifact",
+      "ArtifactComments",
+      "ArtifactData",
+      "ArtifactCheck",
+      "RemoteTrigger",
+      "CronCreate",
+      "Agent",
+      "Bash",
+      "Read(~/.claude/**)",
+      "Edit(~/.claude/**)"
+    ]
+  },
+  "crossSessionInbound": "refuse",
+  "allowManagedHooksOnly": true
+}

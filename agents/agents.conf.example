@@ -1,0 +1,23 @@
+# /etc/claude-airlock/agents/agents.conf: the agent users on this host (docs/agents.md).
+# agents/install.sh writes one on its first run, asking for each value; edit it afterwards and
+# run `sudo airlock-agents-apply --confirm`. Root's; keep it in your host config repo.
+#
+#   operator <user>          who runs the agents (the operator command, pastes, decisions)
+#   command <name>           the operator command's name (default: the agent's name)
+#   agent|web|guard <user> uid <n> subuid <n> home <size> [memory-high X] [memory-max X] [tasks N] [cpu N%]
+#                            the agent (its sessions), and for web research the web user (research
+#                            runs and the chat) and the guard (the gate on its answers). subuid: the
+#                            start of its 65536 subordinate ids (rootless podman). home: the size of
+#                            its fixed home image (sparse: a ceiling, not a reservation).
+#   inbox <path>             what the operator hands the agent (default /srv/<agent>-inbox)
+#   queue <path>             the web research queue (default /srv/<web>)
+#   internal-name <domain>...   names a research question must not carry (your domains)
+#   internal-host <name>...     host names a research question must not carry
+#   daily-cap <n>            research runs a day at most (default 40)
+
+operator alice
+agent    claude        uid 1100 subuid 1100000 home 30G
+web      claude-web    uid 1101 subuid 1200000 home 10G
+guard    claude-guard  uid 1102 subuid 1300000 home 10G
+internal-name example.com corp.example
+internal-host build1 db1

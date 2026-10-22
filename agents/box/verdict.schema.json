@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["pass", "quarantine"] },
+    "reasons": { "type": "array", "items": { "type": "string", "maxLength": 500 }, "maxItems": 10 }
+  },
+  "required": ["verdict", "reasons"],
+  "additionalProperties": false
+}
