@@ -184,6 +184,7 @@ if [ "$nft_external" = 0 ]; then
     fi
 else echo "     (nftables is managed elsewhere: the drops below are probed, not the table)"; fi
 probe_host="${AGENTS_PROBE_HOST:-1.1.1.1:443}"
+export probe_host   # read by tcp() in the shells below
 tcp() { timeout 4 bash -c "exec 3<>/dev/tcp/${probe_host%:*}/${probe_host##*:}"; }
 if setpriv --reuid=65534 --regid=65534 --clear-groups -- bash -c "$(declare -f tcp); tcp"; then
     ids=""
@@ -292,7 +293,8 @@ for spec in $users; do
     done
     for f in cron at; do
         if [ -f "/etc/$f.allow" ]; then expect no "$u not in /etc/$f.allow" grep -qxF "$u" "/etc/$f.allow"
-        else expect yes "$u in /etc/$f.deny" grep -qxF "$u" "/etc/$f.deny"; fi
+        elif [ -f "/etc/$f.deny" ]; then expect yes "$u in /etc/$f.deny" grep -qxF "$u" "/etc/$f.deny"
+        else echo "     (no /etc/$f.allow or $f.deny: $f's default applies, as apply leaves it)"; fi
     done
     expect yes "user-$n.slice: memory ceiling set" sh -c "[ \"\$(systemctl show -p MemoryMax --value user-$n.slice)\" != infinity ]"
     opts="$(findmnt -no SOURCE,OPTIONS "/home/$u")"
