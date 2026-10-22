@@ -47,6 +47,8 @@ tdir="$HOME/.claude/projects/-ws"; mkdir -p "$tdir"   # where the launcher share
 echo '{"transcript":true}' > "$tdir/$sid.jsonl"
 case "$name" in
     agent-web-*)
+        # a question that arrives while this one is researched (once)
+        if [ -n "${STUB_ARRIVE:-}" ] && [ -e "$STUB_ARRIVE" ]; then mv "$STUB_ARRIVE" "$AGENTS_WEB_QUEUE/requests/"; fi
         case "${STUB_RESEARCH:-report}" in
             report) printf '# Answer\n\nPostgreSQL 18 defaults to SCRAM [1].\n' > report.md
                     printf '[{"url": "https://www.postgresql.org/docs/18/", "title": "Docs", "fetched": "2026-10-21"}]' > sources.json ;;
@@ -56,6 +58,8 @@ case "$name" in
         esac
         echo '{"type":"result","subtype":"success","is_error":false}' ;;
     agent-guard-*)
+        # a report published while this one is gated (once)
+        if [ -n "${STUB_ARRIVE:-}" ] && [ -e "$STUB_ARRIVE" ]; then mv "$STUB_ARRIVE" "$AGENTS_WEB_QUEUE/reports/"; fi
         [ -s /dev/stdin ] && cat > /dev/null || { echo "reader got no input" >&2; exit 1; }
         case "${STUB_VERDICT:-pass}" in
             pass)    echo '{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdict":"pass","reasons":["factual"]}}' ;;
@@ -330,3 +334,24 @@ b"
     [ ! -e "$mem/MEMORY.md" ]
 }
 
+
+@test "a question or report that arrives while a worker runs is taken by that run (the watch doesn't fire while it runs)" {
+    I2=20261021T120009Z-d4e5f6
+    ask; ask "What is the latest tmux release?" "$I2"
+    mkdir -p "$T/later"; mv "$Q/requests/$I2.json" "$T/later/"
+    STUB_ARRIVE="$T/later/$I2.json" run web
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(wstate "$ID")" = done ]; [ "$(wstate "$I2")" = done ] || { echo "second: $output"; ls -la "$T/web/.local/state/agent-web-worker" "$Q/requests"; return 1; }
+    mv "$Q/reports/$I2" "$T/later/"
+    STUB_ARRIVE="$T/later/$I2" run guard
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(gstate "$ID")" = released ]; [ "$(gstate "$I2")" = released ]
+    [ -f "$Q/answers/$I2.md" ]
+}
+
+@test "a step that fails is retried by the next run, not again in the same run" {
+    ask
+    STUB_EXEC_FAIL=2 web >/dev/null
+    [ "$(wstate "$ID")" = tries-1 ]
+    [ "$(grep -c 'check' "$Q/log/agent-web/stages.jsonl")" = 1 ]
+}

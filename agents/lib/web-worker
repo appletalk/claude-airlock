@@ -83,14 +83,24 @@ check() {  # check <id> [approved]: the check box, then research if it passes
     esac
 }
 
-for id in $(ids_in "$QUEUE/requests" .json); do
-    case "$(state_of "$id")" in
-        new|tries-*) check "$id" ;;
-        approved|approved-tries-*) check "$id" approved ;;
-        held)
-            if [ -e "$QUEUE/decisions/$id.reject" ]; then set_state "$id" rejected; log_stage "$id" decision rejected
-            elif [ -e "$QUEUE/decisions/$id.approve" ]; then set_state "$id" approved; check "$id" approved; fi ;;
-        *) ;;
-    esac
+# Until a pass finds no request it hasn't seen this run: one that arrives while this runs doesn't
+# start it again (the watch fires only while it is stopped), so this run takes it. Each id once a
+# run: a retry waits for the next run.
+seen=" "
+while :; do
+    more=0
+    for id in $(ids_in "$QUEUE/requests" .json); do
+        [[ "$seen" == *" $id "* ]] && continue
+        seen="$seen$id " more=1
+        case "$(state_of "$id")" in
+            new|tries-*) check "$id" ;;
+            approved|approved-tries-*) check "$id" approved ;;
+            held)
+                if [ -e "$QUEUE/decisions/$id.reject" ]; then set_state "$id" rejected; log_stage "$id" decision rejected
+                elif [ -e "$QUEUE/decisions/$id.approve" ]; then set_state "$id" approved; check "$id" approved; fi ;;
+            *) ;;
+        esac
+    done
+    [ "$more" = 1 ] || break
 done
 exit 0

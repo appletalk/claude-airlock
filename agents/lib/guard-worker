@@ -52,21 +52,30 @@ gate() {  # gate <id>
     esac
 }
 
-for id in $(ids_in "$QUEUE/reports" /); do
-    case "$(state_of "$id")" in
-        new|tries-*) gate "$id" ;;
-        quarantined|quarantined-tries-*)
-            [ -e "$QUEUE/decisions/$id.release" ] || continue
-            clear_ws || continue
-            box_step "$QUEUE/decisions:ro $QUEUE/quarantine:ro $QUEUE/answers:rw" release-approved "$id"; rc=$?
-            if [ "$rc" = "$EXIT_OK" ]; then set_state "$id" released-by-operator; log_stage "$id" release "released by the operator"
-            elif [ "$rc" != "$EXIT_ERROR" ]; then log_stage "$id" release "box did not run, will retry" "$rc"
-            else
-                st="$(state_of "$id")"; n=1; case "$st" in *tries-[0-9]*) n=$(( ${st##*tries-} + 1 )) ;; esac
-                if [ "$n" -ge "$TRIES" ]; then set_state "$id" release-failed; log_stage "$id" release "the operator's release failed, gave up" "$rc"
-                else set_state "$id" "quarantined-tries-$n"; log_stage "$id" release "the operator's release failed, will retry" "$rc"; fi
-            fi ;;
-        *) ;;
-    esac
+# Until a pass finds no report it hasn't seen this run (one published while this runs doesn't
+# start it again; see web-worker). Each id once a run.
+seen=" "
+while :; do
+    more=0
+    for id in $(ids_in "$QUEUE/reports" /); do
+        [[ "$seen" == *" $id "* ]] && continue
+        seen="$seen$id " more=1
+        case "$(state_of "$id")" in
+            new|tries-*) gate "$id" ;;
+            quarantined|quarantined-tries-*)
+                [ -e "$QUEUE/decisions/$id.release" ] || continue
+                clear_ws || continue
+                box_step "$QUEUE/decisions:ro $QUEUE/quarantine:ro $QUEUE/answers:rw" release-approved "$id"; rc=$?
+                if [ "$rc" = "$EXIT_OK" ]; then set_state "$id" released-by-operator; log_stage "$id" release "released by the operator"
+                elif [ "$rc" != "$EXIT_ERROR" ]; then log_stage "$id" release "box did not run, will retry" "$rc"
+                else
+                    st="$(state_of "$id")"; n=1; case "$st" in *tries-[0-9]*) n=$(( ${st##*tries-} + 1 )) ;; esac
+                    if [ "$n" -ge "$TRIES" ]; then set_state "$id" release-failed; log_stage "$id" release "the operator's release failed, gave up" "$rc"
+                    else set_state "$id" "quarantined-tries-$n"; log_stage "$id" release "the operator's release failed, will retry" "$rc"; fi
+                fi ;;
+            *) ;;
+        esac
+    done
+    [ "$more" = 1 ] || break
 done
 exit 0
