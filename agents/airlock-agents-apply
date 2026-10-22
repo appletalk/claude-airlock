@@ -770,10 +770,13 @@ if [ -n "${EXTERNAL[nftables]:-}" ]; then
         /^[[:space:]]*flags .*dormant/ { skip = 1; next }
         /^[[:space:]]*chain / { out = 0; open_ = 1; next }
         /type filter hook output / { out = 1; next }
-        out && open_ { print; if ($0 ~ /(^|[[:space:]])(accept|return|jump|goto)([[:space:]]|$)/) open_ = 0 }')" || live=""
+        out && open_ { print; if ($0 ~ /(^|[[:space:]])(accept|return|jump|goto|queue)([[:space:]]|$)/ && !est($0)) open_ = 0 }
+        # accepting replies of connections already made: a new one from an agent never gets that far
+        function est(r) { return r ~ /^[[:space:]]*ct state (\{ )?(established(, ?related)?|related, ?established)( \})? (counter packets [0-9]+ bytes [0-9]+ )?accept[[:space:]]*$/ }')" || live=""
     for r in "${ROLES[@]}"; do
         id=${UID_OF[$r]} s0=${SUB[$r]}
-        grep -qE "meta skuid \{ $id, $s0-$((s0 + SUB_COUNT - 1)) \} counter( packets [0-9]+ bytes [0-9]+)? drop" <<< "$live" \
+        # the whole rule: a match in front of it (an interface, an address, a rate) narrows the drop
+        grep -qE "^[[:space:]]*meta skuid \{ $id, $s0-$((s0 + SUB_COUNT - 1)) \} counter( packets [0-9]+ bytes [0-9]+)? drop( comment \"[^\"]*\")?[[:space:]]*$" <<< "$live" \
             || pause "nftables is managed elsewhere, but the live ruleset has no drop for ${NAME[$r]} (uid $id, subuids $s0+): add the rules from --render's external/etc/airlock-agents.nft"
     done
 fi
@@ -915,7 +918,7 @@ for r in "${ROLES[@]}"; do
     [ -z "$clash" ] || pause "group $clash has a gid inside ${NAME[$r]}'s subordinate ids ($s0+$SUB_COUNT): pick another subuid start"
 done
 # Users from a directory (SSSD, winbind, LDAP) can take uids the local files don't show.
-if { [ -e "$ROOT/etc/sssd/sssd.conf" ] || grep -qsE '^[[:space:]]*passwd:.*[[:space:]](sss|winbind|ldap)([[:space:]]|$)' "$ROOT/etc/nsswitch.conf"; } \
+if { [ -e "$ROOT/etc/sssd/sssd.conf" ] || sed 's/#.*//' "$ROOT/etc/nsswitch.conf" 2>/dev/null | grep -qE '^[[:space:]]*passwd:(.*[[:space:]])?(sss|winbind|ldap|nis|nisplus)([[:space:]]|$)'; } \
         && [ -z "${ACCEPT[id-ranges]:-}" ]; then
     pause "users come from a directory service (SSSD, winbind or LDAP): check the agents' uids and subordinate id ranges don't overlap its ID mapping, then accept id-ranges in agents.conf"
 fi
@@ -1257,9 +1260,9 @@ if [ -z "$ROOT" ]; then
         systemctl is-active --quiet "user@$id.service" 2>/dev/null || continue
         started="$(systemctl show -p ActiveEnterTimestamp --value "user@$id.service" 2>/dev/null)"
         started="$(date -d "$started" +%s 2>/dev/null)" || continue
-        for f in "/etc/systemd/system/user@$id.service.d/10-airlock-agents.conf" "/etc/systemd/system/user-$id.slice.d/10-airlock-agents.conf"; do
-            [ -f "$f" ] && [ "$(stat -c %Y "$f")" -gt "$started" ] && { stale="$stale user@$id.service"; break; }
-        done
+        # (the slice's limits apply on daemon-reload; the manager's sandbox only when it starts)
+        f="/etc/systemd/system/user@$id.service.d/10-airlock-agents.conf"
+        if [ -f "$f" ] && [ "$(stat -c %Y "$f")" -gt "$started" ]; then stale="$stale user@$id.service"; fi
     done
 fi
 if [ -n "$stale" ]; then

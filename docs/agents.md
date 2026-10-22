@@ -82,8 +82,8 @@ To change limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see th
 `--confirm` to apply it. `--check` reports drift; `sudo /usr/local/lib/airlock-agents/host-test.sh`
 checks the whole setup live, as each user.
 
-A changed sandbox (limits, paths) reaches a running agent user when its manager restarts; apply
-names those. Reboot, or `systemctl restart user@<uid>` (it ends that user's sessions).
+Limits apply at once. A changed sandbox (paths, isolation) reaches a running agent user only when
+its manager restarts; apply names those. Reboot, or `systemctl restart user@<uid>` (it ends that user's sessions).
 
 ### When apply stops
 

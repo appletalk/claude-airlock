@@ -251,7 +251,7 @@ def question_findings(text, field):
     # letters): on the folded text, with "dot" words read as dots, each letter of a name may be
     # separated by up to three non-alphanumerics, and the name must start and end a word (so
     # "debug lz cache" doesn't count).
-    spelled = re.sub(r"\s*(\[dot\]|\(dot\)|\[\.\]|\(\.\)|\bdot\b|%2e)\s*", ".", folded(text).lower())
+    spelled = re.sub(r"\s*(\[dot\]|\(dot\)|\[\.\]|\(\.\)|\{\.\}|<\.>|<dot>|\bdot\b|%2e)\s*", ".", folded(text).lower())
     for kind, names in (("our domain", OUR_DOMAINS), ("one of our host names", OUR_HOSTS)):
         for name in names:
             letters = re.sub(r"[^a-z0-9]", "", name)

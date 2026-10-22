@@ -1841,14 +1841,20 @@ EOF
     [ "$status" -eq 1 ]; [[ "$output" == *"no drop for agent (uid 1100"* ]]
     # an output chain, but: an ip table (IPv6 gets through), an accept or jump before the drop, a dormant table
     out() { printf 'table %s filter {\n%b\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n%b\t\tmeta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop\n\t}\n}\n' "$1" "$2" "$3" > "$NFT_RULESET"; }
-    for c in "ip||" "inet||\t\tct state established accept\n" "inet||\t\tjump site\n" "inet|\tflags dormant\n|"; do
+    for c in "ip||" "inet||\t\toifname \"lo\" accept\n" "inet||\t\tjump site\n" "inet||\t\tqueue num 0 bypass\n" "inet|\tflags dormant\n|"; do
         IFS='|' read -r fam fl pre <<< "$c"
         out "$fam" "$fl" "$pre"
         run "$P"
         [ "$status" -eq 1 ] && [[ "$output" == *"no drop for agent (uid 1100"* ]] || { echo "counted ($c): $(cat "$NFT_RULESET")"; return 1; }
     done
-    # the same in a working inet table counts (a log rule before it is fine)
-    out inet "" '\t\tmeta skuid 1100 log prefix "x"\n'
+    # a match in front of the uid narrows the drop: not counted
+    for pre in 'oifname "eth0" ' 'ip daddr 8.8.8.8 ' 'limit rate 1/minute '; do
+        printf 'table inet filter {\n\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n\t\t%smeta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop\n\t}\n}\n' "$pre" > "$NFT_RULESET"
+        run "$P"
+        [ "$status" -eq 1 ] && [[ "$output" == *"no drop for agent (uid 1100"* ]] || { echo "counted: $pre"; return 1; }
+    done
+    # the same in a working inet table counts (a log rule, or accepting established replies, before it is fine)
+    out inet "" '\t\tct state established,related accept\n\t\tmeta skuid 1100 log prefix "x"\n'
     run "$P"
     [[ "$output" != *"no drop for agent (uid 1100"* ]] || { echo "$output"; return 1; }
 }
@@ -1901,6 +1907,9 @@ S
     eval "$(sed -n '/^clean() {/,/^}/p' "$REPO/agents/operator")"
     out="$(printf 'a\xc2\x00\x9b31mb \x1b\xe2\x80\x8e[2Jc \xc2\xe2\x81\xa6\x9d52;c;x\x07d\n' | clean)"
     [ "$out" = "ab c d" ] || { printf '%s' "$out" | od -c; return 1; }
+    # nor can a control between the bytes of a bidi control rebuild it
+    out="$(printf 'x\xe2\x80\xc2\x9b\xaeevil\n' | clean)"
+    [ "$out" = "xevil" ] || { printf '%s' "$out" | od -c; return 1; }
 }
 
 @test "external polkit: a rule of the site's must grant the operator a shell as each user; the toolkit's own doesn't count" {
@@ -1982,7 +1991,10 @@ S
     printf 'passwd: files winbind\n' > "$R/etc/nsswitch.conf"
     run "$P"
     [ "$status" -eq 1 ]; [[ "$output" == *"users come from a directory service"* ]]
-    printf 'passwd: files systemd\n' > "$R/etc/nsswitch.conf"
+    printf 'passwd:sss files\n' > "$R/etc/nsswitch.conf"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"users come from a directory service"* ]]
+    printf 'passwd: files systemd  # not sss\n' > "$R/etc/nsswitch.conf"
     run "$P"
     [[ "$output" != *"users come from a directory service"* ]] || { echo "$output"; return 1; }
     printf 'passwd: files ldap\n' > "$R/etc/nsswitch.conf"

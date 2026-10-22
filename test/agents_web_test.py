@@ -193,6 +193,7 @@ class Check(Tree):
             "dashed domain spelled": "is q-z-x dot i-o up",
             "an address in bracketed dots": "who owns 10[.]9[.]0[.]10",
             "an address in parenthesised dots": "who owns 10(.)9(.)0(.)11",
+            "an address in braced dots": "who owns 10{.}9{.}0{.}12",
             "invisible": "plain​question",
             "control": "bell\x07",
         }
