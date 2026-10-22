@@ -2037,3 +2037,102 @@ S
     grep -qx 'systemctl --user -M agent-web@ start agent-web-worker.path' "$LOG"
     run grep -c "agent-guard@" "$LOG"; [ "$output" = 0 ] || { cat "$LOG"; return 1; }
 }
+
+@test "agent _complete: only well-formed session names and queue ids, states cleaned, filtered per verb" {
+    op_stubs; web_queue
+    REMOTE_OUT=$'agent-session@proj.main.service loaded active running a\nagent-session@ev;\$(x).y.service loaded active running b\nagent-session@o\e]52;c;eA==\ak.z.service loaded active running e\nagent-session@p2.review.service loaded inactive dead c\nagent-session@nodot.service loaded active running d' \
+        run "$O" _complete sessions
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # (the OSC is removed by the cleaning, leaving a plain name; the one with ; and $( is dropped)
+    [ "$output" = "$(printf 'proj.main\tactive/running\nok.z\tactive/running\np2.review\tinactive/dead')" ] || { printf '%s' "$output" | od -c | head; return 1; }
+    req 20261021T120001Z-aaaaa1 'held one';     : > "$Q/held/20261021T120001Z-aaaaa1.json"
+    req 20261021T120002Z-aaaaa2 'answered one'; : > "$Q/answers/20261021T120002Z-aaaaa2.md"
+    req 20261021T120003Z-aaaaa3 'quarantined';  mkdir "$Q/quarantine/20261021T120003Z-aaaaa3"
+    req 20261021T120004Z-aaaaa4 'gave up'
+    echo '{"ts":"x","user":"agent-web","id":"20261021T120004Z-aaaaa4","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
+    printf '{}' > "$Q/requests/not-an-id.json"
+    run "$O" _complete ids approve
+    [ "$output" = "$(printf '20261021T120001Z-aaaaa1\theld')" ] || { echo "approve: $output"; return 1; }
+    run "$O" _complete ids release
+    [ "$output" = "$(printf '20261021T120003Z-aaaaa3\tquarantined')" ] || { echo "release: $output"; return 1; }
+    run "$O" _complete ids retry
+    [ "$output" = "$(printf '20261021T120004Z-aaaaa4\tfailed (check: failed, gave up)')" ] || { echo "retry: $output"; return 1; }
+    run "$O" _complete ids show
+    [ "$(printf '%s\n' "$output" | wc -l)" = 4 ]
+    [ "$(printf '%s\n' "$output" | head -1 | cut -f1)" = 20261021T120004Z-aaaaa4 ]   # newest first
+    [[ "$output" != *not-an-id* ]]
+    run "$O" _complete nonsense
+    [ "$status" -ne 0 ]
+}
+
+# A stand-in operator command for the completion scripts: `agent _complete <what> [verb]` answers
+# with fixed names.
+completion_stub() {
+    printf 'AGENTS_COMMAND=agent\n' > "$T/c.env"
+    cat > "$T/bin/agent" <<'S'
+#!/bin/bash
+[ "$1" = _complete ] || exit 1
+case "$2 ${3:-}" in
+    "sessions ") printf 'proj.main\tactive/running\np2.review\tinactive/dead\n' ;;
+    "web-sessions ") printf 'main\trunning\n' ;;
+    "ids approve") printf '20261021T120001Z-aaaaa1\theld\n' ;;
+    "ids show") printf '20261021T120001Z-aaaaa1\theld\n20261021T120002Z-aaaaa2\tanswered\n' ;;
+esac
+S
+    chmod +x "$T/bin/agent"
+}
+
+@test "zsh completion: registered for the site's command; sessions, web verbs and filtered ids offered" {
+    command -v zsh >/dev/null || skip "no zsh"
+    completion_stub
+    cat > "$T/z.zsh" <<'Z'
+compdef() { print -r -- "compdef $*" }
+_describe() { local a=${@[-1]}; print -rl -- "${(@P)a}" }
+_message() { print -r -- "message: $*" }
+_values() { print -r -- "values: ${@[2,-1]}" }
+source $REPO/agents/share/completion.zsh
+t() { words=("$@"); CURRENT=$#; _airlock_agents }
+print '== top'; t agent ''
+print '== attach'; t agent attach ''
+print '== approve'; t agent web approve ''
+print '== show'; t agent web show ''
+print '== web'; t agent web ''
+print '== login'; t agent web login ''
+Z
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" REPO="$REPO" PATH="$T/bin:$PATH" zsh -f "$T/z.zsh"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'compdef _airlock_agents agent' <<< "$output"
+    grep -qx 'attach:join a session' <<< "$output"
+    sed -n '/== attach/,/== approve/p' <<< "$output" | grep -qx 'proj.main:active/running'
+    sed -n '/== attach/,/== approve/p' <<< "$output" | grep -qx 'p2.review:inactive/dead'
+    [ "$(sed -n '/== approve/,/== show/p' <<< "$output" | grep -c 'T')" = 1 ]
+    sed -n '/== approve/,/== show/p' <<< "$output" | grep -qx '20261021T120001Z-aaaaa1:held'
+    sed -n '/== show/,/== web/p' <<< "$output" | grep -qx '20261021T120002Z-aaaaa2:answered'
+    sed -n '/== web/,/== login/p' <<< "$output" | grep -qx 'main:running'
+    grep -qx 'values: research gate chat' <<< "$output"
+}
+
+@test "zsh completion: a command name in agents.env that isn't a plain name is not registered" {
+    command -v zsh >/dev/null || skip "no zsh"
+    printf 'AGENTS_COMMAND=agent;rm -rf x\nAGENTS_COMMAND=$(touch %s)\n' "$T/pwned" > "$T/c.env"
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" REPO="$REPO" zsh -f -c 'compdef() { print -r -- "compdef $*" }; source $REPO/agents/share/completion.zsh'
+    [ "$status" -eq 0 ]; [ -z "$output" ] || { echo "$output"; return 1; }
+    [ ! -e "$T/pwned" ]
+}
+
+@test "bash completion: registered for the site's command; sessions, web verbs and filtered ids offered" {
+    completion_stub
+    run env AIRLOCK_AGENTS_ENV="$T/c.env" REPO="$REPO" PATH="$T/bin:$PATH" bash -c '
+        source "$REPO/agents/share/completion.bash"
+        complete -p agent
+        t() { COMP_WORDS=("$@"); COMP_CWORD=$(($# - 1)); _airlock_agents; echo "${COMPREPLY[*]}"; }
+        t agent at; t agent attach ""; t agent web approve ""; t agent web show 2026; t agent web ""; t agent web login g'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "${lines[0]}" = "complete -F _airlock_agents agent" ]
+    [ "${lines[1]}" = attach ]
+    [ "${lines[2]}" = "proj.main p2.review" ]
+    [ "${lines[3]}" = 20261021T120001Z-aaaaa1 ]
+    [ "${lines[4]}" = "20261021T120001Z-aaaaa1 20261021T120002Z-aaaaa2" ]
+    [[ "${lines[5]}" == *"approve"*"main"* ]]
+    [ "${lines[6]}" = gate ]
+}

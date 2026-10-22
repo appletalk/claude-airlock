@@ -78,6 +78,15 @@ claude-agent attach myproject
 | `claude-agent update` | give the agents your current claude-airlock |
 | `claude-agent web ...` | web research (below) |
 
+Tab completion (sessions, web commands, the queue's ids by state): add to your `~/.zshrc`, after
+`compinit`, or to `~/.bashrc` with `completion.bash`:
+
+```
+source /usr/local/share/airlock-agents/completion.zsh
+```
+
+Source this root-owned copy, never one in a checkout a box can write.
+
 To change limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see the change and
 `--confirm` to apply it. `--check` reports drift; `sudo /usr/local/lib/airlock-agents/host-test.sh`
 checks the whole setup live, as each user.

@@ -413,6 +413,38 @@ case "$cmd" in
     web)
         [ -n "$WEB" ] || die "no web research here (agents.conf has no web and guard users)"
         web "$@" ;;
+    _complete)
+        # For the shell completion (share/completion.zsh, .bash): names only, one per line, a tab,
+        # then a short description. Each name is checked against its shape and every description
+        # cleaned, so nothing from a session or the queue reaches the terminal raw.
+        case "${1:-}" in
+            sessions)
+                octl list-units --all --full --no-legend --plain "$UNIT*.service" 2>/dev/null \
+                    | awk -v pre="$UNIT" '{ u = $1; if (index(u, pre) != 1 || !sub(/\.service$/, "", u)) next
+                                           printf "%s\t%s/%s\n", substr(u, length(pre) + 1), $3, $4 }' \
+                    | grep -aE $'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\t[a-z-]+/[a-z-]+$' || true ;;
+            web-sessions)
+                [ -n "$WEB" ] || exit 0
+                web_running | while IFS= read -r n; do name_ok "$n" && printf '%s\trunning\n' "$n"; done || true ;;
+            ids)
+                # newest first, at most 50; filtered by what the verb (if any) accepts
+                [ -n "$WEB" ] || exit 0
+                verb="${2:-show}"
+                for f in "$QUEUE"/requests/*.json; do
+                    [ -e "$f" ] || continue
+                    id="${f##*/}"; id="${id%.json}"
+                    [[ "$id" =~ $ID_RE ]] && printf '%s\n' "$id"
+                done | sort -r | head -50 | while IFS= read -r id; do
+                    st="$(web_state "$id")"
+                    case "$verb:$st" in
+                        show:*|approve:held|reject:held|release:quarantined) ;;
+                        retry:failed*|retry:changed*|"retry:gate failed"*|"retry:quarantined, release failed"*) ;;
+                        *) continue ;;
+                    esac
+                    printf '%s\t%s\n' "$id" "$(printf '%s' "$st" | clean | tr -cd '[:print:]' | cut -c1-60)"
+                done ;;
+            *) die "usage: $CMD _complete sessions|web-sessions|ids [verb]" ;;
+        esac ;;
     -h|--help|help)
         sed -n '2,/^set -euo/p' "$0" | sed "\$d; s/^# \\{0,1\\}//; s/<command>/$CMD/g" ;;
     *) die "unknown command $cmd (see $CMD --help)" ;;

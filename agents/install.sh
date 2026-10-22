@@ -130,7 +130,7 @@ put 0755 "$SRC/host-test.sh" "$LIBDIR/host-test.sh"
 put 0644 "$SRC/lib/worker-common.sh" "$LIBDIR/worker-common.sh"
 put 0755 "$SRC/operator" "$LIBDIR/operator"
 put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
-for f in containers.conf tmux.conf tmux-clipboard.conf managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
+for f in containers.conf tmux.conf tmux-clipboard.conf completion.zsh completion.bash managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
 for f in "$SRC"/box/* "$SRC"/templates/*; do d=${f%/*}; put 0644 "$f" "$SHARE/${d##*/}/${f##*/}"; done
 put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
 # The execute-only copies' refresh after package upgrades: whichever package manager this is.

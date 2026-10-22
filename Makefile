@@ -21,7 +21,7 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bun
                  scripts/airlock-doctor.sh lib/host-dns.sh \
                  scripts/image-smoke.sh scripts/validator-checks.sh \
                  scripts/run-tests.sh \
-                 agents/install.sh agents/airlock-agents-apply agents/operator \
+                 agents/install.sh agents/airlock-agents-apply agents/operator agents/share/completion.bash \
                  agents/lib/session-run agents/lib/session-stop agents/lib/web-session-run \
                  agents/lib/web-worker agents/lib/guard-worker agents/lib/worker-common.sh \
                  agents/lib/nodump-refresh agents/host-test.sh
