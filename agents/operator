@@ -203,7 +203,7 @@ except Exception:
 last_stage() {  # last_stage <web>|<guard> <id>: read like any queue file (a FIFO or link a worker
     # user left there must not hang or redirect it), at most 64 MB
     { qread 67108864 "log/$1/stages.jsonl" || true; } | grep -aF "\"id\":\"$2\"" | tail -1 \
-        | sed -n 's/.*"stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1: \2/p'
+        | LC_ALL=C sed -n 's/^.*"stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*$/\1: \2/p'
 }
 # One word for where an id stands, from what the operator can see. (STAGE_WEB and STAGE_GUARD, when
 # set, are the id's last stage lines, read once for many ids by the caller.)
@@ -269,18 +269,22 @@ def read_log(user):
         return data
     except OSError:
         return b""
-STAGE = re.compile(rb""".*"stage":"([a-z]*)","result":"([a-z0-9 ,;()\x27-]*)".*""", re.S)
+STAGE = re.compile(rb""".*"stage":"([a-z]*)","result":"([a-z0-9 ,;()\x27-]*)".*""")
 IDREF = re.compile(rb"\x22id\x22:\x22([0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})\x22")
 def last_stages(user, want):
-    last = {}
-    for line in read_log(user).split(b"\n"):
-        ids = set(m.decode() for m in IDREF.findall(line)) & want
-        if not ids:
+    # Each id reference in order (the last one wins, as last_stage takes the last line), its
+    # line found around it: lines with no id cost nothing, however many there are.
+    data, last, seen = read_log(user), {}, {}
+    for m in IDREF.finditer(data):
+        i = m.group(1).decode()
+        if i not in want:
             continue
-        m = STAGE.fullmatch(line)
-        st = (m.group(1) + b": " + m.group(2)).decode() if m else ""
-        for i in ids:
-            last[i] = st
+        a = data.rfind(b"\n", 0, m.start()) + 1
+        if a not in seen:
+            b = data.find(b"\n", m.end())
+            st = STAGE.fullmatch(data, a, len(data) if b < 0 else b)
+            seen = {a: (st.group(1) + b": " + st.group(2)).decode() if st else ""}
+        last[i] = seen[a]
     return last
 reqs = names("requests", ".json")
 w = g = {}

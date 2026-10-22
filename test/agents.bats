@@ -2103,6 +2103,11 @@ with open(q + "/log/agent-web/stages.jsonl", "w") as f:
     f.write('{"id":"20261021T120004Z-aaaaa4","user":"agent-web","stage":"check","result":"failed, gave up"}\n')
 for i in range(20000):
     open(q + "/held/20990101T%06dZ-eeeeee.json" % i, "w").close()
+# the guard's log: millions of tiny lines (no id on them: they must cost nothing)
+import os
+os.makedirs(q + "/log/agent-guard", exist_ok=True)
+with open(q + "/log/agent-guard/stages.jsonl", "wb") as f:
+    f.write(b"a\n" * 5000000)
 P
     for v in approve retry show; do
         SECONDS=0; out="$("$O" _complete ids "$v")"
@@ -2112,6 +2117,19 @@ P
     [ "$out_approve" = "$(printf '20261021T120001Z-aaaaa1\theld')" ] || { echo "approve: $out_approve"; return 1; }
     [ "$out_retry" = "$(printf '20261021T120004Z-aaaaa4\tfailed (check: failed, gave up)')" ] || { echo "retry: $out_retry"; return 1; }
     [[ "$("$O" web ls)" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]]
+    for v in release; do SECONDS=0; "$O" _complete ids "$v" >/dev/null; [ "$SECONDS" -le 2 ] || { echo "$v took ${SECONDS}s"; return 1; }; done
+}
+
+@test "agent web ls: a stage line is read whole, in any locale (a byte before it can't leak into the state)" {
+    op_stubs; web_queue
+    req 20261021T120005Z-aaaaa5 q
+    printf 'x gave up \xff{"id":"20261021T120005Z-aaaaa5","stage":"check","result":"ok"}\n' >> "$Q/log/agent-web/stages.jsonl"
+    for l in C C.UTF-8; do
+        out="$(LANG=$l LC_ALL=$l "$O" web ls)"
+        [[ "$out" == *"20261021T120005Z-aaaaa5  researching (check: ok)"* ]] || { echo "$l: $out"; return 1; }
+    done
+    run "$O" _complete ids retry
+    [ -z "$output" ]
 }
 
 # A stand-in operator command for the completion scripts: `agent _complete <what> [verb]` answers
@@ -2141,8 +2159,9 @@ case "$2 ${3:-}" in
     "ids retry") printf 'x$(touch %s)\tbad\nok-name\tfine\n*\tglob\n~root\ttilde\nc:d\tcolon\n' "$PWNED" ;;
 esac
 S
-    chmod 0755 "$AIRLOCK_AGENTS_BINDIR/operator"
     export PWNED="$T/pwned"
+    sed -i "s#\"\$PWNED\"#$PWNED#" "$AIRLOCK_AGENTS_BINDIR/operator"    # (the call gets a fresh environment)
+    chmod 0755 "$AIRLOCK_AGENTS_BINDIR/operator"
     # the same name planted where an agent could write it: never run by a Tab
     mkdir -p "$T/agentdir"; printf '#!/bin/sh\ntouch %s\n' "$T/planted-ran" > "$T/agentdir/agent"; chmod +x "$T/agentdir/agent"
 }
@@ -2207,6 +2226,17 @@ Z
     mkdir -p "$T/cwd"; printf 'touch %s\n' "$T/via-link" > "$T/cwd/_complete"
     run env T="$T" bash -c 'cd "$T/cwd"; source "$T/completion.bash"; COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "[${COMPREPLY[*]}]"'
     [ "$output" = "[]" ]; [ ! -e "$T/via-link" ]
+    # the script Tab runs gets a fresh environment: nothing the operator's shell exports reaches it
+    rm "$AIRLOCK_AGENTS_BINDIR/operator"
+    printf '#!/bin/bash\nenv > %s/stub-env\nprintf "proj.main\\tactive/running\\n"\n' "$T" > "$AIRLOCK_AGENTS_BINDIR/operator"
+    chmod 0755 "$AIRLOCK_AGENTS_BINDIR/operator"
+    run env T="$T" AIRLOCK_AGENTS_ENV=/x BASH_ENV=/x SHELLOPTS=braceexpand bash -c '
+        f() { :; }; export -f f
+        source "$T/completion.bash"; COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "[${COMPREPLY[*]}]"'
+    [ "$output" = "[proj.main]" ] || { echo "$output"; return 1; }
+    run grep -cE '^(AIRLOCK_AGENTS_ENV=|BASH_ENV=|SHELLOPTS=|BASH_FUNC_|T=)' "$T/stub-env"
+    [ "$output" = 0 ] || { cat "$T/stub-env"; return 1; }
+    grep -qx 'PATH=/usr/bin:/bin' "$T/stub-env"
 }
 
 @test "zsh completion: registered under the user's BASH_REMATCH and KSH_ARRAYS too" {

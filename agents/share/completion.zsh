@@ -4,9 +4,10 @@
 # The command's name is the site's (agents.env). Names are offered only for the bare command
 # name as typed, from the installed operator script (`operator _complete`, which checks and cleans
 # them), never from the word typed: `./<command> <Tab>` in a directory an agent can write must not
-# run that file. Both paths are fixed here, and the script runs without the environment variables
-# that could steer it; it runs only while it and every directory above it are root's, no links,
-# and writable by no one else (a sticky directory above its own excepted). Each name is checked
+# run that file. Both paths are fixed here; the script runs in a fresh environment (a short
+# allowlist, nothing inherited that could steer bash or it) and through absolute paths, and only
+# while it and every directory above it are root's, no links, and writable by no one else (a
+# sticky directory above its own excepted). Each name is checked
 # again here, descriptions cut to printable ASCII.
 typeset -g _airlock_agents_env=/etc/claude-airlock/agents/agents.env
 typeset -g _airlock_agents_bin=/usr/local/lib/airlock-agents/operator
@@ -31,18 +32,18 @@ _airlock_agents_items() {
     local bin=$_airlock_agents_bin line n d f owner mode
     local -a items
     # only the bare name, and only a plain file that it and every directory above it pass
-    [[ $words[1] == $_airlock_agents_cmd && -f $bin && ! -L $bin && -x $bin ]] || return 1
+    [[ $words[1] == $_airlock_agents_cmd && $bin == /* && -f $bin && ! -L $bin && -x $bin ]] || return 1
     f=$bin
     while :; do
         [[ ! -L $f ]] || return 1
-        owner=$(command stat -c %u -- $f 2>/dev/null) mode=$(command stat -c %a -- $f 2>/dev/null)
+        owner=$(/usr/bin/stat -c %u -- $f 2>/dev/null) mode=$(/usr/bin/stat -c %a -- $f 2>/dev/null)
         [[ " $_airlock_agents_owners " == *" $owner "* && $mode == <-> ]] || return 1
         (( (8#$mode & 8#022) == 0 )) || { [[ $f != $bin && $f != ${bin:h} ]] && (( 8#$mode & 8#1000 )); } || return 1
         [[ $f == / ]] && break
         f=${f:h}
     done
-    for line in "${(@f)$(command env -u AIRLOCK_AGENTS_ENV -u AGENTS_NODUMP_DIR -u BASH_ENV -u ENV \
-                         timeout 3 $bin _complete "$@" </dev/null 2>/dev/null | command head -n 200)}"; do
+    for line in "${(@f)$(/usr/bin/env -i PATH=/usr/bin:/bin HOME=$HOME USER=$USER LOGNAME=$LOGNAME LANG=C.UTF-8 \
+                         /usr/bin/timeout 3 $bin _complete "$@" </dev/null 2>/dev/null | /usr/bin/head -n 200)}"; do
         n=${line%%$'\t'*} d=${line#*$'\t'}
         [[ $line == *$'\t'* && $n =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$' ]] || continue
         items+=("$n:${${d//[^ -~]/}[1,60]}")
