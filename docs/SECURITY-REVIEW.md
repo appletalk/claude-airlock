@@ -32,15 +32,15 @@ is explicit and complete.
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
-| 1 | IP-based allowlist ignores CDN/host co-tenancy (SNI not inspected) | Medium–High | **Documented** (README) |
-| 2 | Poisoned workspace files execute on the host (git hooks, direnv, build scripts) | Medium–High | **Documented** (README) |
+| 1 | IP-based allowlist ignores CDN/host co-tenancy (SNI not inspected) | Medium–High | **Documented** (security model); avoidable with the proxy posture |
+| 2 | Poisoned workspace files execute on the host (git hooks, direnv, build scripts) | Medium–High | **Documented** (security model); git config and hooks bound read-only |
 | 3 | OAuth token + secrets exposed on the host process table via `-e KEY=VALUE` | Medium | **Fixed** — `--env-file` (0600) |
-| 4 | The long-lived OAuth token is itself exfiltratable over the accepted DNS channel | Medium | **Documented** (README) |
-| 5 | Supply-chain: image build trusts `curl \| bash` + unpinned tarballs/base | Medium | Open — recommended |
+| 4 | The long-lived OAuth token is itself exfiltratable over the accepted DNS channel | Medium | **Documented** (security model) |
+| 5 | Supply-chain: image build trusts `curl \| bash` + unpinned tarballs/base | Medium | **Mostly fixed**; base image is a tag, not a digest |
 | 6 | No resource limits — a box can DoS the host | Low | **Fixed** — `--pids-limit`/`--memory` |
 | 7 | Path→slug mapping is not injective (state-dir collisions) | Low | Open — deferred (not cheap) |
-| 8 | Stale images = unpatched CVEs; no refresh guidance | Low | Partly documented (SECURITY.md) |
-| 9 | Literal secrets stored plaintext + land in shell history when set | Low | **Documented** (README) |
+| 8 | Stale images = unpatched CVEs; no refresh guidance | Low | **Fixed**: weekly package refresh, `make refresh` |
+| 9 | Literal secrets stored plaintext + land in shell history when set | Low | **Documented** (configuration docs) |
 | 10 | No `SECURITY.md` / disclosure policy on a public repo | Info | **Fixed** — `SECURITY.md` added |
 | A | DNS exfiltration remains open (narrowed, not closed) | Accepted | Documented |
 | B | Shared `memory/` is an influence channel out of the box | Accepted | Documented |
@@ -55,6 +55,27 @@ is explicit and complete.
 > "Security model" section, and **10** is addressed by the new root `SECURITY.md`. Findings
 > **5, 7, 8** remain open; see their entries and the recommendations for why 7 in
 > particular was deferred rather than rushed.
+
+> **Status update (2026-10-22).** Checked against the code at that date:
+>
+> - **1:** the `airlock egress proxy` posture gives a box no network at all; a host proxy
+>   decides by name, so an SNI-aware proxy closes this gap. The in-box IP firewall is
+>   unchanged. See [egress-proxy.md](egress-proxy.md).
+> - **2:** `AIRLOCK_GIT_RO=1` (the default) binds the git config and hooks of read-write
+>   repos read-only in the box. `.claude/`, `.mcp.json`, `.envrc` and build scripts remain
+>   open. See [security-model.md](security-model.md#files-a-box-writes-can-run-on-the-host).
+> - **5:** the Claude Code installer is vendored (`image/claude-install.sh`, which verifies
+>   the binary against the release manifest), and Node and every other upstream download is
+>   pinned by version and sha256. `debian:trixie-slim` is still pulled by tag, not digest:
+>   each install re-pulls the tag so Debian's rebuilds of it are picked up.
+> - **7:** still open. The slug is still `sed 's#[^a-zA-Z0-9]#-#g; s#^-*##'`.
+> - **8:** `make install-airlock` rebuilds on a new Claude Code release and refreshes the
+>   Debian packages weekly; `make refresh` forces it, and `airlock doctor` shows when they
+>   were last refreshed.
+>
+> The README's "Security model" section referred to below now lives in
+> [security-model.md](security-model.md). A later review is in
+> [security-review-2026-09-22.md](security-review-2026-09-22.md).
 
 ---
 
