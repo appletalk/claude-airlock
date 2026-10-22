@@ -369,6 +369,46 @@ _airlock_client_manifest() {
   done < "$m"
   _CLIENT_HOSTS="$out"
 }
+# The box CLAUDE.md section for the manifest's hosts: how to reach each one and what its rules
+# allow, so boxed Claude neither tries https:// (403 "use http://") nor guesses at the limits.
+# Only validated manifest fields go in (host names, rule names). Prints nothing for no hosts.
+_airlock_box_directives() {
+  local host rules cred
+  [ -n "$_CLIENT_HOSTS" ] || return 0
+  cat <<'EOF'
+
+## Hosts behind the egress proxy (written at launch from the proxy's manifest)
+
+Reach these with **plain `http://<host>/` URLs**: the proxy on the host does the TLS, checks
+each request against the host's rules and adds any credential itself. `https://` to them gets
+403 "use http://". Never put a token for them in the box, and never ask for one: there is
+nothing for it to do. A 403 from `airlock-envoy: refused by the ... rules` is the rule working,
+not an outage: say what was refused instead of retrying another way.
+
+EOF
+  local unset
+  while read -r host rules cred; do
+    [ -n "$host" ] || continue
+    unset=""
+    [ "$cred" = yes ] || unset=" (not set up here: the proxy holds no credential for it)"
+    # shellcheck disable=SC2016  # literal backquotes: Markdown code spans
+    printf -- '- **`%s`** (rules `%s`, %s): ' "$host" "$rules" \
+      "$([ "$cred" = yes ] && echo "the proxy adds the credential" || echo "no credential")"
+    case "$rules" in
+      victoria-metrics) echo "Prometheus-style query API, reads only: \`curl 'http://$host/api/v1/query?query=up'\`; also query_range, series, labels, label values, metadata." ;;
+      victoria-logs) echo "LogsQL, reads only: \`curl 'http://$host/select/logsql/query' -d 'query=...'\` (also hits, stats_query and the rest under /select/logsql/)." ;;
+      git) echo "git fetch and push over http:// (remotes are rewritten in the box). The server's branch protection decides what a push may touch." ;;
+      git-read) echo "git fetch only (remotes are rewritten in the box); a push is refused." ;;
+      forgejo) echo "Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`tea\` logged in$unset. API reads, PR create and edit, comments, labels, reviewers. Refused: merge, approve, files written through the API, branch and tag API, releases, settings, keys, deletes, the web UI." ;;
+      github-api) echo "\`gh\` is set up, no token needed$unset. Reads, issues, PR create and edit, comments, labels, reviewers. Refused: merge, approve, auto-merge, settings, hooks, keys, deletes, Projects beyond the pinned boards." ;;
+      github-issues) echo "\`gh\` is set up, no token needed$unset. Reads, issues, comments, labels, assignees. Refused: PR create and edit, merge, approve, settings, deletes." ;;
+      kubernetes-read) echo "\`kubectl\` is set up read-only, KUBECONFIG is set$unset: get, describe, list, watch, logs, events, top, \`auth can-i\`, \`auth whoami\`. Refused: every write, exec, attach, cp, port-forward, proxy. What it may read is the token's RBAC. \"the server has asked for the client to provide credentials\" means the proxy's token expired: ask the human to renew it." ;;
+      any) echo "any method and path; nothing is checked beyond the host." ;;
+      *) echo "rules the launcher doesn't know: expect 403 for anything outside them." ;;
+    esac
+  done <<< "$_CLIENT_HOSTS"
+}
+
 # The plain-HTTP hosts git goes to (rules that serve git), one per line.
 _airlock_client_git_hosts() { awk '$2 == "git" || $2 == "git-read" || $2 == "forgejo" || $2 == "any" { print $1 }' <<< "$_CLIENT_HOSTS"; }
 
@@ -2525,6 +2565,15 @@ if [ -n "$EGRESS_PROXY" ]; then
   args+=( -e "AIRLOCK_EGRESS_PROXY=$_kc" )
   # Plain-HTTP hosts behind it: their git remotes and gh are pointed at http:// below.
   _airlock_client_manifest "$_kc" || true
+  # ...and the box's CLAUDE.md, seeded above, says how to reach them and what each allows.
+  if [ -n "$_CLIENT_HOSTS" ] && [ -f "$_repo/config/box-CLAUDE.md" ]; then
+    _bd="$(_airlock_private_tmp)" || exit 1
+    if ! { cat "$_repo/config/box-CLAUDE.md" && _airlock_box_directives; } > "$_bd" \
+       || ! chmod --reference="$_repo/config/box-CLAUDE.md" "$_bd"; then
+      rm -f "$_bd"; echo "claude-airlock: could not write the box CLAUDE.md; not launching" >&2; exit 1
+    fi
+    _airlock_place "$_bd" "$STATE_DIR/dot-claude/CLAUDE.md"
+  fi
 fi
 
 # Host git must not read instructions a box wrote. In each read-write root (the workspace and

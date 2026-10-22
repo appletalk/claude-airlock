@@ -541,6 +541,10 @@ If the proxy writes a client manifest next to its socket (`<name>.clients` besid
   takes its place (the launch says so). When the proxy's token has expired, kubectl reports
   "the server has asked for the client to provide credentials"; renew it on the host.
 - **curl and the rest**: use `http://<host>/` URLs; the proxy variables already point there.
+- **The box's CLAUDE.md**: the seeded conventions get a closing section listing these hosts,
+  how to reach each (`http://`, never `https://`), what its rules allow and refuse, and which
+  client is set up for it, so boxed Claude neither tries `https://` nor guesses at the limits.
+  Written each launch from the manifest; no hosts (or no usable manifest), no section.
 
 The clients themselves (git, gh, tea, kubectl) are in `:dev` and the images built on it. A `:base`
 box gets the same config files but has no client to read them.

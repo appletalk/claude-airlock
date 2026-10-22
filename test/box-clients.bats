@@ -416,3 +416,45 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   refute arg_matches 'airlock-box/kube'
   refute arg_matches '^KUBECONFIG=/etc/airlock-box'
 }
+
+# The box CLAUDE.md: the seeded conventions, plus a section on the proxy's hosts when there are any.
+box_md() { cat "$(state_dir "$P")/dot-claude/CLAUDE.md"; }
+seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
+
+@test "box CLAUDE.md: the manifest's hosts, how to reach each and what its rules allow, after the seeded conventions" {
+  manifest 'metrics.example.org 443 victoria-metrics no\ngit.example.org 443 forgejo yes\napi.github.com 443 github-issues no\n10.0.0.10 6443 kubernetes-read yes\nx.example.org 443 newrules no\n'
+  run _launch "$P"
+  launched
+  md="$(box_md)"
+  [[ "$md" == "$(seed_md)"* ]]
+  [ "$(grep -c '^## Hosts behind the egress proxy' <<< "$md")" = 1 ]
+  grep -qF "plain \`http://<host>/\` URLs" <<< "$md"
+  grep -qF -- "- **\`metrics.example.org\`** (rules \`victoria-metrics\`, no credential): Prometheus-style" <<< "$md"
+  grep -qF "curl 'http://metrics.example.org/api/v1/query?query=up'" <<< "$md"
+  grep -qF -- "- **\`git.example.org\`** (rules \`forgejo\`, the proxy adds the credential): Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`tea\` logged in. API" <<< "$md"
+  grep -qF "\`gh\` is set up, no token needed (not set up here: the proxy holds no credential for it). Reads" <<< "$md"
+  grep -qF -- "- **\`10.0.0.10\`** (rules \`kubernetes-read\`, the proxy adds the credential): \`kubectl\` is set up read-only, KUBECONFIG is set: get" <<< "$md"
+  grep -qF "rules the launcher doesn't know" <<< "$md"
+  [ "$(grep -c '^- \*\*`' <<< "$md")" = 5 ]
+}
+
+@test "box CLAUDE.md: no manifest, a rejected one, or not the proxy posture: exactly the seeded file" {
+  _launch "$P" >/dev/null 2>&1 || true
+  [ "$(box_md)" = "$(seed_md)" ]
+  manifest 'Bad.example.org 443 git yes\n'
+  _launch "$P" >/dev/null 2>&1 || true
+  [ "$(box_md)" = "$(seed_md)" ]
+  manifest 'git.example.org 443 git yes\n'
+  _launch "$P" egress minimal >/dev/null
+  _launch "$P" >/dev/null 2>&1 || true
+  [ "$(box_md)" = "$(seed_md)" ]
+}
+
+@test "box CLAUDE.md: a launch with hosts, then one without: the section does not linger" {
+  manifest 'git.example.org 443 git yes\n'
+  _launch "$P" >/dev/null 2>&1 || true
+  grep -q '^## Hosts behind the egress proxy' <<< "$(box_md)"
+  manifest ''
+  _launch "$P" >/dev/null 2>&1 || true
+  [ "$(box_md)" = "$(seed_md)" ]
+}
