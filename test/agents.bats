@@ -111,7 +111,9 @@ echo "systemctl $*" >> "$LOG"
 S
     cat > "$T/bin/nft" <<'S'
 #!/bin/bash
-[ "$1" = list ] && { [ -n "${NFT_LOADED:-}" ]; exit; }
+# nft list: the live table, here the installed file (NFT_LOADED) or nothing loaded
+[ "$1" = -n ] && shift
+if [ "$1" = list ]; then [ -n "${NFT_LOADED:-}" ] && cat "$AIRLOCK_AGENTS_ROOT/etc/airlock-agents.nft"; exit; fi
 echo "nft $*" >> "$LOG"
 S
     # setpriv: record the identity, run the command (as the test user).
@@ -1015,15 +1017,17 @@ ProtectProc=invisible
 Environment=CONTAINERS_CONF_OVERRIDE=/usr/local/share/airlock-agents/containers.conf
 ProtectHome=tmpfs
 BindPaths=/home/agent /run/user/1100
+ReadOnlyPaths=-/var/spool/cron -/var/spool/at -/var/spool/atjobs
 InaccessiblePaths=-/run/dbus/system_bus_socket
 InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
-    for spec in agent-web:1101:"-/srv/agent-web/held -/srv/agent-web/reports -/srv/agent-web/log/agent-web":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1102.slice" \
-                agent-guard:1102:"-/srv/agent-web/answers -/srv/agent-web/quarantine -/srv/agent-web/log/agent-guard":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1101.slice"; do
-        IFS=: read -r u n rw cg <<<"$spec"
+    for spec in agent-web:1101:"-/srv/agent-web/held -/srv/agent-web/reports -/srv/agent-web/log/agent-web":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1102.slice":"user@1100.service user@1102.service" \
+                agent-guard:1102:"-/srv/agent-web/answers -/srv/agent-web/quarantine -/srv/agent-web/log/agent-guard":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1101.slice":"user@1100.service user@1101.service"; do
+        IFS=: read -r u n rw cg af <<<"$spec"
         want="[Unit]
 RequiresMountsFor=/home/$u
+After=$af
 [Service]
 PrivateNetwork=yes
 PrivateTmp=yes
@@ -1035,6 +1039,7 @@ ProtectHome=tmpfs
 BindPaths=/home/$u /run/user/$n
 ProtectSystem=strict
 ReadWritePaths=/home/$u /run/user/$n $rw
+ReadOnlyPaths=-/var/spool/cron -/var/spool/at -/var/spool/atjobs
 InaccessiblePaths=-/run/dbus/system_bus_socket
 InaccessiblePaths=$cg
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
@@ -1585,3 +1590,102 @@ S
     [ "$(grep 'octl list-units' "$REPO/agents/operator" | grep -c -- ' --full ')" = "$n" ] || { grep 'octl list-units' "$REPO/agents/operator"; return 1; }
 }
 
+
+# ---- review fixes: ownership, cron/at, nft reloads, image dirs, the FIFO stage log ----------
+
+@test "a file it would write that isn't its own is refused, never overwritten; nothing changes" {
+    mkdir -p "$R/usr/local/bin"; echo '#!/bin/sh' > "$R/usr/local/bin/agent"      # someone else's tool
+    run "$P" --confirm
+    [ "$status" -ne 0 ]; [[ "$output" == *"not this toolkit's"*"/usr/local/bin/agent"* ]] || { echo "$output"; return 1; }
+    [ "$(cat "$R/usr/local/bin/agent")" = '#!/bin/sh' ]; [ ! -s "$LOG" ]
+    # its own (its header) is fine to replace
+    printf '#!/bin/sh\n# Rendered by airlock-agents-apply: old\n' > "$R/usr/local/bin/agent"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'exec /usr/local/lib/airlock-agents/operator' "$R/usr/local/bin/agent"
+}
+
+@test "another drop-in for an agent user's manager or slice is refused (it could override the sandbox)" {
+    mkdir -p "$R/etc/systemd/system/user@1101.service.d"; echo '[Service]' > "$R/etc/systemd/system/user@1101.service.d/10-old.conf"
+    run "$P"
+    [ "$status" -ne 0 ]; [[ "$output" == *"/etc/systemd/system/user@1101.service.d/10-old.conf"* ]]
+    [ ! -s "$LOG" ]
+}
+
+@test "an existing directory keeps its mode; a missing one is made 0755" {
+    mkdir -p "$R/etc/polkit-1/rules.d"; chmod 0750 "$R/etc/polkit-1/rules.d"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(/usr/bin/stat -c %a "$R/etc/polkit-1/rules.d")" = 750 ]
+    [ "$(/usr/bin/stat -c %a "$R/etc/tmpfiles.d")" = 755 ]
+}
+
+@test "cron and at: each agent user is denied once (a second apply adds nothing); an allow list naming one is refused" {
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    for f in cron at; do [ "$(sort "$R/etc/$f.deny" | tr '\n' ' ')" = "agent agent-guard agent-web " ]; done
+    run "$P" --confirm
+    for f in cron at; do [ "$(wc -l < "$R/etc/$f.deny")" = 3 ]; done
+    echo agent-web > "$R/etc/cron.allow"
+    run "$P" --confirm
+    [ "$status" -ne 0 ]; [[ "$output" == *"/etc/cron.allow names agent-web"* ]]
+}
+
+@test "the nft file alone changing restarts its unit; the live table must hold every user's drop" {
+    NFT_LOADED=1 run "$P" --confirm
+    : > "$LOG"
+    sed -i 's/subuid 1300000/subuid 1500000/' "$E/agents.conf"
+    sed -i 's/^agent-guard:1300000:/agent-guard:1500000:/' "$R/etc/subuid" "$R/etc/subgid"
+    NFT_LOADED=1 run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'systemctl restart airlock-agents-nft.service' "$LOG" || { echo "not restarted: $(cat "$LOG")"; return 1; }
+    # and with it unchanged, the live table holding every drop is ok, a table missing one is not
+    NFT_LOADED=1 run "$P" --check
+    [[ "$output" == *"ok   the agents' nftables table is loaded with every user's drop"* ]] || { echo "$output"; return 1; }
+    sed -i '/1500000/d' "$R/etc/airlock-agents.nft"   # what the live table would look like with guard's drop gone
+    NFT_LOADED=1 run "$P" --check
+    [[ "$output" == *"would: enable and (re)start airlock-agents-nft.service"* ]]
+    u="$RENDER/etc/systemd/system/airlock-agents-nft.service"
+    grep -qx 'ReloadPropagatedFrom=nftables.service' "$u"
+    grep -qx 'ExecReload=/usr/sbin/nft -f /etc/airlock-agents.nft' "$u"
+    grep -qx 'Before=user@1100.service user@1101.service user@1102.service ' "$u"
+}
+
+@test "/var/lib/<user> that is a link or holds a non-file image is refused before anything changes" {
+    mkdir -p "$R/var/lib" "$T/elsewhere"; ln -s "$T/elsewhere" "$R/var/lib/agent-web"
+    run "$P" --confirm
+    [ "$status" -ne 0 ]; [[ "$output" == *"/var/lib/agent-web is not a plain directory"* ]]
+    [ ! -s "$LOG" ]
+}
+
+@test "the queue's lib/ holds only what is rendered: anything else is removed" {
+    fake_queue_state
+    echo stale > "$R/srv/agent-web/lib/old_tool.py"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$R/srv/agent-web/lib/old_tool.py" ]; [ -f "$R/srv/agent-web/lib/web.py" ]
+}
+
+@test "a user's missing claude-airlock config is written from the default; an existing one is kept" {
+    rm "$E/agent-guard.conf"; echo "# mine" > "$E/agent.conf"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/agent-guard/agent-guard-anthropic.sock' "$E/agent-guard.conf"
+    [ "$(cat "$E/agent.conf")" = "# mine" ]
+    [[ "$output" == *"agent.conf doesn't mount the queue"* ]]
+}
+
+@test "a command name that shadows a system tool is refused" {
+    mkdir -p "$R/usr/bin"; : > "$R/usr/bin/agent"
+    run "$P"
+    [ "$status" -ne 0 ]; [[ "$output" == *"would shadow /usr/bin/agent"* ]]
+}
+
+@test "web ls never hangs on a FIFO a worker user left as its stage log" {
+    op_stubs; web_queue
+    req 20261021T120001Z-aaaaa1 "a question"
+    mkdir -p "$Q/log/agent-web"; mkfifo "$Q/log/agent-web/stages.jsonl"
+    run timeout 10 "$O" web ls
+    [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+    [[ "$output" == *"20261021T120001Z-aaaaa1  queued"* ]]
+}

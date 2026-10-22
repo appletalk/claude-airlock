@@ -24,7 +24,7 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bun
                  agents/install.sh agents/airlock-agents-apply agents/operator \
                  agents/lib/session-run agents/lib/session-stop agents/lib/web-session-run \
                  agents/lib/web-worker agents/lib/guard-worker agents/lib/worker-common.sh \
-                 agents/lib/nodump-refresh
+                 agents/lib/nodump-refresh agents/host-test.sh
 
 .DEFAULT_GOAL := help
 

@@ -22,8 +22,10 @@ Each agent user has:
 - a sandboxed user manager: no network, its own `/tmp`, can't see other users' processes or homes;
 - memory and CPU limits;
 - a firewall rule dropping any traffic from it on the host;
-- its own airlock-envoy listeners, so you decide what it can reach;
-- root-owned config it can't change.
+- its own airlock-envoy listeners, so you decide what it can reach (the agent's own listeners
+  never get the open web: apply refuses that);
+- no cron or at jobs, which would run outside its sandbox;
+- root-owned config that Claude in its box can't change.
 
 You can open a shell as the agent users, and nothing more.
 
@@ -32,8 +34,8 @@ You can open a shell as the agent users, and nothing more.
 Install the packages:
 
 ```
-sudo apt install podman crun tmux systemd-container acl xfsprogs python3 nftables polkitd   # Ubuntu
-sudo pacman -S --needed podman crun tmux acl xfsprogs python nftables polkit                # Arch
+sudo apt install podman crun tmux systemd-container acl xfsprogs python3 nftables polkitd wl-clipboard   # Ubuntu 23.10+, Debian 12+
+sudo pacman -S --needed podman crun tmux acl xfsprogs python nftables polkit wl-clipboard                # Arch
 ```
 
 Then, from a clone of claude-airlock that no box mounts:
@@ -75,8 +77,13 @@ claude-agent attach myproject
 | `claude-agent update` | give the agents your current claude-airlock |
 | `claude-agent web ...` | web research (below) |
 
-To change names, sizes or limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see
-the change and `--confirm` to apply it. `--check` reports drift.
+To change limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see the change and
+`--confirm` to apply it. `--check` reports drift; `sudo /usr/local/lib/airlock-agents/host-test.sh`
+checks the whole setup live, as each user.
+
+Renaming a user isn't supported. A home image only grows by hand: `truncate -s 50G
+/var/lib/<user>/home.img`, `losetup -c /dev/loopN`, `xfs_growfs /home/<user>`, then update
+`agents.conf` to match. XFS can't shrink.
 
 ## Web research
 
@@ -102,7 +109,13 @@ Each question goes through three steps:
 - The agent users must use `crun`, not `runc`. The install sets this up.
 - Switching an agent user from `runc` to `crun` leaves stale containers behind. Before removing
   `runc`, run `podman ps -a` as each agent user and `podman rm -f` the old ones.
-- On WSL2, turn on systemd (`systemd=true` under `[boot]` in `/etc/wsl.conf`). Everything else
-  works as on Linux, including `paste` through WSLg.
-- Moving an existing hand-built setup over: write `agents.conf` with the same names and uids. Unit
-  names and state follow the user names, so sessions and history carry over.
+- **WSL2** (not yet tested there). Turn on systemd (`systemd=true` under `[boot]` in
+  `/etc/wsl.conf`). Two WSL defaults undo the separation, and apply warns about both:
+  - `/mnt/c` is readable by every Linux user. Restrict it: `options = "uid=1000,gid=1000,umask=077"`
+    under `[automount]`.
+  - Interop lets any Linux user run Windows programs as you. Turn it off with `enabled=false`
+    under `[interop]`, or decide you accept it.
+- **Moving a hand-built setup over:** write `agents.conf` with the same names and uids. Unit names
+  and state follow the user names, so sessions and history carry over. Move your old drop-ins,
+  units, polkit and tmpfiles files away first: apply refuses to overwrite or sit beside files
+  it didn't write, and lists them.

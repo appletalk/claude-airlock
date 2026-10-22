@@ -52,12 +52,15 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     [ ! -e "$T/r/etc/tmpfiles.d/airlock-agents-queue.conf" ]
     [ -z "$(find "$T/r/etc/systemd/user" -name '*worker*')" ]
     [ ! -d "$T/r/srv" ]
-    ! grep -q 'u:1101' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"
+    # (each refutation as a test, not a bare `! cmd`, which bats doesn't count as a failure)
+    run grep -c 'u:1101' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"; [ "$output" = 0 ]
+    grep -qx 'a /srv/claude-inbox/airlock  -    -     -    -   u::rwx,g::r-x,o::---' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"
     [ "$(grep -c 'meta skuid' "$T/r/etc/airlock-agents.nft")" = 2 ]
-    ! grep -q '^InaccessiblePaths=-/sys' "$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
-    ! grep -q '^After=' "$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+    d="$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+    run grep -c '^InaccessiblePaths=-/sys' "$d"; [ "$output" = 0 ]
+    run grep -c '^After=' "$d"; [ "$output" = 0 ]
     run "$A" --user-conf claude "$T/site"
-    ! grep -q AIRLOCK_EXTRA_MOUNTS <<< "$output"
+    [ "$status" -eq 0 ]; [[ "$output" != *AIRLOCK_EXTRA_MOUNTS* ]]
 }
 
 @test "the site file is checked strictly" {
@@ -77,8 +80,10 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     refuses "are both claude" "${OK}web claude uid 1101 subuid 1200000 home 1G\nguard g uid 1102 subuid 1300000 home 1G\n"
     refuses "can't be an agent user" 'operator claude\nagent claude uid 1100 subuid 1100000 home 30G\n'
     refuses "is taken" "${OK}command airlock\n"
-    refuses "system or home path" "${OK}inbox /etc/inbox\n"
-    refuses "system or home path" "${OK}inbox /home/alice/x\n"
+    refuses "are /srv/<name>" "${OK}inbox /etc/inbox\n"
+    refuses "are /srv/<name>" "${OK}inbox /home/alice/x\n"
+    refuses "are /srv/<name>" "${OK}inbox /srv/a/b\n"
+    refuses "are /srv/<name>" "${OK}inbox /srv\n"
     refuses "bad path" "${OK}inbox /srv/../etc\n"
     refuses "bad path" "${OK}inbox srv/x\n"
     refuses "a queue without web research" "${OK}queue /srv/q\n"

@@ -194,8 +194,9 @@ except Exception:
 }
 # The last stage line a worker logged for an id, "stage: result" (fields it wrote: ids
 # checked, words fixed, so the pattern holds them).
-last_stage() {  # last_stage <web>|<guard> <id>
-    grep -sF "\"id\":\"$2\"" "$QUEUE/log/$1/stages.jsonl" | tail -1 \
+last_stage() {  # last_stage <web>|<guard> <id>: read like any queue file (a FIFO or link a worker
+    # user left there must not hang or redirect it), at most 64 MB
+    { qread 67108864 "log/$1/stages.jsonl" || true; } | grep -aF "\"id\":\"$2\"" | tail -1 \
         | sed -n 's/.*"stage":"\([a-z]*\)","result":"\([a-z0-9 ,;()'"'"'-]*\)".*/\1: \2/p'
 }
 # One word for where an id stands, from what the operator can see.

@@ -42,10 +42,10 @@ missing=""
 for c in podman crun tmux machinectl getfacl setfacl mkfs.xfs python3 nft loginctl setpriv; do
     command -v "$c" >/dev/null || missing="$missing $c"
 done
-[ -d /etc/polkit-1/rules.d ] || missing="$missing polkit"
+[ -d /etc/polkit-1/rules.d ] || missing="$missing polkit(0.106+: JavaScript rules; Ubuntu 22.04's 0.105 has none)"
 if [ -n "$missing" ]; then
     echo "install-agents: missing:$missing" >&2
-    echo "  Ubuntu/Debian: apt install podman crun tmux systemd-container acl xfsprogs python3 nftables polkitd" >&2
+    echo "  Ubuntu/Debian: apt install podman crun tmux systemd-container acl xfsprogs python3 nftables polkitd wl-clipboard" >&2
     echo "  Arch:          pacman -S --needed podman crun tmux acl xfsprogs python nftables polkit" >&2
     exit 1
 fi
@@ -76,6 +76,7 @@ install -d -m 0755 /etc/claude-airlock "$ETC"
 if [ -n "$site" ]; then
     [ -f "$site" ] || die "no site file $site"
     [ ! -e "$ETC/agents.conf" ] || die "$ETC/agents.conf exists: edit it there (then: sudo airlock-agents-apply --confirm)"
+    "$SRC/airlock-agents-apply" --env "$site" >/dev/null || die "$site is refused (above); nothing was installed"
     install -m 0644 -o root -g root "$site" "$ETC/agents.conf"
 elif [ ! -e "$ETC/agents.conf" ]; then
     echo "==> First run: the agent users. Defaults in brackets; Enter takes them."
@@ -124,24 +125,19 @@ fi
 echo "==> installing the toolkit"
 put() { install -D -m "$1" -o root -g root "$2" "$3.new" && mv -f "$3.new" "$3"; }
 for f in session-run session-stop web-session-run web-worker guard-worker nodump-refresh; do put 0755 "$SRC/lib/$f" "$LIBDIR/$f"; done
+put 0755 "$SRC/host-test.sh" "$LIBDIR/host-test.sh"
 put 0644 "$SRC/lib/worker-common.sh" "$LIBDIR/worker-common.sh"
 put 0755 "$SRC/operator" "$LIBDIR/operator"
 put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
 for f in containers.conf tmux.conf managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
 for f in "$SRC"/box/* "$SRC"/templates/*; do d=${f%/*}; put 0644 "$f" "$SHARE/${d##*/}/${f##*/}"; done
+put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
 # The execute-only copies' refresh after package upgrades: whichever package manager this is.
 if [ -d /etc/pacman.d ]; then put 0644 "$SRC/hooks/airlock-agents-nodump.hook" /etc/pacman.d/hooks/airlock-agents-nodump.hook; fi
 if [ -d /etc/apt/apt.conf.d ]; then put 0644 "$SRC/hooks/80airlock-agents-nodump" /etc/apt/apt.conf.d/80airlock-agents-nodump; fi
 
-# ---- each user's claude-airlock config (written once; the site's to edit afterwards) ---------
+# Each user's default claude-airlock config is written by the apply (once; the site's afterwards).
 eval "$("$SRC/airlock-agents-apply" --env "$ETC/agents.conf" | grep -E '^AGENTS_[A-Z_]+=[A-Za-z0-9_./-]*$')"
-conf_for() {  # conf_for <user>: its default config, written once (the site's to edit afterwards)
-    [ -e "$ETC/$1.conf" ] && { echo "ok   $ETC/$1.conf (kept)"; return; }
-    "$SRC/airlock-agents-apply" --user-conf "$1" "$ETC/agents.conf" > "$ETC/$1.conf.new" \
-        && chmod 0644 "$ETC/$1.conf.new" && mv -f "$ETC/$1.conf.new" "$ETC/$1.conf"
-    echo "==> wrote $ETC/$1.conf (review it: git identity, listeners)"
-}
-for u in "$AGENTS_AGENT" $AGENTS_WEB $AGENTS_GUARD; do conf_for "$u"; done
 
 echo "==> airlock-agents-apply --confirm"
 /usr/local/sbin/airlock-agents-apply --confirm
