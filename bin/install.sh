@@ -186,7 +186,7 @@ if [ -z "${AIRLOCK_CONFIG:-}" ] && [ ! -f "$CONFIG_DIR/config" ]; then
 fi
 
 # `airlock paste` needs ONE project (or a shared paste dir) to write clipboard images into:
-# see README ("Pasting images into a box"). There is no safe default: it is typed from whatever
+# see docs/scratch-and-pastes.md. There is no safe default: it is typed from whatever
 # terminal is free, so keying it off $PWD would silently write pastes into a directory the
 # running box never mounts. An install never stops to ask: if neither the environment nor the
 # config names one (an empty line in the config counts as a choice), a note at the end says
@@ -410,7 +410,7 @@ echo "==> Live: $INSTALL_ROOT/current -> versions/$REV"
 echo "==> Installing launcher -> $BIN_TARGET/airlock (and $BIN_TARGET/claude-airlock)"
 ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/airlock"
 ln -sfn "$INSTALL_ROOT/current/bin/claude-airlock" "$BIN_TARGET/claude-airlock"
-# Host Claude's status line runs this copy (README: Statusline), never the checkout's: a branch
+# Host Claude's status line runs this copy (docs/install.md: Statusline), never the checkout's: a branch
 # or an uncommitted edit there would otherwise run on the host at every refresh. A box can't
 # write it (boxes get their own .claude). Replaced in one rename, so a refresh never reads half.
 _sl="$HOME/.claude/airlock-statusline.sh"
@@ -420,7 +420,7 @@ if cp "$INSTALL_ROOT/current/config/airlock-statusline.sh" "$_sl.tmp.$$" && chmo
   echo "==> Status line -> $_sl"
   if grep -q 'airlock-statusline\.sh' "$HOME/.claude/settings.json" 2>/dev/null \
      && ! grep -q '\.claude/airlock-statusline\.sh' "$HOME/.claude/settings.json"; then
-    echo "    NOTE: ~/.claude/settings.json runs another copy of the status line; point it at $_sl (README: Statusline)" >&2
+    echo "    NOTE: ~/.claude/settings.json runs another copy of the status line; point it at $_sl (docs/install.md: Statusline)" >&2
   fi
 else
   rm -f "$_sl.tmp.$$"
@@ -535,8 +535,8 @@ _token_file="${AIRLOCK_TOKEN_FILE:-$CONFIG_DIR/token}"
 if [ -n "$FROM_BUNDLE" ]; then
   echo
   echo "==> Done (from a bundle). Shell integration and the Claude login are this account's own: with no"
-  echo "    network of its own, set AIRLOCK_PERSIST_LOGIN=1 and /login inside a box (README: Running boxes"
-  echo "    as a dedicated user)."
+  echo "    network of its own, set AIRLOCK_PERSIST_LOGIN=1 and /login inside a box"
+  echo "    (docs/dedicated-user.md)."
   echo
   _print_paste_note
   exit 0

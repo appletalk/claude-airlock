@@ -6,7 +6,7 @@ There are two config files, and a set of host-only grants made with `airlock` co
 | --- | --- | --- |
 | `~/.config/claude-airlock/config` (host config) | you | Yes. Sourced as bash. |
 | `<project>/.airlock/config` (project config) | committed with the project; **the box can write it too** | No. Safe-parsed, never sourced. It can only *request*; you approve on the host. |
-| Per-project state dir (secrets, approvals, posture, mounts, sockets, modes) | `airlock` subcommands on the host | Yes. Never mounted into a box. |
+| Per-project state dir, `~/.config/claude-airlock/state/<slug>/` (secrets, approvals, posture, mounts, sockets, modes; the slug is the project path with every other character as `-`) | `airlock` subcommands on the host | Yes. Never mounted into a box. |
 
 ## Host config: `~/.config/claude-airlock/config`
 
@@ -21,7 +21,7 @@ see [dedicated-user.md](dedicated-user.md)).
 | `AIRLOCK_DNS` | empty (automatic) | Resolvers for the box, space-separated. Set it when a box has no usable resolver, e.g. docker on a host whose only resolver is loopback. See [security-model.md](security-model.md#dns-is-pinned-which-narrows-exfiltration-but-does-not-close-it). |
 | `AIRLOCK_IMAGE` | `claude-airlock:dev` | Image to run. See [images.md](images.md). |
 | `AIRLOCK_MODEL` | `opus` | Default model in the box: `opus`, `sonnet`, `haiku`, `opusplan` or a full model id. `""` uses Claude Code's default. Override per session with `airlock --model sonnet`. |
-| `AIRLOCK_EGRESS_MODE` | `minimal` | Default egress posture for projects that have not set one: `minimal`, `dev` or `proxy`. An unrecognised value refuses every launch. |
+| `AIRLOCK_EGRESS_MODE` | `minimal` | Default egress posture for projects that have not set one: `minimal`, `dev`, `proxy`, or a list of egress groups (`github pypi`). An unrecognised value refuses the launch of any project without a posture of its own. |
 | `AIRLOCK_EGRESS_PROXY` | empty | The proxy socket for the `proxy` posture, and the default for `airlock egress proxy` with no argument. See [egress-proxy.md](egress-proxy.md). |
 | `AIRLOCK_EXTRA_EGRESS` | empty | Domains always allowed, in every posture but `proxy`. Host-trusted, not prompted. Space or comma separated. |
 | `AIRLOCK_GIT_SSH_PORTS` | empty | Extra ssh ports git remotes name; rewritten in the proxy posture. See [egress-proxy.md](egress-proxy.md#plain-http-through-the-proxy). |
@@ -33,7 +33,7 @@ see [dedicated-user.md](dedicated-user.md)).
 | `AIRLOCK_SHARE_HISTORY` | `1` | `0` shares no sessions or memories with the host at all. |
 | `AIRLOCK_PERSIST_LOGIN` | `0` | `1` skips the shared token so the box logs itself in. Normally set per project with `airlock login persist` instead; see [install.md](install.md#one-project-that-logs-itself-in). |
 | `AIRLOCK_TOKEN_FILE` | `~/.config/claude-airlock/token` | Where the shared OAuth token is read from (a `CLAUDE_CODE_OAUTH_TOKEN` in the environment wins). |
-| `AIRLOCK_PERMISSION_MODE` | empty | Starting permission mode for this one launch; beats `airlock mode`, loses to `--permission-mode` on the command line. |
+| `AIRLOCK_PERMISSION_MODE` | empty | Starting permission mode: beats `airlock mode`, loses to `--permission-mode` on the command line. In the config file it applies to every launch; in the environment, to that one. |
 | `AIRLOCK_PIDS_LIMIT` | `4096` | Process-count cap for the box. `0` or empty uses the engine default (podman 2048, docker unlimited). |
 | `AIRLOCK_MEMORY` | empty (no limit) | Host RAM ceiling for the box, e.g. `8g`. Too low a cap breaks real builds, so set it deliberately. |
 | `AIRLOCK_TZ` | `$TZ`, else the host's zone, else UTC | The box's timezone, a zone name such as `Europe/Berlin`. The host's zone comes from `timedatectl` or `/etc/localtime`. |
@@ -315,3 +315,15 @@ Precedence, most specific first: `--permission-mode` on the command line, then
 `AIRLOCK_PERMISSION_MODE` in the environment (one launch only), then the stored `airlock
 mode`. The mode is not added when you run a `claude` subcommand (a first word that is not
 a flag). An invalid stored value is ignored with a warning.
+
+## Scripts and service units
+
+A box asks the engine for a terminal only when the launcher has one (on stdin and stdout), so
+`airlock -p` and `airlock exec` work from a script or a service unit. The box's stdout is the
+command's own; the firewall logs to stderr. An `exec` box runs its command under the engine's
+init (catatonit under podman), so stopping a unit that runs one stops the box.
+
+**Prompts need a terminal.** The launcher asks its questions (a share or egress grant the
+project's config requests, a second session on the project) only of a terminal. Without one on
+stdin the answer is no, and stdin is left for the command, so piped input cannot approve
+anything.

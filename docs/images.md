@@ -59,8 +59,10 @@ validating. It also covers the offline halves of the infra clients (`kubectl kus
 
 ## What is pinned
 
-The validators and infra clients are pinned by version and sha256 in
-`image/dev/Dockerfile`, and so is everything else the images download:
+In `:base` and `:dev`, the validators and infra clients (except `drill`, which is a Debian
+package) are pinned by version and sha256 in `image/dev/Dockerfile`, and so is everything
+else those images download. `:playwright` is not pinned: it installs Playwright and Chromium
+with npm and Playwright's own installer, at whatever version is current.
 
 - Node, by tarball checksum;
 - the ansible-lint venv, by a hash for every package (`image/dev/ansible-requirements.txt`);

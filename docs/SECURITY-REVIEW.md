@@ -65,8 +65,9 @@ is explicit and complete.
 >   repos read-only in the box. `.claude/`, `.mcp.json`, `.envrc` and build scripts remain
 >   open. See [security-model.md](security-model.md#files-a-box-writes-can-run-on-the-host).
 > - **5:** the Claude Code installer is vendored (`image/claude-install.sh`, which verifies
->   the binary against the release manifest), and Node and every other upstream download is
->   pinned by version and sha256. `debian:trixie-slim` is still pulled by tag, not digest:
+>   the binary against the release manifest), and in `:base` and `:dev` Node and every other
+>   upstream download is pinned by version and sha256 (`:playwright` installs Playwright
+>   unpinned). `debian:trixie-slim` is still pulled by tag, not digest:
 >   each install re-pulls the tag so Debian's rebuilds of it are picked up.
 > - **7:** still open. The slug is still `sed 's#[^a-zA-Z0-9]#-#g; s#^-*##'`.
 > - **8:** `make install-airlock` rebuilds on a new Claude Code release and refreshes the

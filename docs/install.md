@@ -6,9 +6,9 @@ The short version is in the [README](../README.md#setup). This page has the deta
 
 `make install-airlock` (or `./bin/install.sh`):
 
-1. writes a default host config to `~/.config/claude-airlock/config` if there is none;
-2. exports the checked-out **commit** (never uncommitted edits) to
+1. exports the checked-out **commit** (never uncommitted edits) to
    `~/.local/share/claude-airlock/versions/<commit>/`;
+2. writes a default host config to `~/.config/claude-airlock/config` if there is none;
 3. builds `claude-airlock:base` and `:dev` from that copy;
 4. only if the build succeeds, points `~/.local/share/claude-airlock/current` at it, and
    links the launcher into `~/.local/bin` through it (`airlock`, and `claude-airlock` as a
@@ -99,15 +99,7 @@ layer).
 
 ### The shared token (default)
 
-Generate a long-lived (about one year) token on the host and save it:
-
-```sh
-command claude setup-token          # copy the printed sk-ant-oat... value
-printf %s 'PASTE_TOKEN' > ~/.config/claude-airlock/token
-chmod 600 ~/.config/claude-airlock/token
-```
-
-One token is shared by every box. This is a **convenience for disposable boxes, not a
+The token itself: [README, step 4](../README.md#4-auth-one-time). One token is shared by every box. This is a **convenience for disposable boxes, not a
 security tier**: logging in to each box by hand would be unusable friction.
 
 **Billing.** The `setup-token` path uses your **subscription quota**, not pay-per-token API

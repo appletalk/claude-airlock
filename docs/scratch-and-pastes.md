@@ -58,7 +58,8 @@ So the image crosses as a **file**, at a path both sides already agree on:
 airlock paste            # save the clipboard image, print the path
 alpaste                  # zsh: the same, and put the path on your clipboard
 airlock paste list [N]   # recent pastes, newest first (also: alpaste list [N])
-airlock paste --project DIR   # paste into another project, for this call
+airlock paste --project DIR   # paste into another project, for this call (ignored, with a
+                              #   warning, when AIRLOCK_PASTE_DIR sets a drop box)
 ```
 
 Then Ctrl+V into the agent's prompt. You are pasting **text**; the agent opens the file

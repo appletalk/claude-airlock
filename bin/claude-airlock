@@ -1703,7 +1703,7 @@ else
   if [ -z "$OAUTH_TOKEN" ]; then
     echo "claude-airlock: no auth token found." >&2
     echo "  Generate a long-lived (~1 year) token once, on the host:" >&2
-    echo "      claude-host setup-token" >&2
+    echo "      command claude setup-token" >&2
     echo "  Then save the printed sk-ant-oat... value:" >&2
     echo "      mkdir -p \"$(dirname "$TOKEN_FILE")\"" >&2
     echo "      printf %s 'PASTE_TOKEN_HERE' > \"$TOKEN_FILE\" && chmod 600 \"$TOKEN_FILE\"" >&2

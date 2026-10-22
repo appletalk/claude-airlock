@@ -37,17 +37,6 @@ Details: [docs/security-model.md](docs/security-model.md). To report a weakness:
 - `zsh`, for the shell integration (`airlock`, `alpaste` and the `claude` guard).
 - `~/.local/bin` on your `PATH`.
 
-### Why rootless Podman
-
-Membership in the `docker` group is equivalent to root on the host (`docker run -v
-/:/host` owns the machine). Under Docker, the tool that exists to contain a misbehaving
-agent is itself reachable through a root-equivalent socket. Rootless Podman has no daemon
-and no privileged socket: the box cannot exceed your own unprivileged user's authority,
-whatever happens inside it.
-
-Podman is the default. Set `AIRLOCK_ENGINE=docker` only if Podman is unavailable. Images
-live in each engine's own store, so switching engines later means rebuilding.
-
 ## Setup
 
 ```sh
@@ -132,10 +121,6 @@ Control), use `airlock login persist` in that project; see
 > **Never** set `ANTHROPIC_API_KEY` in the box: it silently switches to metered API
 > billing.
 
-Telemetry and error reporting are always off in a box, with no way to turn them on. See
-[docs/install.md](docs/install.md#telemetry-is-always-off) (including what that means for
-Remote Control).
-
 ### 5. Use it
 
 ```sh
@@ -146,11 +131,22 @@ airlock               # Claude Code, contained, for this directory
 The box mounts the project read-write at its real path. By default it can reach only
 Anthropic until you grant more.
 
+## Why rootless Podman
+
+Membership in the `docker` group is equivalent to root on the host (`docker run -v
+/:/host` owns the machine). Under Docker, the tool that exists to contain a misbehaving
+agent is itself reachable through a root-equivalent socket. Rootless Podman has no daemon
+and no privileged socket: the box cannot exceed your own unprivileged user's authority,
+whatever happens inside it.
+
+Podman is the default. Set `AIRLOCK_ENGINE=docker` only if Podman is unavailable. Images
+live in each engine's own store, so switching engines later means rebuilding.
+
 ## Updating
 
 Run `make install-airlock` again. It picks up a new Claude Code release at once, and
-refreshes the Debian packages once a week (`make refresh` forces it now). Then run
-`airlock doctor` after kernel or engine changes. Details, including the vendored Claude Code
+refreshes the Debian packages once a week (`make refresh` forces it now). Run
+`airlock doctor` again after kernel or engine changes. Details, including the vendored Claude Code
 installer and old-image cleanup: [docs/install.md](docs/install.md#updating).
 
 ## Commands
@@ -194,18 +190,11 @@ alpaste                         zsh shortcut for `airlock paste --copy`
 command claude                  raw host Claude (bypasses the airlock guard)
 ```
 
-Every grant above is host-only and per project. The box cannot read or change it.
+Every grant above is host-only and per project. The box cannot read or change the grants
+(a secret's value is, of course, readable inside the box: that is what it is for).
 
-**Scripts and service units.** A box asks the engine for a terminal only when the launcher
-has one (on stdin and stdout), so `airlock -p` and `airlock exec` work from a script or a
-service unit. The box's stdout is the command's own; the firewall logs to stderr. An `exec`
-box runs its command under the engine's init (catatonit under podman), so stopping a unit
-that runs one stops the box.
-
-**Prompts need a terminal.** The launcher asks its questions (a share or egress grant the
-project's config requests, a second session on the project) only of a terminal. Without one
-on stdin the answer is no, and stdin is left for the command, so piped input cannot approve
-anything.
+Scripts, service units and prompts without a terminal:
+[docs/configuration.md](docs/configuration.md#scripts-and-service-units).
 
 **Secrets: prefer `pass:PATH`** (`airlock secret set KEY pass:mcp/foo`). A literal value is
 stored in plaintext in the host state dir (mode 600) and lands in your shell history.

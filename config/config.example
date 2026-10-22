@@ -158,8 +158,8 @@ AIRLOCK_MODEL=opus
 #   dev               = also open the npm / PyPI / GitHub convenience groups.
 #   proxy             = no network at all; everything goes through the host proxy socket
 #                       in AIRLOCK_EGRESS_PROXY, whose allowlist decides. Launches are
-#                       refused while that socket is missing (README: "Egress through a
-#                       host proxy"). Projects that set another posture are named at launch.
+#                       refused while that socket is missing (docs/egress-proxy.md).
+#                       Projects that set another posture are named at launch.
 # Per-project override (host-controlled, tamper-proof): `airlock egress dev`, or a
 # subset like `airlock egress github pypi` (GitHub+PyPI, no npm). Edit incrementally
 # with `airlock egress add|rm <groups>` (e.g. `airlock egress rm pypi`); `airlock
@@ -169,11 +169,11 @@ AIRLOCK_MODEL=opus
 
 # The proxy socket for the proxy posture: the default for AIRLOCK_EGRESS_MODE=proxy and for
 # `airlock egress proxy` with no argument. It must pass the `airlock socket` rule.
-# AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/anthropic.sock
+# AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/<you>/<listener>.sock
 
 # ssh ports besides the default that git remotes name (ssh://git@host:PORT/...). In the proxy
 # posture, remotes on the proxy's plain-HTTP git hosts become http://<host>/ in the box; these
-# ports are rewritten too (README: "Plain HTTP through the proxy").
+# ports are rewritten too (docs/egress-proxy.md, Plain HTTP through the proxy).
 # AIRLOCK_GIT_SSH_PORTS=2222
 
 # Extra egress domains ALWAYS allowed (host-trusted, applied in every mode but proxy), added
