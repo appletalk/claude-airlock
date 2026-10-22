@@ -1,77 +1,81 @@
 # claude-airlock
 
-Run Claude Code inside a Docker sandbox with a **default-DROP egress firewall**, so
-`--dangerously-skip-permissions` / auto mode and internet access are contained. The
-goal is to make the *contained* box the default safe way to run Claude on a project —
-zero per-project config for the common case, explicit host-approved grants when a
-project needs more.
+Run Claude Code in a container sandbox (a "box") with a **default-DROP egress firewall**,
+so auto mode, `--dangerously-skip-permissions` and internet access are contained.
 
-## Why
+- By default the box sees only the project you launch it in.
+- Only Anthropic is reachable by default. Anything more is a grant you approve on the host.
+- The common case needs no per-project config.
 
-Assume the agent may misbehave (prompt injection, a bad tool call) and bound the blast
-radius:
+The container and firewall are the moat. The launcher, `airlock`, assembles the container
+command line and keeps grants on the host, where the box cannot tamper with them.
 
-- **Class A — escape / exfil.** A misbehaving agent can't reach the network beyond a
-  small allowlist, can't touch other projects, and runs as a non-root user with a
-  minimal Linux capability set inside the container.
-- **Class B — destructive but *authorized* actions** (e.g. `terraform destroy`, a bad
-  commit) are **not** solved by isolation. Mitigate by keeping write credentials out of
-  the box (read-only / CI-scoped), branch protection, and human-reviewed pushes.
+## What it protects against
 
-The container + firewall is the moat; the launcher just assembles the invocation and
-manages host-side, tamper-proof grants.
+Assume the agent may misbehave: a prompt injection, a bad tool call.
+
+- **Contained: escape and exfiltration.** The agent cannot reach the network beyond a small
+  allowlist, cannot touch other projects, and runs as a non-root user with a minimal set of
+  Linux capabilities.
+- **Not contained: destructive actions it is authorized to take** (`terraform destroy`, a
+  bad commit). Keep write credentials out of the box (read-only or CI-scoped), use branch
+  protection, and review pushes by hand.
+- **Not contained: files the host later trusts.** Whatever the box writes into your project
+  or its shared memory, the unsandboxed host may later run or read. Review a repo a box has
+  worked in before host tools run in it.
+
+Details: [docs/security-model.md](docs/security-model.md). To report a weakness:
+[SECURITY.md](SECURITY.md).
 
 ## Requirements
 
-- Linux with **Podman (rootless, recommended)** or **Docker**. Container images are
-  Debian; developed on WSL2 and on native Arch. Select with `AIRLOCK_ENGINE`.
-- `systemd`, for the one-time module preload under rootless Podman (step 1). On WSL2
-  that means `systemd=true` under `[boot]` in `/etc/wsl.conf`.
-- A Claude subscription (auth is a long-lived OAuth token — step 4).
-- `zsh` for the shell integration (the `airlock` / `claude` helpers).
-- `~/.local/bin` on your `PATH` — that's where the launcher is symlinked.
+- Linux with **Podman (rootless, recommended)** or **Docker**. Images are Debian-based.
+  Developed on WSL2 and native Arch. Choose with `AIRLOCK_ENGINE`.
+- `systemd`, for the one-time module preload under rootless Podman (step 1). On WSL2 that
+  means `systemd=true` under `[boot]` in `/etc/wsl.conf`.
+- A Claude subscription (auth is a long-lived OAuth token; step 4).
+- `zsh`, for the shell integration (`airlock`, `alpaste` and the `claude` guard).
+- `~/.local/bin` on your `PATH`.
 
 ### Why rootless Podman
 
-Belonging to the `docker` group is equivalent to having root on the host (`docker run -v
-/:/host` trivially owns the machine), so running the sandbox under Docker means the tool
-that exists to contain a misbehaving agent is itself reachable through a root-equivalent
-socket. Rootless Podman has no daemon and no privileged socket: the box cannot exceed
-your own unprivileged user's authority, no matter what happens inside it.
+Membership in the `docker` group is equivalent to root on the host (`docker run -v
+/:/host` owns the machine). Under Docker, the tool that exists to contain a misbehaving
+agent is itself reachable through a root-equivalent socket. Rootless Podman has no daemon
+and no privileged socket: the box cannot exceed your own unprivileged user's authority,
+whatever happens inside it.
 
-It's the default. Set `AIRLOCK_ENGINE=docker` only if Podman is unavailable — and note
-that images live in the engine's own store, so switching engines later means rebuilding.
+Podman is the default. Set `AIRLOCK_ENGINE=docker` only if Podman is unavailable. Images
+live in each engine's own store, so switching engines later means rebuilding.
 
 ## Setup
 
 ```sh
 git clone git@github.com:appletalk/claude-airlock.git
-cd claude-airlock          # the commands below are run from the repo root
+cd claude-airlock          # run the commands below from the repo root
 ```
 
 ### 1. Rootless Podman prerequisites (one-time, needs root)
 
-Skip this section entirely if you're using Docker — its root daemon already does both of
-these for you. That convenience is exactly what you give up by going rootless, and it is
-worth giving up.
+Skip this with Docker; its root daemon does both for you. That convenience is what you
+give up by going rootless, and it is worth giving up.
 
-**Netfilter modules must be resident.** The kernel refuses to *autoload* netfilter
-modules for a process in a user namespace — which is what a rootless container is — so
-the box's firewall cannot bring them up itself. Install the module list to have systemd
-load them at every boot, then load them into the running kernel so you don't have to
-reboot to use the box today:
+**Load the netfilter modules.** The kernel will not *autoload* netfilter modules for a
+process in a user namespace (which a rootless container is), so the box's firewall cannot
+load them itself. Install the list so systemd loads them at every boot, then load them now
+so you don't have to reboot:
 
 ```sh
 sudo install -m 0644 config/modules-load.d/airlock.conf /etc/modules-load.d/airlock.conf
 grep -v '^#' config/modules-load.d/airlock.conf | xargs -r sudo modprobe
 ```
 
-(Modules already built into your kernel are a harmless no-op. On WSL2, `modprobe` may
-refuse if the kernel lacks them — reboot with `wsl --shutdown` from Windows instead.)
+Modules built into your kernel are a harmless no-op. On WSL2, `modprobe` may refuse if the
+kernel lacks them; run `wsl --shutdown` from Windows to reboot instead.
 
-**`subuid`/`subgid` ranges must exist** for your user, so the box can map users. Most
-distros configure these at install — check with `grep $USER /etc/subuid /etc/subgid`, and
-if it comes back empty:
+**Check your subuid/subgid ranges,** which the box needs to map users. Most distros set
+them up at install. Check with `grep $USER /etc/subuid /etc/subgid`. If that prints
+nothing:
 
 ```sh
 sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
@@ -79,99 +83,39 @@ sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
 
 ### 2. Install the launcher and build the images
 
-(There is no plain `make install`: this is level 1 of [docs/setup.md](docs/setup.md), which
-lists the levels above it: airlock-envoy, then optional agent users.)
-
 ```sh
 make install-airlock          # or: ./bin/install.sh
 ```
 
-That symlinks the launcher into `~/.local/bin`, writes a default host config to
-`~/.config/claude-airlock/config`, builds `claude-airlock:base` + `:dev`, and finishes by
-running `airlock doctor` — which stands up a real throwaway box and makes it *prove*
-containment: an allowed host must be reachable and a denied host must not be. If that
-check fails, the install says so loudly rather than leaving you with a sandbox that
-isn't one. Re-run it any time with `make doctor` (or `airlock doctor`), especially after
-changing engines or upgrading the kernel.
+This links `airlock` into `~/.local/bin`, writes a default host config, builds the images
+(`claude-airlock:base` and `:dev`), and finishes with `airlock doctor`. The doctor starts a
+real throwaway box and makes it *prove* containment: an allowed host must be reachable and
+a denied host must not be. If that fails, the install says so loudly.
 
-Re-running it is also how you **update the box**. Two things move on their own and the
-install tracks both:
+There is no plain `make install`. This is level 1 of [docs/setup.md](docs/setup.md), which
+lists the optional levels above it: airlock-envoy, then agent users.
 
-- **Claude Code.** The install resolves the current release and passes it as the base
-  image's build arg, so a new release rebuilds that layer instead of silently reusing the
-  cached one. The dev image builds on the base *minus* Claude Code and copies the base's
-  install in as its last layer, so a release replaces one small layer there rather than
-  rebuilding every toolchain. Pin or track a different channel with `CLAUDE_CODE_VERSION=stable make
-  install` (or a specific `x.y.z`).
-- **Debian packages.** The build pulls the current `debian:trixie-slim` and keys the apt
-  layer on the ISO week, so the first `make install-airlock` of a week refreshes every package
-  (including `stable-security` updates for what the base tag already carried) and the
-  rest of the week is a cache hit. `make refresh` forces it today. Without this a rebuild
-  reused the apt layer from the first build forever; `airlock doctor` now shows when the
-  packages were last refreshed.
-
-Unchanged upstream, same week: a cache hit that costs nothing. A refresh rebuilds
-everything above the apt layer (a few minutes and a few hundred MB), which is why it is
-weekly rather than daily.
-
-**The Claude Code installer is vendored, and needs updating by hand.** The build runs
-`image/claude-install.sh`, a copy of `https://claude.ai/install.sh`, never a script
-piped from the network: that script is the one download in the image nothing else
-verifies (it verifies the Claude Code binary itself, against the release manifest). The
-copy goes stale, so every `make install-airlock` compares it with upstream and reports drift
-loudly, with `!!! INSTALLER DRIFT` lines, without failing the build. When you see that:
-
-```sh
-make claude-installer-diff      # read what changed
-make claude-installer-update    # take it; then review `git diff`, commit, make install-airlock
-```
-
-Expect this every few weeks. A stale copy keeps working until upstream changes the
-release layout it fetches, at which point the Claude Code layer fails to build and the
-fix is the same two commands.
+What the install does in detail, and how updates work: [docs/install.md](docs/install.md).
 
 ### 3. Shell integration
 
-**Old images.** Every install moves `:base`, `:os` and `:dev` to the images it built, which
-leaves the previous ones (about 4 GB a rebuild, and the weekly package refresh rebuilds
-everything) untagged. Once the new version is live and has passed the containment check and
-the image smoke test, the install removes the dangling images that carry claude-airlock's
-label, with the layer chain only they used, and says what it freed (`==> Pruned superseded
-claude-airlock images: 7.2GB, 61 images and layers`; the count includes each build step's
-layer). Other projects' images are never touched, dangling or
-not. The layers under the live images are not dangling, so an unchanged rebuild is still a
-cache hit. An image a running box uses stays until the next install. With docker's BuildKit
-the build cache is kept apart from images and is not covered (`docker builder prune`).
-A WSL disk image does not shrink by itself when space is freed inside it; this keeps it from
-growing, compacting it is still a Windows-side job.
-
-`make install-airlock` exports the checked-out **commit** (never uncommitted edits) to
-`~/.local/share/claude-airlock/versions/<commit>/`, builds the images from that copy,
-and only when the build succeeds points `~/.local/share/claude-airlock/current` at it.
-`~/.local/bin/airlock` (the command; `~/.local/bin/claude-airlock` is the same, kept as a
-second name) and the shell integration go through `current`, so the
-launcher never runs from this working tree: switching branches or editing files here
-changes nothing until the next `make install-airlock`, and a failed build leaves the previous
-version live. Local CA certs in `image/certs/` (untracked by design) are copied into each
-install. The live version and the two most recently activated others are kept;
-`current/VERSION` says which commit is live.
-
-Add to `~/.zshrc` (or `~/.zshrc.local`) and reload:
+Add this to `~/.zshrc` (or `~/.zshrc.local`) and reload:
 
 ```sh
 source "$HOME/.local/share/claude-airlock/current/shell/claude-airlock.zsh"
 ```
 
-Open shells pick up a new install on their next `airlock`. If an rc file still sources
-the zsh file, or calls the launcher, from a checkout, `make install-airlock` warns: that line
-keeps the launcher in the working tree.
+It gives you:
 
-This gives you `airlock` (Claude Code in the box) and a lock-aware `claude` on the host
-that warns if an airlock session for the same project is already open.
+- `airlock`: Claude Code in the box;
+- `alpaste`: a shortcut for `airlock paste --copy`;
+- `claude`: your normal host Claude, which warns if an airlock session for the same project
+  is already open (two live sessions can corrupt shared `--resume` history). `command
+  claude` bypasses the guard.
 
 ### 4. Auth (one-time)
 
-Generate a long-lived (~1yr) token on the host and save it:
+Generate a long-lived (about one year) token on the host and save it:
 
 ```sh
 command claude setup-token          # copy the printed sk-ant-oat... value
@@ -179,63 +123,18 @@ printf %s 'PASTE_TOKEN' > ~/.config/claude-airlock/token
 chmod 600 ~/.config/claude-airlock/token
 ```
 
-One token is shared by every box. This is a **convenience for disposable boxes, not a
-security tier** — logging in to each box by hand would be unusable friction. The
-convenience stops paying for a box that is long-lived and singular (a persistent
-orchestrator session): there a one-time login costs nothing amortised, and it yields a
-credential Claude renews itself, which is what Remote Control — steering the session from
-mobile — needs.
+Every box shares this token. For a long-lived box that should log itself in (for Remote
+Control), use `airlock login persist` in that project; see
+[docs/install.md](docs/install.md#one-project-that-logs-itself-in).
 
-Switch **that one project** — the setting is per-project, so everything else keeps using
-the shared token:
+> **Billing:** the `setup-token` path uses your **subscription quota**, not pay-per-token
+> API credits. The TUI may show "Claude API"; that is cosmetic, so confirm with `/usage`.
+> **Never** set `ANTHROPIC_API_KEY` in the box: it silently switches to metered API
+> billing.
 
-```sh
-cd ~/some/long-lived-project
-airlock login persist     # this project only; others are untouched
-airlock                   # complete /login once — it persists from here on
-airlock login show        # confirm mode + whether a credential is stored
-airlock login token       # switch back to the shared token
-```
-
-No token is injected, so Claude falls into its normal `/login` on first launch, and the
-credential it writes lands in `$HOME/.claude` — already the persistent per-project mount,
-so it survives restarts with no extra plumbing.
-
-> **Not a security downgrade,** despite first appearances. Both are bearer credentials for
-> the same account via the same OAuth flow; if anything the shared token has the wider
-> blast radius, since it is injected into *every* box while a persisted login exists in
-> one. The mode lives in the never-mounted state dir, so a box can neither read nor change
-> its own auth mode. `airlock login token` switches back but deliberately leaves the stored
-> credential in place; it tells you where, so delete it to revoke locally.
-
-**Telemetry** and error reporting are **always off in every box**, and there is no way to
-turn them on: a sandbox has no need to phone home. What holds against the box is Claude
-Code's managed settings, `/etc/claude-code/managed-settings.json`, which also keep the
-auto-updater and claude.ai connectors off, and refuse messages from your other Claude sessions
-(`crossSessionInbound`: cross-session messaging reaches across machines over Remote Control, so
-any session on the account could otherwise steer a box; driving the box yourself from the app
-over Remote Control is unaffected). The launcher mounts the file read-only from the
-install into every box (the image carries a copy too), and Claude applies it after every
-settings file the box can write (its `~/.claude`, or the workspace's `.claude/`). An empty
-read-only directory covers `managed-settings.d`, so no drop-in shipped in an image can
-override it either. Two fallbacks back it up, but a box can override them:
-`DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` on the container command line, and the
-same keys asserted in the box's `settings.json` each launch.
-
-Steering a session you started on this machine with Remote Control works with telemetry off,
-on Claude Code 2.1.283 or later. Versions 2.1.154 to 2.1.282 refused it, which is why
-airlock once had an `airlock telemetry on` switch. The switch is retired: a project still
-switched on is turned off at its next launch, with a notice, and `make install-airlock` clears the
-leftover switch for every project and lists them. Two Remote Control uses still need
-telemetry and are not supported in a box: starting a new session onto this machine from
-another device, and Remote Control under Trusted Devices.
-
-```sh
-airlock telemetry show    # always off
-```
-
-Never set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` or `DISABLE_GROWTHBOOK` in a box you
-want to steer remotely: they turn off feature-flag evaluation, which Remote Control needs.
+Telemetry and error reporting are always off in a box, with no way to turn them on. See
+[docs/install.md](docs/install.md#telemetry-is-always-off) (including what that means for
+Remote Control).
 
 ### 5. Use it
 
@@ -244,875 +143,115 @@ cd ~/some/project
 airlock               # Claude Code, contained, for this directory
 ```
 
-> **Billing:** the `setup-token` path uses your **subscription quota** (included), not
-> pay-per-token API credits. The TUI may show "Claude API" — that's cosmetic; confirm
-> with `/usage`. **Never** set `ANTHROPIC_API_KEY` in the box — it silently switches to
-> metered API billing.
+The box mounts the project read-write at its real path. By default it can reach only
+Anthropic until you grant more.
+
+## Updating
+
+Run `make install-airlock` again. It picks up a new Claude Code release at once, and
+refreshes the Debian packages once a week (`make refresh` forces it now). Then run
+`airlock doctor` after kernel or engine changes. Details, including the vendored Claude Code
+installer and old-image cleanup: [docs/install.md](docs/install.md#updating).
 
 ## Commands
 
 ```
 airlock                         Claude Code in the box for $PWD
 airlock shell                   interactive shell in the box (no session lock)
-airlock exec -- CMD [ARG...]    run one command in the box (scripts, service units); its exit status
+airlock exec -- CMD [ARG...]    run one command in the box; its exit status
 airlock -p "PROMPT" ...         Claude Code headless (any claude flags pass through)
 airlock --dangerously-skip-permissions   auto mode, contained
 
-airlock secret set KEY VALUE|pass:PATH   grant an env secret to this project's box
-airlock secret list | rm KEY             (pass:PATH resolves via `pass` at launch)
+airlock egress                  show this project's egress posture
+airlock egress minimal|dev      Anthropic only  |  + npm, PyPI and GitHub
+airlock egress github pypi      an explicit subset of groups (replaces)
+airlock egress add|rm <groups>  edit the group set
+airlock egress proxy [SOCKET]   no network at all; everything through a host proxy
+
+airlock secret set KEY VALUE|pass:PATH   give this project's box an env secret
+airlock secret list | rm KEY             (pass:PATH is resolved with `pass` at launch)
 
 airlock share list              review approved folder shares (ro/rw)
 airlock share rm RELPATH        revoke a share approval
 
-airlock mount add DIR           mount a host dir READ-ONLY into this project's box
-airlock mount list | rm DIR     (host-only; e.g. a scoped credential dir, see below)
+airlock mount add DIR           mount a host directory READ-ONLY into this project's box
+airlock mount list | rm DIR
 
 airlock socket add SOCKET       bind-mount a host Unix socket into this project's box
-airlock socket list | rm SOCKET (host-only; e.g. a credential-injecting proxy, see below)
+airlock socket list | rm SOCKET
 
-airlock egress                  show this project's egress posture
-airlock egress minimal|dev      Anthropic-only  |  + npm/PyPI/GitHub
-airlock egress github pypi      an explicit subset (replaces)
-airlock egress add|rm <groups>  edit the group set incrementally
-airlock egress proxy [SOCKET]   no network at all; everything through a host proxy (see below)
+airlock mode [show|MODE|reset]  the permission mode this project's box starts in
+airlock login [show|persist|token]   shared token, or a login the box keeps
+airlock telemetry show          always off
 
-airlock tmp                     print (and create) this project's $AIRLOCK_TMP scratch dir
+airlock tmp                     print (and create) this project's $AIRLOCK_TMP
 airlock paste                   save the clipboard IMAGE where a box can read it
 airlock paste --copy            ...and put the path on the clipboard (what `alpaste` does)
 airlock paste list [N]          list recent pastes, newest first
-airlock doctor                  verify this host can actually contain a box (live test)
+airlock doctor                  prove this host can contain a box (live test)
 
 alpaste                         zsh shortcut for `airlock paste --copy`
 command claude                  raw host Claude (bypasses the airlock guard)
 ```
 
-A box asks the engine for a terminal only when the launcher has one (stdin and stdout), so
-`airlock -p` and `airlock exec` run from a script or a service unit; the box's stdout is the
-command's own (the firewall logs to stderr). The launcher asks its questions (a share or an
-egress grant the project's config requests, a second session on the project) only of a
-terminal: without one on stdin the answer is no and stdin is left for the command, so piped
-input can't approve anything. An `exec` box runs its command under the engine's init
-(catatonit under podman), so stopping a unit that runs one stops the box.
+Every grant above is host-only and per project. The box cannot read or change it.
 
-`airlock doctor` is the one to run after changing engines or rebooting: it checks the
-rootless prerequisites and then makes a real throwaway box prove containment — an allowed
-host must be reachable *and* a denied host must not be.
+**Scripts and service units.** A box asks the engine for a terminal only when the launcher
+has one (on stdin and stdout), so `airlock -p` and `airlock exec` work from a script or a
+service unit. The box's stdout is the command's own; the firewall logs to stderr. An `exec`
+box runs its command under the engine's init (catatonit under podman), so stopping a unit
+that runs one stops the box.
 
-`claude` on the host is a lock-aware guard: it warns if an airlock session for the same
-project is already open (two live sessions can corrupt shared `--resume` history).
+**Prompts need a terminal.** The launcher asks its questions (a share or egress grant the
+project's config requests, a second session on the project) only of a terminal. Without one
+on stdin the answer is no, and stdin is left for the command, so piped input cannot approve
+anything.
 
-For **secrets, prefer the `pass:PATH` form** (`airlock secret set KEY pass:mcp/foo`) over a
-literal value. A literal is stored plaintext in the host state dir (mode 600) and also
-lands in your shell history when you type it; `pass:PATH` keeps the secret encrypted at
-rest and is only resolved — into the mode-0600 env-file, never the command line — at
-launch.
+**Secrets: prefer `pass:PATH`** (`airlock secret set KEY pass:mcp/foo`). A literal value is
+stored in plaintext in the host state dir (mode 600) and lands in your shell history.
+More in [docs/configuration.md](docs/configuration.md#secrets-airlock-secret).
 
-`AIRLOCK_SECRET_DENY` in the host config lists pass entries that must never reach a box,
-as space-separated globs (`AIRLOCK_SECRET_DENY="github/*"`). `secret set` refuses a
-matching `pass:` entry, and a launch whose store holds one stops before the box starts.
-Names are normalised first (`/a`, `./a` and `a//b` are the entries pass would read), but
-the match is on the name: a symlinked `.gpg` alias in the store is not caught.
-Use it for credentials another tool holds on the box's behalf, such as a token a
-credential proxy fronts. It is empty by default, so every secret works as before.
+## Reference
 
-## Per-project config — `<project>/.airlock/config`
-
-Committed with the project, **safe-parsed** (never sourced) since the project dir is
-untrusted. Keys (see `config/project-config.example`):
-
-| Key | Effect |
+| Topic | Where |
 | --- | --- |
-| `egress = a.com, 192.0.2.115:8428` | extra egress grants; **host-approved once** (box-writable, so TOFU-gated) |
-| `share = <relpath> ...` | mount a sibling folder **read-only** at its real path (host-approved) |
-| `share_rw = <relpath> ...` | mount it **read-write** (louder prompt; separate approval from read) |
-| `artifact_dirs = venv frontend/node_modules` | extra env-built dirs kept container-local |
-| `image = claude-airlock:playwright` | opt into a heavier image (must be a `claude-airlock:*` tag) |
-
-Egress entries are separated by spaces **or** commas, and each may be a hostname, a bare
-IPv4 (443 only), an IPv6 literal, or `IPv4:port` — the last opens exactly one host+port,
-which is the tightest form and the right one for an internal datasource on a non-standard
-port. An entry matching none of those shapes **aborts the launch** rather than being
-skipped: a grant that can never apply would otherwise leave the box looking configured
-while silently having no access to the endpoint. So does an entry that points at **this
-host** — loopback, pasta's `169.254.0.0/16`, slirp4netns' `10.0.2.0/24`, or any address
-on a host interface: a project file cannot grant the sandbox the machine it is sandboxed
-from, and it is never even prompted for. The firewall refuses the same addresses inside
-the box, including a hostname that resolves to one. An operator who really means it has
-`AIRLOCK_EXTRA_EGRESS` in the host config.
-
-Share paths are relative to `AIRLOCK_SHARE_BASE` (default `~/development`), so committed
-configs never contain absolute `/home` paths, and `..`/absolute are rejected.
-
-Every launch re-checks each share, approved or not. It is skipped, with no override, when
-any part of it below the share base is a symlink (the box can write `.airlock/config` and
-every `share_rw` directory, so an approved path could otherwise be swapped for a link to
-anywhere), when it overlaps a protected dot-dir, or when it contains or sits inside your
-ssh agent socket, gpg's home or socket directory (located with `gpgconf`, so a custom
-`GNUPGHOME` counts), or a path in `AIRLOCK_PROTECTED_PATHS` (absolute or `~/`; a relative
-entry fails closed). A share inside one of the project's own `share_rw` folders is refused
-outright, since the box could swap it. Every check runs again just before the engine
-starts, and a share that changed in between stops the launch; `-v` still resolves the path
-once more, so this narrows the window to milliseconds rather than closing it. Nesting
-across projects (project A has `share_rw = X`, project B has `share = X/sub`) is only
-narrowed this way, not refused: avoid it. `AIRLOCK_ROOTS` entries get the same
-protected-location check. `airlock
-mount` applies the same protected-location check.
-
-## Read-only host mounts — `airlock mount`
-
-`share` only reaches folders under `AIRLOCK_SHARE_BASE`, and `.airlock/config` is writable
-from inside the box, so neither can hand a box a credential that lives elsewhere.
-`airlock mount add DIR` does: a host-only, per-project grant (stored in the host state
-dir, with no `.airlock/config` key), always **read-only**, mounted at its real path.
-
-The intended use is a scoped, short-lived credential you re-mint on the host, e.g. a
-read-only kubeconfig whose `tokenFile` sits in the same directory:
-
-```
-airlock mount add ~/.kube-claude
-airlock secret set KUBECONFIG /home/you/.kube-claude/config
-```
-
-Because the whole directory is mounted (not the file), a token replaced on the host with
-`mv` is visible to a running box on its next read — no relaunch when it expires.
-
-Refused, with **no override**, at `add` and again at every launch: anything that is not an
-existing directory under `$HOME` once symlinks are resolved; `$HOME` itself; anything
-inside a credential directory (`~/.ssh`, `~/.gnupg`, `~/.kube`, `~/.config/sops`,
-`~/.password-store`, `~/.claude`, `~/.config/claude-airlock`, keyrings, cloud CLIs, …) or
-an ancestor of one (so `~/.config` is refused); a directory not owned by you or writable
-by group/others; one holding a hard-linked file (a hard link to a key is the same inode, so
-a mount would expose it); one with a mount point inside it (the bind is recursive, and the
-hard-link scan cannot see across a filesystem boundary); and the workspace. At launch, an
-approved path that now resolves somewhere else is skipped too. Skipping only removes
-access, so it warns rather than aborts.
-
-The deny list is a guard against habit, not an inventory of where credentials live, so
-`mount add` also prints every file the box will be able to read. Look at that list: it is
-the grant.
-
-## Host sockets — `airlock socket`
-
-`airlock socket add SOCKET` bind-mounts one host Unix socket into this project's box, at
-its real path. It is host-only like `mount`: stored in the host state dir, with no
-`.airlock/config` key. The intended use is a proxy that holds a credential outside the
-box and injects it into requests, such as
-[airlock-cred-proxy](https://github.com/appletalk/airlock-cred-proxy), so the box can use GitHub
-without ever holding a token.
-
-A socket is a capability, not data. The box connects **as you**: with rootless podman,
-keep-id maps the box user to your uid, and your supplementary groups do not survive the
-user namespace. So a socket restricted to a group you are in is still refused inside the
-box; grant your uid instead, for example with `setfacl -m u:$USER:rw SOCKET`. Set that in
-the service's unit (an `ExecStartPost=` on a systemd `.socket` unit), not by hand: the ACL
-is lost whenever the socket is recreated.
-
-The rule, with **no override**, at `add` and again at every launch: the socket must be
-owned by a dedicated service account (not you, not root), and every directory from it up
-to `/` must be owned by root and writable by nobody else. A directory above the socket's
-own may be world-writable only if it is sticky, like `/tmp`. The owner must be a system
-account: not `nobody`, and below `UID_MIN` in `/etc/login.defs`. The socket must be on
-tmpfs, ext4, xfs or btrfs, because a FUSE filesystem can report any owner. Services run
-with systemd `DynamicUser=` get uids above `UID_MIN`, so their sockets cannot be granted;
-give such a service a static system user instead. So put the socket in a
-root-owned directory (a systemd `.socket` unit does this), not in a `RuntimeDirectory=`
-owned by the service user.
-
-Why an owner rule and not a list of bad paths: the sockets that hand over the host (your
-session bus and systemd manager, SSH and gpg agents, `screen` and `tmux`, credential
-caches, WSL's Windows interop, libvirt, snapd) are owned by you or by root, and WSL exposes
-the same files under several paths (`/mnt/wslg/...`), which no path list can keep up with.
-Root-owned directories also mean nothing running as you, the box included, can swap the
-socket after approval. A deny list of well-known sockets stays as a second layer, paths
-with `:`, `,` or control characters are refused, and the socket's device, inode, change
-time, owner and mode are re-checked immediately before the engine starts: if any changed,
-the launch stops. An idempotent `chmod` during the launch (a config-management run, say)
-also changes the change time; such a launch can simply be retried. That re-check sees
-the host's view; rootless podman resolves the path in its own mount namespace, which the
-box cannot reach, so it guards against the box and not against another process running
-as you.
-
-The owner rule tells a service account from a person, not a safe service from a dangerous
-one. Grant a socket only if you would let the box do everything that service allows.
-
-One file is mounted, not its directory, so a second socket beside it is not exposed. If
-the service's socket is recreated (restarting a systemd `.socket` unit does this; restarting
-only the service does not), relaunch the box to pick up the new one.
-
-## Egress through a host proxy — `airlock egress proxy`
-
-The third egress posture, beside `minimal` and `dev`. The box gets **no network at all**:
-it starts with `--network none`, so it has loopback and nothing else, no route and no
-resolver. Its way out is one host proxy's Unix socket, mounted at its real path and
-bridged by the entrypoint to `127.0.0.1:3128`, with `HTTPS_PROXY` and `HTTP_PROXY` pointing
-there. The proxy decides what is reachable, and can log every connection. Sockets you
-granted with `airlock socket add` stay mounted too; they bypass the proxy, so each launch
-and `airlock egress show` name them.
-
-```
-airlock egress proxy /run/airlock-envoy/anthropic.sock   # this project
-airlock egress show                                      # posture, socket, and its check
-airlock egress minimal                                   # back to the in-box firewall
-```
-
-Or make it the default for every project in the host config:
-
-```
-AIRLOCK_EGRESS_MODE=proxy
-AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/anthropic.sock
-```
-
-A project that then sets another posture is named at each launch, so a box running
-outside the proxy is never silent.
-
-The guarantees:
-
-- **The network namespace enforces it, not the proxy variables.** A box that unsets
-  `HTTPS_PROXY`, kills the bridge or starts its own relay gains nothing: there is still no
-  route out except the sockets mounted into it. The entrypoint also refuses to start Claude
-  if it finds any interface besides loopback.
-- **It fails closed.** If the socket is missing, or fails the [socket rule](#host-sockets--airlock-socket)
-  at launch, the box does not start. It never falls back to a network. A posture the
-  launcher does not recognise (`AIRLOCK_EGRESS_MODE=Proxy`, say) refuses the launch too,
-  rather than being read as `minimal`.
-- **The box cannot change it.** The posture lives in the host state dir like the rest, and
-  there is no `.airlock/config` key for it.
-- **One policy, the proxy's.** Egress groups, `egress =` lines and `AIRLOCK_EXTRA_EGRESS`
-  do not apply while it is set; a launch says so if any are present, and `add`/`rm` are
-  refused. An `egress =` entry that is malformed or points at the host still stops the
-  launch, as it does in every posture. To widen what a box can reach, widen the proxy's
-  allowlist, or give the project a socket for a different listener.
-- **Secrets cannot steer it.** `airlock secret` refuses `AIRLOCK_*` and `*_PROXY` keys,
-  and a launch skips any already stored. That includes a corporate `HTTPS_PROXY` for a
-  networked project: set such a proxy in the host config's `AIRLOCK_EXTRA_EGRESS` and the
-  tool's own config instead, or use this posture with that proxy behind the socket.
-- **No firewall capabilities.** With no network to filter, the box drops `NET_ADMIN` and
-  `NET_RAW` too.
-
-The socket must pass the same rule as `airlock socket add`, and the box connects as you
-(under Docker, as uid 1000), so grant that uid on it. [airlock-envoy](https://github.com/appletalk/airlock-envoy) is
-one such proxy: Envoy behind a systemd socket unit, an allowlist per listener, and an
-audit log of every connection. Anything that speaks HTTP `CONNECT` on a socket that
-passes the rule works too.
-
-Everything in the box has to go through the proxy, so tools that ignore the proxy
-variables fail rather than leak: the box has no DNS, and SSH remotes or raw TCP have no
-route. Images built before this posture are refused with a message to rebuild them.
-
-### Plain HTTP through the proxy: git and gh without a credential in the box
-
-A proxy can serve some hosts by **plain HTTP**: the box sends `http://<host>/...`, and the
-proxy checks the request, adds the credential and does the TLS (airlock-envoy's `http` lines).
-If the proxy writes a client manifest next to its socket (`<name>.clients` beside
-`<name>.sock`; airlock-envoy does), each launch points the box's clients at those hosts:
-
-- **git**: in the box's own `~/.gitconfig`, remotes on each git host (rules `git`, `git-read`,
-  `forgejo` or `any`) are rewritten to `http://<host>/`: `https://<host>/`, `https://<host>:443/`,
-  `git@<host>:`, `<host>:`, `ssh://git@<host>/`, `ssh://git@<host>:22/`, `ssh://<host>/`,
-  `git+ssh://git@<host>/` and `git://<host>/`, plus `ssh://git@<host>:PORT/` for each port in
-  `AIRLOCK_GIT_SSH_PORTS` (host config, e.g. `AIRLOCK_GIT_SSH_PORTS=2222`). The repo's own
-  config, which your host git also reads, keeps its ssh or https URLs. Not rewritten (git
-  matches the prefix exactly), so they fail with no route out: a host in another case
-  (`git@GitHub.com:`), a user in an https URL (`https://user@<host>/`), another ssh user, an
-  `~/.ssh/config` alias, and other names of the host (`www.`). These rewrites win over a
-  repo's own `insteadOf` for the same host, so such a repo also goes through the proxy, with
-  the proxy's identity.
-- **gh**: if `api.github.com` is one of the hosts and the proxy has a credential for it, a
-  read-only box gh config (`GH_CONFIG_DIR=/etc/airlock-box/gh`) sends gh's requests over the
-  proxy socket itself (`http_unix_socket`), with a placeholder `GH_TOKEN` the proxy replaces.
-  Without a credential gh is not set up (GitHub refuses the placeholder, and gh won't run
-  without a token). Under rules other than `github-api` (say `github-issues`) the launch says
-  which writes will get 403. gh's telemetry and update checks are off. gh reaches only
-  `api.github.com` this way (uploads and other GitHub hosts are refused by the proxy).
-- **Tokens in the box anyway**: while the proxy holds any credential, the launch names every
-  secret that looks like a GitHub token, by key (`GH_TOKEN`, `GITHUB_*_TOKEN`, `*_PAT`, ...) or
-  by value (`ghp_`, `github_pat_`, ...), never printing it. It warns and launches; remove them
-  with `airlock secret rm`. A `GH_TOKEN` secret also takes the placeholder's place.
-- Each session gets its own copy of both (removed when it ends), so a later launch in another
-  posture never changes what a running box's git does. If the launcher is killed while its box
-  runs on, the next launch sweeps that copy: the box keeps its git config but its gh config
-  empties, so gh fails closed (no network) until the box is relaunched.
-- **tea**: for each Forgejo host (rules `forgejo`) the proxy has a credential for, a box tea
-  login at `http://<host>` with a placeholder token the proxy replaces with the bot's. tea
-  matches a repo's ssh or https remote to it by host. The launcher mounts it read-only and the
-  entrypoint copies it to `~/.config/tea` (tea reads nothing else), so an image built before
-  this has no tea login. Your own tea config is never mounted (`.config/tea` is on the deny list).
-- **kubectl**: for each Kubernetes API server (rules `kubernetes-read`) the proxy has a
-  credential for, a read-only box kubeconfig (`KUBECONFIG=/etc/airlock-box/kube/config`) with
-  `server: http://<host>` and no user or token: kubectl goes through the proxy variables and
-  the proxy adds the token. One context per server, the first current. A `KUBECONFIG` secret
-  takes its place (the launch says so). When the proxy's token has expired, kubectl reports
-  "the server has asked for the client to provide credentials"; renew it on the host.
-- **curl and the rest**: use `http://<host>/` URLs; the proxy variables already point there.
-- **The box's CLAUDE.md**: the seeded conventions get a closing section listing these hosts,
-  how to reach each (`http://`, never `https://`), what its rules allow and refuse, and which
-  client is set up for it, so boxed Claude neither tries `https://` nor guesses at the limits.
-  Written each launch from the manifest; no hosts (or no usable manifest), no section.
-
-The clients themselves (git, gh, tea, kubectl) are in `:dev` and the images built on it. A `:base`
-box gets the same config files but has no client to read them.
-
-`airlock egress show` lists the hosts. The manifest ends up in git config, so it is used only
-if it is root's, writable only by root, in a root-owned directory, at most 64 KiB, and every
-line is `<host> <port> <rules> yes|no` with a valid lowercase host name or IPv4 address. Otherwise the launch
-says why and goes on with no client set up. No manifest, nothing changes.
-
-## Host config — `~/.config/claude-airlock/config`
-
-Your machine's defaults (see `config/config.example`): `AIRLOCK_IMAGE`,
-`AIRLOCK_SHARE_BASE`, `AIRLOCK_EGRESS_MODE` (default posture for new projects),
-`AIRLOCK_EGRESS_PROXY` (the socket for the proxy posture),
-`AIRLOCK_MODEL`, `AIRLOCK_GIT_NAME/EMAIL`, `AIRLOCK_ROOTS`, `AIRLOCK_EXTRA_EGRESS`,
-`AIRLOCK_PROTECTED_PATHS` (extra paths no share or mount may overlap),
-`AIRLOCK_PASTE_PROJECT` or `AIRLOCK_PASTE_DIR` (where pastes go; see `airlock paste`),
-`AIRLOCK_EXTRA_MOUNTS` and `AIRLOCK_MANAGED_SETTINGS` (see *Running boxes as a dedicated user*),
-`AIRLOCK_SECRET_DENY` (pass entries never injected) and `AIRLOCK_GIT_RO` (default `1`:
-read-write repos get their git config and hooks bound read-only, see SECURITY.md; `0` turns
-it off), and `AIRLOCK_TZ` (the box's timezone, a zone name such as `America/Vancouver`; by
-default `$TZ`, else the host's own zone from `timedatectl` or `/etc/localtime`, else UTC).
-
-## Statusline — `config/airlock-statusline.sh`
-
-Boxes get it automatically, with a green `(airlock)` badge. To use the same line for
-**host** Claude, so both sides look identical apart from a red `(host)` badge, point your
-host `~/.claude/settings.json` at the copy `make install-airlock` puts in `~/.claude`, with `--host`:
-
-```json
-"statusLine": {
-  "type": "command",
-  "command": "bash ~/.claude/airlock-statusline.sh --host"
-}
-```
-
-Not the checkout's `config/airlock-statusline.sh`: host Claude runs the status line at every
-refresh, so a branch or an uncommitted edit there would run on your host. The install warns
-when `settings.json` still points elsewhere. The badge names whose session it is
-(`alice (host)`, `agent (airlock)`; in a box, the host user the launcher passes in), so boxes of
-different accounts, such as an agent's own user beside yours, are told apart.
-
-## Scratch files — `$AIRLOCK_TMP`
-
-The box's `/tmp` is destroyed with the container (`--rm`, including on Ctrl+C) and is
-never shared with the host, so anything written there is silently lost between sessions —
-and a host-written `/tmp` file is invisible to the box.
-
-Each project instead gets `/tmp/airlock-<user>/<slug>`, bind-mounted into its box at the **same
-path** and exported as `$AIRLOCK_TMP` by *both* the `airlock` launcher and the host
-`claude` wrapper. Host and box therefore name the same file identically (`airlock tmp`
-prints and creates it). Sessions are shared across the boundary, so both sides must agree
-on where scratch lives.
-
-- **Per-project.** Only that project's own directory is mounted (mode `0700`) — never
-  the base, never bare `/tmp` — so nothing leaks between projects.
-- **Per-user base.** `/tmp/airlock-<user>` (`0700`), so two accounts on one host (you and an
-  agent's own user, say) never share it. Anyone can create a name in a shared `/tmp` first,
-  so the launcher and the `claude` wrapper refuse a default base that is a symlink, someone
-  else's, or open to others (only root can then remove it; `AIRLOCK_TMP_BASE` works around
-  it). Once made it is never removed, so no one gets a second chance at the name.
-  `AIRLOCK_TMP_BASE` (environment only) moves it.
-- **Upgrading from `/tmp/airlock`.** Re-source the wrapper in open terminals (or open new
-  ones), and let running boxes exit: until then old and new sessions name different scratch
-  dirs. What is in `/tmp/airlock/<slug>` (caches, pastes) is not moved; copy what you need
-  into the new dir, and remove `/tmp/airlock` when no session uses it (or let a reboot).
-- **An inter-session cache, not durable storage.** It lives on the host's `tmpfs`: it
-  survives sessions but is cleared on reboot, so it never becomes an unmanaged junk
-  drawer. Anything that must truly persist belongs in the project (gitignored if it
-  shouldn't be committed).
-- **Bare `/tmp` stays ephemeral** on purpose, so `pip` / `pytest` / build temp files stay
-  container-local rather than consuming the host's RAM-backed `tmpfs`.
-
-Claude only *follows* the convention if told to. The box is briefed automatically
-(`config/box-CLAUDE.md` is copied in on every launch). For **host** Claude, paste
-[`config/host-CLAUDE.md`](config/host-CLAUDE.md) into your global `~/.claude/CLAUDE.md`.
-
-## Pasting images into a box — `airlock paste`
-
-**Ctrl+V of an image does not work in a box, and deliberately never will.** Claude Code
-reads the clipboard by shelling out to `xclip` / `wl-paste`, and no clipboard crosses into
-a container unless you mount the host's X11 or Wayland socket. That mount is the thing
-this project exists to avoid: it would let the box read *everything* you copy — passwords
-included, continuously — and on X11 also inject synthetic input into your other windows.
-Screenshots are not worth a hole of that shape.
-
-So the image crosses as a **file**, at a path both sides already agree on:
-
-```
-airlock paste            # saves the clipboard image, prints the path
-alpaste                  # zsh: same, and puts the path on your clipboard
-```
-
-Then Ctrl+V into the agent's prompt. You are pasting **text** — the agent opens the file
-itself. Or say *"check the latest paste"* and let it list the directory.
-
-Pastes land in `$AIRLOCK_TMP/pastes/` as `YYYYMMDD-HHMMSSmmm.png` (host local time),
-newest 20 retained, cleared with the rest of the scratch dir on reboot. One fixed name
-shape is deliberate — it makes lexical order chronological, so listing needs no `ls -t`.
-Files that do **not** match that shape are ignored by `paste list` and are **never**
-pruned: this tool does not delete files it did not write.
-
-**Setup.** Set the project pastes belong to in your host config (`bin/install.sh` doesn't ask;
-it ends with a note, from a bundle too, while neither this nor `AIRLOCK_PASTE_DIR` is set):
-
-```
-AIRLOCK_PASTE_PROJECT="$HOME/development/myproject"
-```
-
-It is **required, with no default, and is not `$PWD`.** You run `paste` from whatever
-terminal is free while the agent holds the other one, so a `$PWD` default would quietly
-write into a directory that box never mounts — you would hand the agent a path it cannot
-open. Point it at one project and override per call with `--project DIR`.
-
-**Requirements.** `wl-clipboard` on Wayland or `xclip` on X11 (the session decides, so
-XWayland picks the native reader). A PNG on the clipboard is used as-is, which is the
-normal case on Linux desktops. WSLg offers **BMP only**, and the Claude API accepts
-PNG/JPEG/GIF/WebP — so there, one of `python3-pil`, `imagemagick` or `ffmpeg` is needed to
-convert. Without one, `paste` fails and writes nothing rather than saving an unreadable
-file.
-
-**Every failure removes the output file.** A missing paste always means *the grab failed*,
-never *here is an older image you are about to mistake for the new one*.
-
-**A drop box instead: `AIRLOCK_PASTE_DIR`.** For an account that runs boxes but gets its
-pastes from someone else (an agent with a Unix user of its own: you paste, it reads), set
-`AIRLOCK_PASTE_DIR` in that account's host config to a directory the other user writes. Every
-box mounts it **read-only** at the same path, and the box finds pastes at `$AIRLOCK_PASTES`
-(otherwise `$AIRLOCK_TMP/pastes`; unset if the check failed). The directory must be named by
-its real path and writable only by its owner (the writer), and every directory above it must
-be root's and writable by root alone (so not under `/tmp`): the writer can change what is in
-it, never swap it for a link to somewhere else. It is checked again, and must be the same
-directory, right before the engine starts. It may not be your home, inside the workspace or
-a protected path, nor hold hard links or mount points when checked (what the writer adds
-later is bounded by the kernel: `fs.protected_hardlinks` lets them link only files they own or
-may write, and their FUSE mounts are closed to other users unless `/etc/fuse.conf` has
-`user_allow_other`; either way they can only show what they could copy in). A paste dir that fails the check
-is not mounted (the launch warns and goes on). Nor may it be a system directory (`/etc`,
-`/usr`, `/var`, `/opt`, ...), which would cover the box's own. Make it setgid with the
-reader's **primary** group (`install -d -m 2750 -o <writer> -g <reader's primary group> DIR`)
-so new files carry that group: a box runs with its user's primary group only, so a
-supplementary group would let the reader read pastes on the host but not in its boxes.
-The writer pastes with their own tool, or with `airlock paste` and `AIRLOCK_PASTE_DIR` set
-in *their* config, which writes the file group-readable (0640) but also mounts the drop box
-into the writer's own boxes.
-
-## Running boxes as a dedicated user
-
-The box is the inner wall. A Unix account of its own for the agent is an outer one: a
-container or runtime escape then lands as a user who can read none of your files, keys or
-sessions, and the agent's work comes back to you only through what you choose to pull (git
-branches, say). Nothing in the launcher assumes it runs as you:
-
-- **Install per account.** Each account has its own rootless image store, so each installs
-  its own copy: as the agent's user, `bin/install.sh`, or, without giving it build-time
-  network, a bundle you wrote (below). It has its own config (`~/.config/claude-airlock/config`,
-  or one root owns, named by `AIRLOCK_CONFIG` in its user manager's environment) and its own
-  Claude login: with no network of its own, `AIRLOCK_PERSIST_LOGIN=1` and `/login` inside a box,
-  through its proxy. The
-  account needs subuid/subgid ranges (`usermod --add-subuids ... --add-subgids ...`) and a
-  user manager (`loginctl enable-linger <user>`) for rootless Podman. Give it no `sudo`,
-  none of your groups, a locked password, and its home `0700` (and yours).
-- **Scratch is per user.** `/tmp/airlock-<user>`, refused if anyone else made it first (see
-  *Scratch files*). A polyinstantiated `/tmp` for that account is better still.
-- **Egress is per user.** With [airlock-envoy](https://github.com/appletalk/airlock-envoy),
-  give each account its own listeners (`client <listener> <user>`): its sockets are in
-  `/run/airlock-envoy/<user>/`, which no other account may enter, and a credential belongs
-  to one user's listeners only. Point the account's config at its own socket
-  (`AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/<user>/<listener>.sock`); the socket check
-  accepts that path (root-owned directories, a service account's socket).
-- **Pastes through a drop box.** The account has no clipboard of yours; set
-  `AIRLOCK_PASTE_DIR` to a directory you write and it only reads (see *Pasting images*).
-- **Shared directories, by the operator only: `AIRLOCK_EXTRA_MOUNTS`.** Space-separated
-  `DIR:ro` / `DIR:rw` entries, mounted at their own paths, from the account's config or the
-  environment of whatever launches the box (a host-side script running one box for one task;
-  both lists apply), never from `.airlock/config`. Each must be its real path, not a system
-  directory or the workspace, root's or the account's own, never world-writable (group-writable
-  is fine: a queue several accounts share), with every directory above it root's and writable by
-  root alone, and no hard-linked file or mount point inside. Checked, pinned, and re-checked just
-  before the launch (a swap stops it); an entry that fails is skipped with a warning. `:rw`
-  needs a directory root owns (in one the account owns, the box could open the mode up); a
-  directory named twice is mounted once, read-only if either entry says so.
-- **Launch from a project folder.** A box is refused when its workspace is the home directory
-  or anything above it, sits inside `~/.config/claude-airlock`, the install directory or
-  `~/.local/bin`, or holds an `AIRLOCK_CONFIG` file the account owns (compared after resolving
-  symlinks): the workspace mount would hand the box its own managed settings, state, config
-  or launcher read-write. Other host config in the home directory (shell profiles, other
-  tools' settings) is yours to keep out of workspaces. Subcommands (`airlock egress show`, ...)
-  still work from anywhere.
-- **Box settings the box can't loosen: `AIRLOCK_MANAGED_SETTINGS`.** A JSON object in a file
-  root owns and only root may write (config or environment only), copied in as a Claude Code
-  managed-settings drop-in, which outranks the user's and the project's settings. Use it to
-  deny tools per account (say, `"permissions": {"deny": ["SendMessage", "ListAgents"]}` and
-  `"crossSessionInbound": "refuse"` so sessions on one subscription can't message each other).
-  A file that fails the check stops the launch: a box without the restrictions isn't the box
-  you configured.
-- **Files the other way: git only.** Clone the repos it works on into its own home and have
-  it push branches; you review and merge. Don't share a checkout you later run.
-- **Get to its sessions without its password:** `machinectl shell <user>@.host` (with a
-  polkit rule allowing you exactly that); a terminal multiplexer run in its user manager keeps
-  sessions alive across your logouts.
-
-### Installing from a bundle (another account, or an offline host)
-
-A build needs the network (the Debian base, packages, the Claude Code release). An account
-that should not have it, such as an agent's own user, or a host that cannot reach it, can
-install what you built instead:
-
-```
-make install-airlock                              # as you, as usual
-make bundle DIR=/srv/agent-inbox/airlock  # the installed version: launcher + images, ~3.5 GB
-bash /srv/agent-inbox/airlock/install-bundle.sh   # as the other account: no build, no network
-make bundle-clean DIR=/srv/agent-inbox/airlock    # once every reader has installed it
-```
-
-- **What it holds:** the installed commit's source tree, its images in two archives (`base`
-  with its `os` stage, and `dev`; `podman save`, shared layers stored once per archive) and a
-  `MANIFEST` with the commit, each image's ID and a sha256 of every file. `make bundle` refuses unless the image tags are still the ones that commit
-  went live with.
-- **What the reader checks:** every file against the manifest (a changed or half-written
-  bundle installs nothing; the manifest is written last), that the source tree is the
-  manifest's commit, and that each image loads as exactly the ID the manifest names. An
-  account whose config runs `AIRLOCK_IMAGE=claude-airlock:base` loads only the base archive
-  (and lets an older `dev` of its own go): it never writes the dev image's layers, though it
-  still checks the dev archive's sha256 with every other file. Then it goes live like any
-  install, with the containment check, and the image smoke test when dev is loaded (the
-  smoke test runs as `dev`). A base-only account that later wants `dev` sets its config to
-  it and installs the same bundle again; until then a launch on `dev` says so and stops. The reader
-  runs the bundle's own installer, so launcher and images always come from one commit. A
-  bundle is not signed: it proves the files are the ones the writer wrote, so put it where
-  only the writer can write (its directory owned by the writer, every directory above it
-  root's).
-- **Space:** a bundle is a handoff, not an archive: `make bundle` replaces an earlier one in
-  the same directory, and `bundle-clean` removes it. Each account keeps one version of the
-  images (see *Old images* under the install section).
-- **Same engine on both sides:** podman and docker name and number images differently, so a
-  bundle records its engine and a reader on the other refuses it.
-- **Several readers:** each account has its own store, so each holds a copy (about 4 GB).
-  Write the bundle once, have each install it, then clean it.
-
-## Security model
-
-- **Egress: minimal by default.** Only Anthropic is reachable (Claude can't run without
-  it). npm / PyPI / GitHub are opt-in *groups*; other domains are per-project,
-  host-approved. Enforced by an in-container iptables/ipset default-DROP firewall, on
-  **both IPv4 and IPv6** — a single unfiltered address family is a total bypass, so if
-  the box has a global v6 address it cannot filter, it refuses to start.
-- **Or no network at all: `airlock egress proxy`.** The box has loopback only, and reaches
-  out through one host proxy socket whose allowlist decides, by name (an SNI-aware proxy
-  closes the CDN co-tenancy gap below). See
-  [Egress through a host proxy](#egress-through-a-host-proxy--airlock-egress-proxy).
-- **The allowlist matches destination IPs, not names — so it inherits CDN co-tenancy.**
-  The firewall resolves each allowed domain to its IPs and permits TCP/443 to those IPs;
-  it does not (and at that layer cannot) inspect the TLS SNI. So **any** site that resolves
-  to an IP already on the allowlist is reachable, approved or not. This matters most when
-  you open a registry group: npm and PyPI front through large shared CDNs, so
-  `airlock egress dev` effectively allows a slice of that CDN's address space, and an agent
-  can reach an attacker's service co-hosted on the same edge IP. Prefer keeping projects
-  `minimal` and adding narrow `egress =` domains over flipping the whole `dev` group on.
-  Closing this fully would require an SNI-aware filtering proxy (a possible future
-  direction); today, treat an enabled registry group as a broad, if legitimate-looking,
-  exfil surface.
-- **DNS is pinned to the box's configured resolvers**, not open to the internet. This
-  narrows, and does not close, DNS exfiltration: the agent can no longer point queries at
-  a server it chooses (`dig @attacker-ns …`), but data can still be tunnelled as query
-  *names* through your legitimate resolver to a hostile authoritative server. No resolver
-  allowlist can prevent that. "Configured" means configured by the *host*: when the host's
-  only resolver is loopback, podman and docker append Google Public DNS as a fallback, so
-  the launcher points podman boxes at the network stack's forwarder to your host resolver
-  (`--dns`), and the firewall never pins a public resolver the host itself doesn't list
-  (`AIRLOCK_DNS` overrides both; see `lib/host-dns.sh`). Treat DNS as a low-bandwidth channel that remains open — and
-  note that the box's own `CLAUDE_CODE_OAUTH_TOKEN` is in scope for it: a compromised box
-  can read its own token and drip it out this way. If you believe a box was compromised,
-  rotate the token (`command claude setup-token` again, then re-save it). The token grants
-  subscription API access, not host or billing access, so the blast radius is bounded.
-- **Host-controlled, tamper-proof grants.** Secrets, share approvals, and egress posture
-  live in a per-project state dir that is **never mounted into the box**. A compromised
-  session can request more (via the box-writable `.airlock/config`) but can't approve it
-  — approving read never grants write; widening always prompts on the host.
-- **Least-privilege container.** Drops all Linux capabilities except the few the firewall
-  and privilege-drop need; runs as non-root `dev`; `--security-opt=no-new-privileges`. A
-  process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork-bomb, and an
-  optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
-- **No new namespaces.** The box runs under `image/seccomp.json`: the engine's default
-  profile with `unshare`, `setns` and any `clone` carrying a namespace flag refused
-  (`clone3` answers ENOSYS so libc falls back to the filtered `clone`). With the default
-  profile the agent could `unshare -Ur` and hold a full capability set as root inside a
-  nested user namespace, which is the precondition for most container-to-host kernel
-  exploits. Nothing the box runs needs one: Claude Code's own Bash sandbox (bubblewrap)
-  is opt-in, not in the image, and falls back to unsandboxed with a warning; Chromium
-  runs `--no-sandbox`; git, node, python, pwsh, kubectl, the validators and Postgres are
-  unaffected (checked). The profile also closes kernel interfaces nothing in the box uses:
-  keyrings (`keyctl`, `add_key`, `request_key`) and `memfd_secret` answer ENOSYS; `socket`
-  takes only unix, inet, inet6 and netlink, each matched by exact value (so a family with
-  high bits set doesn't slip past), and `socketpair` only unix, so `AF_ALG` (the kernel
-  crypto API), `AF_VSOCK`, `AF_PACKET` and the rest answer ENOSYS; on x86_64 (the only
-  architecture this is checked on), i386 and x32 syscalls kill the process (`socketcall` hides its arguments from seccomp, and the compat
-  layer is attack surface of its own). The doctor and the image smoke test run under the
-  same profile, and the smoke test checks each of these by behaviour as `dev`.
-- **The host is not on the box's network.** Under pasta the launcher passes
-  `--map-guest-addr none`, so `169.254.1.2` (`host.containers.internal`) reaches nothing;
-  podman already declines to map the gateway address and forwards no ports. Host
-  loopback services were never reachable. That is a layer *under* the firewall: the box
-  has no route to the host even if its own rules are wrong.
-- **No host credentials in the box unless you mount them, and secrets stay off the
-  process table.** Auth is an OAuth token; the host `~/.claude` credentials, container
-  socket, and other projects are never exposed. The one way a host credential gets in is
-  `airlock mount add`, read-only, guarded, and listed at the moment you grant it. The
-  token and any injected secrets are handed to the engine via a mode-0600
-  `--env-file` (removed on exit), **not** as `-e KEY=VALUE` — so they don't sit in the host
-  process table (`ps auxe`, `/proc/<pid>/cmdline`) for the life of the container.
-- **The box's `~/.claude.json` is seeded by allowlist.** A new project gets the theme and
-  a few UI preferences from your host file, nothing else: not the account profile, not
-  the host install's `userID` / `machineID` (Claude generates fresh ones per box), and
-  not `githubRepoPaths`, the map of every other repo on the machine that the old
-  "copy everything except `projects`" seed used to carry in. Projects provisioned before
-  this are cleaned at launch: the repo map always, the install identifiers only while
-  they still equal the host's, so identifiers a box generated for itself are never
-  churned. The account profile is left alone in an existing file: a login done inside
-  the box writes one that can be identical to the host's, and it is not worth risking a
-  box's login to remove email and org IDs the box can learn from its token anyway.
-- **Optional private CA chain** (see below) is trusted by *external tooling*
-  (curl/git/Python) only — never added to Node's trust, so Claude's own TLS to
-  `api.anthropic.com` stays on its vetted built-in roots.
-
-### Known limitation: a workspace the box has touched runs on the host
-
-The firewall contains the *network*. It does nothing about files. Your project is mounted
-**read-write at its real path** (that's the point — the box does real work), so the box can
-write any file the host will later execute **itself, unsandboxed, with your real
-credentials**. Three of them run **without a build step and without asking** — verified
-on the host, not inferred:
-
-- **`.git/config`** — `core.fsmonitor` runs on every host `git status`; `core.pager` on
-  anything that pages; `core.hooksPath`, `core.sshCommand` (next fetch/push),
-  `diff.external`, `filter.*` and `alias.*` likewise. Git has no way to ignore a repo's
-  own config, and its ownership check does not fire because keep-id makes the files yours.
-  `.git/hooks/*` is the same channel, narrower: commit / push / merge only.
-- **`.claude/settings.json`** and **`.claude/settings.local.json`** — hooks in them run
-  when you next open host `claude` in the repo, with no approval dialog. **`.mcp.json`**
-  is the same: the host launches whatever server binary it names. **`CLAUDE.md`** is the
-  no-execution variant — instructions the host agent follows.
-- Everything that runs when you build or enter the tree: `Makefile`, `package.json`
-  scripts, `pyproject.toml` / `setup.py`, `conftest.py`, `.vscode/tasks.json`, pre-commit
-  configs, `node_modules/.bin` shims, and `.envrc` once you `direnv allow` it again
-  (direnv refuses a changed file until you do; the risk is the reflexive re-allow).
-
-None of these touch the network, so containment never sees them. There is no mechanism
-here for this, deliberately: a writable workspace is the product, and a wrapper around
-`git` to police it is more machinery than it is worth. So it is a rule, not a feature:
-**treat a repo a box has worked in the way you'd treat a PR from a stranger.** Before you
-run host `git`, host `claude`, or a build in that tree, look at the diff — and look at
-`.git/config` and `.claude/` too, since `git diff` does not show you those. Running
-untrusted code? Do it in the box, and keep host tooling out of that tree until you have.
-
-### Known limitation: shared memory is an influence channel
-
-Worth understanding, because the egress firewall **cannot see it and will not stop it.**
-
-This project's `~/.claude/projects/<slug>/` is mounted **read-write** into the box, so
-sessions and memories flow in and out (that's what makes `--resume` and saved memories
-work on both sides). That directory contains `memory/` — and host Claude **auto-loads
-those files into its context every session, unprompted.**
-
-So a compromised box can write a memory file that the **unsandboxed host agent** later
-reads and acts on, with your real credentials and no firewall. It never touches the
-network; it just writes a file you have already told the host to trust. Containment holds
-against *escape and exfil* (Class A); this is a different thing — **influence**.
-
-It is read-write by default anyway, deliberately: the box is meant to be the primary
-workspace, so read-only memory would mean the agent can never *save* a memory where you
-actually do the work, and the feature would quietly die. We take the friction win and
-name the exposure. Tighten it when the code is untrusted:
-
-| `AIRLOCK_SHARE_MEMORY` | Behaviour |
-| --- | --- |
-| `rw` *(default)* | Box reads **and writes** host memories. Convenient; channel open. |
-| `ro` | Box reads host memories, cannot author them. **Closes the memory channel.** |
-| `off` | Box neither reads nor writes them; it gets empty container-local storage. |
-
-Transcripts stay read-write in every mode — a box that cannot write its transcript cannot
-hold a session at all. Set `AIRLOCK_SHARE_HISTORY=0` to share nothing.
-
-**Symlinks are refused.** Host Claude follows symlinks when it loads this directory, so a
-box that turned `memory/MEMORY.md` into a link to `~/.ssh/id_ed25519` would have the key
-read into the host's context and written back into the shared transcript, where the next
-box reads it — exfiltration with no network involved. Both the launcher and the host
-`claude` wrapper therefore refuse to start while any symlink exists under
-`~/.claude/projects/<slug>/`, and name it. They never delete it: a link there is either an
-attack you need to know about or something you did on purpose.
-
-## Host hardening for rootless Podman (optional, recommended)
-
-The box cannot exceed your own user's authority, so a container escape lands as *you*,
-not root. Hardening the host therefore does three things: it makes an escape harder (less
-kernel attack surface), it makes an escape worth less (less that your user can reach),
-and it keeps the runtime patched. None of this is required for airlock to work, and none
-of it relaxes anything airlock does inside the box.
-
-**Kernel sysctls.** A drop-in such as `/etc/sysctl.d/60-hardening.conf`:
-
-```ini
-kernel.unprivileged_bpf_disabled = 1
-net.core.bpf_jit_harden = 2
-kernel.kptr_restrict = 2
-kernel.dmesg_restrict = 1
-kernel.yama.ptrace_scope = 2
-# optional, see below
-kernel.io_uring_disabled = 2
-```
-
-Apply with `sudo sysctl --system`, then re-run `airlock doctor`. Trade-offs:
-`ptrace_scope = 2` also stops `strace -p` / `gdb -p` without sudo, on the host and in
-every box. `io_uring_disabled = 2` is belt-and-braces: the box's seccomp profile already
-refuses `io_uring_setup`, and this extends that to every process on the host, which
-breaks the few host programs that need io_uring (`1` limits it to the
-`kernel.io_uring_group` group instead).
-
-**Leave unprivileged user namespaces on.** Rootless Podman *is* a user namespace, so
-`kernel.unprivileged_userns_clone = 0` or `user.max_user_namespaces = 0` disables airlock
-altogether. The risky part, a process creating a *nested* namespace to get a full
-capability set, is already refused inside the box by `image/seccomp.json`.
-
-**Keep the runtime patched.** Almost every container escape is a bug in the kernel, the
-OCI runtime (`crun`/`runc`), `conmon`, or the network helper (`pasta`/`passt`). Update them
-with the rest of the system, reboot for kernel updates, then run `airlock doctor`, which
-proves the firewall still holds on the new kernel. `make install-airlock` rebuilds the images, so
-the userland inside the box stays current as well.
-
-**Set a memory ceiling.** Check that your user's systemd instance delegates the cgroup
-controllers (systemd does this by default on cgroup v2):
-
-```sh
-cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers
-# expect at least: memory pids
-```
-
-Then set `AIRLOCK_MEMORY` in `~/.config/claude-airlock/config` to a generous cap, for
-example about a third of host RAM. The pids cap is on by default. Without a memory cap, a
-runaway build or a compromised agent can push the whole host into swap or the OOM killer.
-
-**No container API socket.** Stay out of the `docker` group (it is root-equivalent, see
-[Why rootless Podman](#why-rootless-podman)), and leave the rootless `podman.socket` user
-unit disabled unless something needs it (`systemctl --user is-enabled podman.socket`).
-Airlock never mounts either socket. Don't add one with `airlock mount`: a box holding the
-socket can start a sibling container without any of airlock's restrictions.
-
-**Make an escape worth less.** Because an escape runs as you, anything your user can
-read without a prompt is in reach: `~/.ssh`, `~/.gnupg`, cloud and cluster credentials,
-browser profiles. The controls that help are the ones that need a human at each use:
-SSH keys on a hardware token, or passphrase-protected with agent confirmation
-(`ssh-add -c`); secrets in `pass`/gpg behind an agent with a short cache; admin
-credentials that step up interactively (OIDC with WebAuthn, not a static token in a
-config file); and **no `NOPASSWD` sudo**, which turns an escape as you into root.
-
-**Bind host services to loopback.** A box cannot reach host loopback, and under pasta the
-launcher removes the host mapping (`--map-guest-addr none`). A development server
-listening on `0.0.0.0` is still reachable at your LAN address by anything the box's
-firewall lets through, so give local services `127.0.0.1` unless they need the LAN.
-
-**LSMs: don't add one just for airlock.** The confinement a default container profile
-gives (no mounts, no ptrace, no `/proc/sys` writes) is already enforced by the dropped
-capabilities, seccomp and the user namespace, so enabling AppArmor or SELinux for airlock
-alone buys little. Airlock is developed and tested on hosts without an enforcing LSM. On
-an SELinux-enforcing host, note that the launcher does not relabel its bind mounts (no
-`:z`), so expect denials on the workspace; that combination is untested.
-
-## Corporate / internal CA certs (optional)
-
-If you sit behind a TLS-inspecting proxy, or need to reach internal HTTPS services whose
-certs chain to a private PKI, drop the CA chain into `image/certs/` and rebuild:
-
-```sh
-cp /path/to/your-root-ca.crt image/certs/
-make install-airlock          # rebuild the images
-```
-
-Public CA certificates only — **never private keys**. The directory is empty by default
-and the CA layer is a no-op without it, so nothing here is needed on a normal home
-network.
-
-## Images
-
-Layered, built by `make install-airlock`:
-
-- `claude-airlock:base` — Debian + Claude Code + the egress firewall and proxy bridge, and
-  little else: curl, jq and a bare `python3` (no pip or venv). No git, gh or editor; those
-  are in `:dev`.
-- `claude-airlock:os` — the base without Claude Code (its `os` build stage). Not a box
-  image: `:dev` builds on it and copies Claude Code from `:base` as its last layer. To build
-  `:dev` by hand, build both first: `podman build --target os -t claude-airlock:os image`.
-- `claude-airlock:dev` *(default)* — base + git, gh, make, less, vim, zsh, ripgrep, Python
-  (pip, venv), Node, PowerShell, build tools, PostgreSQL, yaml tooling, infra clients
-  (kubectl, helm, sops, tea, drill; no credentials baked in), and the offline config
-  validators below. Start Postgres in-box with `airlock-pg-start` (localhost:5432,
-  ephemeral).
-- `claude-airlock:playwright` — dev + headless Chromium + the Playwright MCP. Opt in via
-  `image = claude-airlock:playwright`. Build on demand:
-  `docker build -t claude-airlock:playwright image/playwright`.
-
-### Config validators (in `:dev`, syntax/lint only)
-
-Infrastructure-as-code tooling that runs to completion at **minimal egress** — no
-provider downloads, no collection resolution, no plugin fetches. All of it is pinned by
-version + sha256 in `image/dev/Dockerfile`, and so is everything else the image
-downloads: Node by tarball checksum, the ansible-lint venv by a hash for every package
-(`image/dev/ansible-requirements.txt`), and Claude Code through a vendored copy of its
-installer (`image/claude-install.sh`, which itself checks the binary against the release
-manifest; `make claude-installer-diff` shows what upstream has changed). shellcheck and
-bats are pinned too (not apt), to the same versions `make bootstrap` vendors and CI runs,
-so lint results cannot differ between CI and a box (a host with its own system
-shellcheck uses that one: `.tooling/` sits in a directory boxes can write to). Only the Debian packages
-float, on the weekly refresh.
-
-| tool | what works offline |
-|---|---|
-| `promtool check config\|rules`, `promtool test rules` | Prometheus config, alerting/recording rules, rule unit tests |
-| `terraform fmt -check` | HCL syntax + formatting (exit 3 = drift, 2 = syntax error) |
-| `tflint` | the `terraform` ruleset bundled inside the binary |
-| `ansible-lint` | playbook/role lint (`ANSIBLE_LINT_NODEPS=1` is set image-wide, see below) |
-| `vector validate --no-environment` | config parse + topology, no component/health checks |
-| `alloy fmt -t`, `alloy validate` | Alloy syntax + formatting, component references and argument schemas |
-| `Invoke-ScriptAnalyzer` (pwsh) | PowerShell script lint. Bundles Windows/PS-5.1 **compatibility profiles**, so `PSUseCompatibleSyntax`/`PSUseCompatibleCommands` can catch 7.x-only syntax that would fail on a 5.1 guest |
-| `shellcheck` | shell lint — also what this repo's own `make lint` and pre-commit hook run |
-| `bats` | shell test runner — this repo's own `make test` |
-| `magick` (ImageMagick), Pillow (`python3-pil`) | image conversion + inspection; backs `airlock paste` on platforms whose clipboard offers BMP |
-
-Deliberately **out of scope**, because they need the network and would otherwise degrade
-to a no-op inside a box: `terraform init`/`validate`, `tflint --init` (external rulesets),
-`ansible-galaxy collection install`, bare `vector validate`, and `alloy run` (which starts
-the components and reports usage upstream). Those fail rather than lie. A project that genuinely needs them opens a narrow `egress =` in `.airlock/config`
-for a one-time fetch and caches the result with `artifact_dirs` (e.g. `.terraform`), which
-persists across sessions.
-
-Two settings are load-bearing rather than cosmetic. `ANSIBLE_LINT_NODEPS=1` forces
-ansible-lint's offline mode: by default it installs `requirements.yml` collections and
-refreshes JSON schemas over the network, and since the firewall **drops** rather than
-rejects, that stalls instead of failing. `POWERSHELL_UPDATECHECK=Off` +
-`POWERSHELL_TELEMETRY_OPTOUT=1` do the same job for pwsh's startup update check.
-
-`make image-smoke` proves the whole table (and the offline halves of the infra clients:
-`kubectl kustomize`, `helm lint|template`, `sops filestatus`, plus node, pwsh and
-`airlock-pg-start`): it runs each validator inside a real box at
-minimal egress against a **known-bad** fixture and fails if the tool accepts it. Checking
-only that valid input passes would not catch a validator that has quietly stopped
-validating.
+| Host config (`~/.config/claude-airlock/config`): every key | [docs/configuration.md](docs/configuration.md#host-config-configclaude-airlockconfig) |
+| Per-project config (`.airlock/config`): `egress =`, `share =`, `share_rw =`, `artifact_dirs =`, `image =` | [docs/configuration.md](docs/configuration.md#project-config-projectairlockconfig) |
+| Secrets, read-only host mounts (`airlock mount`), host sockets (`airlock socket`), permission mode (`airlock mode`) | [docs/configuration.md](docs/configuration.md) |
+| Egress through a host proxy (`airlock egress proxy`), and plain HTTP through the proxy (git, gh, tea, kubectl without a credential in the box) | [docs/egress-proxy.md](docs/egress-proxy.md) |
+| Scratch files (`$AIRLOCK_TMP`) and pasting images into a box (`airlock paste`) | [docs/scratch-and-pastes.md](docs/scratch-and-pastes.md) |
+| Installing and updating, signing in (`airlock login`), telemetry, statusline | [docs/install.md](docs/install.md) |
+| Running boxes as a dedicated user, and installing from a bundle | [docs/dedicated-user.md](docs/dedicated-user.md) |
+| Agent users with their own sessions (`make install-agents`) | [docs/agents.md](docs/agents.md) |
+| Images, offline config validators, corporate CA certs | [docs/images.md](docs/images.md) |
+| Security model, known limitations, host hardening | [docs/security-model.md](docs/security-model.md) |
+| Reporting a vulnerability | [SECURITY.md](SECURITY.md) |
+| Security reviews | [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md), [docs/security-review-2026-09-22.md](docs/security-review-2026-09-22.md) |
 
 ## Development
 
 ```sh
 make bootstrap   # vendor the pinned shellcheck (sha256) + bats (commit) into .tooling/; re-run to re-verify
 make hooks       # install the git pre-commit hook (runs lint + tests)
-make lint        # shellcheck the launcher + firewall scripts
-make test        # run the bats suite
+make lint        # shellcheck the launcher, firewall and helper scripts (+ zsh -n on the integration)
+make test        # run the bats suite against both engines (podman + docker)
 make check       # lint + test (what the hook runs)
+make image-smoke # prove the dev image's validators work offline (needs a built :dev)
+make doctor      # live containment test on this host
 ```
 
-The launcher is intentionally Bash — it composes `docker`/`iptables`/`pass`/`jq`. Keep
-it shellcheck-clean and covered by the bats suite (which drives the real launcher with a
-stubbed `docker`). `make help` lists all targets.
+`make help` lists every target. The launcher is Bash on purpose: it composes the engine,
+`iptables`, `pass` and `jq`. Keep it shellcheck-clean and covered by the bats suite, which
+drives the real launcher with a stubbed engine.
+
+`make lint` and `make test` prefer a system shellcheck and bats over `.tooling/`. That
+directory is gitignored and inside a checkout a box can write, so re-run `make bootstrap`
+with no box open on the checkout to re-verify it (see [SECURITY.md](SECURITY.md)).
 
 ## License
 
 Copyright (C) 2026 Appletalk.
 
-Licensed under the **GNU Affero General Public License v3.0 or later** — see
+Licensed under the **GNU Affero General Public License v3.0 or later**; see
 [LICENSE](LICENSE). If you run a modified version of this as a network service, the AGPL
 requires you to offer its source to the users of that service.
