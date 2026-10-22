@@ -8,7 +8,8 @@
 # allowlist, nothing inherited that could steer bash or it) and through absolute paths, and only
 # while it and every directory above it are root's, no links, and writable by no one else (a
 # sticky directory above its own excepted). Names are checked again
-# here and matched by prefix, never expanded (no compgen -W).
+# here and matched by prefix, never expanded (no compgen -W). The operator's own shell functions
+# are trusted (a function named builtin or read is the operator's choice).
 _airlock_agents_env=/etc/claude-airlock/agents/agents.env
 _airlock_agents_bin=/usr/local/lib/airlock-agents/operator
 _airlock_agents_owners=0
@@ -24,8 +25,11 @@ _airlock_agents_names() {  # _airlock_agents_names <what> [verb]: the installed 
         [ "$f" = / ] && break
         f=${f%/*}; f=${f:-/}
     done
-    /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" LANG=C.UTF-8 \
-        /usr/bin/timeout 3 "$bin" _complete "$@" </dev/null 2>/dev/null | /usr/bin/head -n 200 | while IFS=$'\t' builtin read -r n _; do
+    # Bounded in time even if the script ignores TERM or leaves a child holding the pipe (the
+    # reader is timed too), and in size; read's own timeout beats a user TMOUT.
+    /usr/bin/env -i PATH=/usr/bin:/bin HOME="${HOME-}" USER="${USER-}" LOGNAME="${LOGNAME-}" LANG=C.UTF-8 \
+        /usr/bin/timeout -k 1 3 "$bin" _complete "$@" </dev/null 2>/dev/null \
+        | /usr/bin/timeout -k 1 4 /usr/bin/head -c 65536 | /usr/bin/head -n 200 | while IFS=$'\t' builtin read -t 5 -r n _; do
         [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$ ]] && builtin printf '%s\n' "$n"
     done
 }
@@ -54,10 +58,13 @@ _airlock_agents() {
     for w in "${words[@]}"; do [[ $w == "$cur"* ]] && COMPREPLY+=("$w"); done
 }
 _airlock_agents_register() {
-    local env=$_airlock_agents_env line cmd=
+    local env=$_airlock_agents_env line v cmd=''
     [ -f "$env" ] && [ -r "$env" ] || return 0
-    while IFS= builtin read -r line; do
-        [[ $line =~ ^AGENTS_COMMAND=([a-z_][a-z0-9_-]{0,31})$ ]] && cmd=${BASH_REMATCH[1]}
+    # (patterns, not =~: the user's BASH_REMATCH stays as it was)
+    while IFS= builtin read -r line || [ -n "$line" ]; do
+        case $line in AGENTS_COMMAND=*) v=${line#AGENTS_COMMAND=} ;; *) continue ;; esac
+        case $v in ''|[!a-z_]*|*[!a-z0-9_-]*) continue ;; esac
+        [ "${#v}" -le 32 ] && cmd=$v
     done < "$env"
     [ -n "$cmd" ] || return 0
     _airlock_agents_cmd=$cmd

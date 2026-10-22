@@ -2312,3 +2312,58 @@ Z
     [[ "$output" != *"./agent attach p2.review"* ]]
     [ ! -e "$T/planted-ran" ]
 }
+
+
+@test "agent _complete ids: ids sharing a quote, a flood of real-id lines, a dangling request link" {
+    op_stubs; web_queue
+    A=20261021T120001Z-aaaaa1 B=20261021T120002Z-bbbbb2
+    req "$A" a; req "$B" b
+    # B's last line is the shared-quote one: grep -F sees B there, and so must completion
+    printf '{"id":"%s","stage":"check","result":"failed, gave up"}\n{"id":"%s"id":"%s","stage":"research","result":"running"}\n' "$B" "$A" "$B" \
+        >> "$Q/log/agent-web/stages.jsonl"
+    [[ "$("$O" web ls)" == *"$B  researching (research: running)"* ]]
+    run "$O" _complete ids retry; [ -z "$output" ] || { echo "retry: $output"; return 1; }
+    run "$O" _complete ids show
+    [[ "$output" == *"$B"$'\t'"researching (research: running)"* ]] || { echo "show: $output"; return 1; }
+    # the worker floods its log with lines naming a real request: Tab stays quick
+    python3 -c 'import sys; open(sys.argv[1], "ab").write(("{\"id\":\"%s\"}\n" % sys.argv[2]).encode() * 1500000)' "$Q/log/agent-web/stages.jsonl" "$A"
+    for v in retry show; do SECONDS=0; "$O" _complete ids "$v" >/dev/null; [ "$SECONDS" -le 2 ] || { echo "$v took ${SECONDS}s"; return 1; }; done
+    # a dangling link in requests/ is offered by neither web ls nor completion
+    ln -s /nonexistent "$Q/requests/20261021T120009Z-ddddd9.json"
+    run "$O" _complete ids show; [[ "$output" != *ddddd9* ]]
+}
+
+@test "agent: its internal variables are never taken from the caller's environment" {
+    op_stubs; web_queue
+    req 20261021T120004Z-aaaaa4 q
+    echo '{"ts":"x","user":"agent-web","id":"20261021T120004Z-aaaaa4","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
+    out="$(STAGE_WEB='publish: published' STATE=held "$O" web ls)"
+    [[ "$out" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]] || { echo "$out"; return 1; }
+    out="$(OCTL_RAW=1 REMOTE_OUT=$'a\e]0;x\ab' "$O" ls)"
+    [[ "$out" != *$'\e'* ]]
+}
+
+@test "completion: a misbehaving script is bounded (NUL in a name, TERM ignored, a child holding the pipe, one huge line)" {
+    command -v zsh >/dev/null || skip "no zsh"
+    completion_stub
+    op="$AIRLOCK_AGENTS_BINDIR/operator"
+    zt() { run timeout 20 env T="$T" zsh -f -c 'compdef() { :; }; _describe() { local a=${@[-1]}; print -rl -- "${(@P)a}"; }
+        source $T/completion.zsh; words=(agent attach ""); CURRENT=3; _airlock_agents'; }
+    bt() { run timeout 20 env T="$T" bash -c 'source "$T/completion.bash"; COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "[${COMPREPLY[*]}]"'; }
+    printf '#!/bin/bash\nprintf "good\\0;touch %s\\tdesc\\nok1\\tfine\\n"\n' "$T/pwn" > "$op"; chmod 0755 "$op"
+    zt; [ "$output" = "ok1:fine" ] || { echo "nul: $output"; return 1; }; [ ! -e "$T/pwn" ]
+    for body in "trap '' TERM; exec sleep 30" "setsid sleep 30 & echo held" "head -c 300000000 /dev/zero | tr '\\0' a"; do
+        printf '#!/bin/bash\n%s\n' "$body" > "$op"; chmod 0755 "$op"
+        SECONDS=0; zt; [ "$SECONDS" -le 8 ] || { echo "zsh, $body: ${SECONDS}s"; return 1; }
+        SECONDS=0; bt; [ "$SECONDS" -le 8 ] || { echo "bash, $body: ${SECONDS}s"; return 1; }
+    done
+    pkill -f "^sleep 30$" -U "$UID" 2>/dev/null || true
+}
+
+@test "bash completion: set -u with USER unset, a TMOUT, and an agents.env with no final newline" {
+    completion_stub
+    printf 'AGENTS_COMMAND=agent' > "$T/c.env"
+    run env -u USER -u LOGNAME T="$T" TMOUT=1 bash -c 'set -u; source "$T/completion.bash"; COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "[${COMPREPLY[*]}]"; echo "rematch=${BASH_REMATCH[*]-}"'
+    [ "${lines[0]}" = "[proj.main p2.review]" ] || { echo "$output"; return 1; }
+    [ "${lines[1]}" = "rematch=" ]
+}

@@ -32,6 +32,8 @@
 #   <command> web retry <id>            an id a worker gave up on, from the start
 #   <command> web login [research|gate|chat]   /login in each workspace's box (all three if none given)
 set -euo pipefail
+# Internal to this script (set per call below), never taken from the caller's environment.
+unset OCTL_RAW STAGE_WEB STAGE_GUARD STATE
 
 # The site's names (rendered by airlock-agents-apply from agents.conf).
 # shellcheck source=/dev/null
@@ -249,7 +251,7 @@ def names(d, suffix):
         if suffix and not e.endswith(suffix):
             continue
         n = e[: -len(suffix)] if suffix else e
-        if ID.fullmatch(n):
+        if ID.fullmatch(n) and os.path.exists(os.path.join(root, d, e)):
             out.add(n)
     return out
 def read_log(user):
@@ -270,43 +272,59 @@ def read_log(user):
     except OSError:
         return b""
 STAGE = re.compile(rb""".*"stage":"([a-z]*)","result":"([a-z0-9 ,;()\x27-]*)".*""")
-IDREF = re.compile(rb"\x22id\x22:\x22([0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})\x22")
-def last_stages(user, want):
-    # Each id reference in order (the last one wins, as last_stage takes the last line), its
-    # line found around it: lines with no id cost nothing, however many there are.
-    data, last, seen = read_log(user), {}, {}
-    for m in IDREF.finditer(data):
-        i = m.group(1).decode()
-        if i not in want:
-            continue
-        a = data.rfind(b"\n", 0, m.start()) + 1
-        if a not in seen:
+# The state of an id comes from the last line holding its reference, as last_stage reads it
+# (grep -F "\"id\":\"<id>\"" | tail -1): rfind, which also sees references sharing a quote.
+def line_of(data, i):
+    p = data.rfind(b"\x22id\x22:\x22" + i.encode() + b"\x22")
+    if p < 0:
+        return None
+    a = data.rfind(b"\n", 0, p) + 1
+    b = data.find(b"\n", p)
+    m = STAGE.fullmatch(data, a, len(data) if b < 0 else b)
+    return (m.group(1) + b": " + m.group(2)).decode() if m else ""
+def stages(data, ids):
+    out = {}
+    for i in ids:
+        st = line_of(data, i)
+        if st is not None:
+            out[i] = st
+    return out
+# Ids on lines that say a step gave up or changed (the only ones retry can take): found from
+# those words, so a log of other lines, however many, costs nothing here.
+REF = re.compile(rb"(?=\x22id\x22:\x22([0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})\x22)")
+def flagged(data, words):
+    out, seen = set(), set()
+    for w in words:
+        for m in re.finditer(re.escape(w), data):
+            a = data.rfind(b"\n", 0, m.start()) + 1
+            if a in seen:
+                continue
+            seen.add(a)
             b = data.find(b"\n", m.end())
-            st = STAGE.fullmatch(data, a, len(data) if b < 0 else b)
-            seen = {a: (st.group(1) + b": " + st.group(2)).decode() if st else ""}
-        last[i] = seen[a]
-    return last
+            out.update(x.decode() for x in REF.findall(data, a, len(data) if b < 0 else b))
+    return out
 reqs = names("requests", ".json")
 w = g = {}
+newest = lambda ids, n: sorted(ids, reverse=True)[:n]
 if verb in ("approve", "reject"):
-    cands = names("held", ".json") & reqs
+    cands = newest(names("held", ".json") & reqs, 2000)
 elif verb == "release":
-    cands = names("quarantine", "") & reqs
-    g = last_stages(guard, cands)
+    cands = newest(names("quarantine", "") & reqs, 200)
+    g = stages(read_log(guard), cands)
 elif verb == "retry":
-    w, g = last_stages(web, reqs), last_stages(guard, reqs)
-    cands = {i for i, st in w.items() if "gave up" in st or "changed" in st} | {i for i, st in g.items() if "gave up" in st}
+    wd, gd = read_log(web), read_log(guard)
+    pool = newest((flagged(wd, (b"gave up", b"changed")) | flagged(gd, (b"gave up",))) & reqs, 200)
+    w, g = stages(wd, pool), stages(gd, pool)
+    cands = [i for i in pool if "gave up" in w.get(i, "") or "changed" in w.get(i, "") or "gave up" in g.get(i, "")]
 else:
-    cands = set(sorted(reqs, reverse=True)[:50])
-    w, g = last_stages(web, cands), last_stages(guard, cands)
-out = sorted(cands, reverse=True)[:2000]
-keep = set(out)
-for i in out:
+    cands = newest(reqs, 50)
+    wd, gd = read_log(web), read_log(guard)
+    w, g = stages(wd, cands), stages(gd, cands)
+for i in cands:
     print("C\t" + i)
 for k, m in (("W", w), ("G", g)):
     for i, st in m.items():
-        if i in keep:
-            print(k + "\t" + i + "\t" + st)' "$QUEUE" "$1" "$WEB" "$GUARD"
+        print(k + "\t" + i + "\t" + st)' "$QUEUE" "$1" "$WEB" "$GUARD"
 }
 web_decide() {  # web_decide approve|reject|release <id>
     local what=$1 id=$2 f held sum=""

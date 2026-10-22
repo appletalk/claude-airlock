@@ -42,10 +42,14 @@ _airlock_agents_items() {
         [[ $f == / ]] && break
         f=${f:h}
     done
-    for line in "${(@f)$(/usr/bin/env -i PATH=/usr/bin:/bin HOME=$HOME USER=$USER LOGNAME=$LOGNAME LANG=C.UTF-8 \
-                         /usr/bin/timeout 3 $bin _complete "$@" </dev/null 2>/dev/null | /usr/bin/head -n 200)}"; do
+    # Bounded in time even if the script ignores TERM or leaves a child holding the pipe (the
+    # reader is timed too), and in size (64 KiB, 200 lines) before zsh holds any of it.
+    for line in "${(@f)$(/usr/bin/env -i PATH=/usr/bin:/bin HOME=${HOME-} USER=${USER-} LOGNAME=${LOGNAME-} LANG=C.UTF-8 \
+                         /usr/bin/timeout -k 1 3 $bin _complete "$@" </dev/null 2>/dev/null \
+                         | /usr/bin/timeout -k 1 4 /usr/bin/head -c 65536 | /usr/bin/head -n 200)}"; do
         n=${line%%$'\t'*} d=${line#*$'\t'}
-        [[ $line == *$'\t'* && $n =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$' ]] || continue
+        # (a NUL would end the string the regex sees, not the name)
+        [[ $line == *$'\t'* && $line != *$'\0'* && $n =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,128}$' ]] || continue
         items+=("$n:${${d//[^ -~]/}[1,60]}")
     done
     _describe -t names "${1//-/ }" items
