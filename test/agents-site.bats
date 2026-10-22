@@ -54,7 +54,7 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     [ ! -d "$T/r/srv" ]
     # (each refutation as a test, not a bare `! cmd`, which bats doesn't count as a failure)
     run grep -c 'u:1101' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"; [ "$output" = 0 ]
-    grep -qx 'a /srv/claude-inbox/airlock  -    -     -    -   u::rwx,g::r-x,o::---' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"
+    grep -qx 'a /srv/claude-inbox/airlock  -    -     -    -   u::rwx,g::r-x,o::---,d:u::rwx,d:g::r-x,d:o::---' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"
     [ "$(grep -c 'meta skuid' "$T/r/etc/airlock-agents.nft")" = 2 ]
     d="$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
     run grep -c '^InaccessiblePaths=-/sys' "$d"; [ "$output" = 0 ]

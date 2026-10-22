@@ -113,7 +113,7 @@ S
 #!/bin/bash
 # nft list: the live table, here the installed file (NFT_LOADED) or nothing loaded
 [ "$1" = -n ] && shift
-if [ "$1" = list ]; then [ -n "${NFT_LOADED:-}" ] && cat "$AIRLOCK_AGENTS_ROOT/etc/airlock-agents.nft"; exit; fi
+if [ "$1" = list ]; then [ -n "${NFT_LOADED:-}" ] && cat "${NFT_LIVE:-$AIRLOCK_AGENTS_ROOT/etc/airlock-agents.nft}"; exit; fi
 echo "nft $*" >> "$LOG"
 S
     # setpriv: record the identity, run the command (as the test user).
@@ -544,7 +544,8 @@ S
     grep -qx 'BindPaths=/home/agent /run/user/1100' "$d"
     grep -qx 'InaccessiblePaths=-/run/dbus/system_bus_socket' "$d"
     grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice' "$d"
-    grep -qx 'After=user@1101.service user@1102.service' "$d"
+    grep -qx 'After=user-1101.slice user-1102.slice' "$d"
+    grep -qx 'ProtectSystem=strict' "$d"
     c="$UC/agent.conf"
     grep -qx 'AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/agent/agent-anthropic.sock' "$c"
     grep -qx 'AIRLOCK_PASTE_DIR=/srv/agent-inbox/pastes' "$c"
@@ -1007,7 +1008,8 @@ PY
     got() { grep -v '^#' "$1" | grep -v '^$'; }
     want1100='[Unit]
 RequiresMountsFor=/home/agent
-After=user@1101.service user@1102.service
+Wants=user-1101.slice user-1102.slice
+After=user-1101.slice user-1102.slice
 [Service]
 PrivateNetwork=yes
 PrivateTmp=yes
@@ -1017,16 +1019,18 @@ ProtectProc=invisible
 Environment=CONTAINERS_CONF_OVERRIDE=/usr/local/share/airlock-agents/containers.conf
 ProtectHome=tmpfs
 BindPaths=/home/agent /run/user/1100
-ReadOnlyPaths=-/var/spool/cron -/var/spool/at -/var/spool/atjobs
+ProtectSystem=strict
+ReadWritePaths=/home/agent /run/user/1100 -/srv/agent-web/requests
 InaccessiblePaths=-/run/dbus/system_bus_socket
 InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
-    for spec in agent-web:1101:"-/srv/agent-web/held -/srv/agent-web/reports -/srv/agent-web/log/agent-web":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1102.slice":"user@1100.service user@1102.service" \
-                agent-guard:1102:"-/srv/agent-web/answers -/srv/agent-web/quarantine -/srv/agent-web/log/agent-guard":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1101.slice":"user@1100.service user@1101.service"; do
+    for spec in agent-web:1101:"-/srv/agent-web/held -/srv/agent-web/reports -/srv/agent-web/log/agent-web":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1102.slice":"user-1100.slice user-1102.slice" \
+                agent-guard:1102:"-/srv/agent-web/answers -/srv/agent-web/quarantine -/srv/agent-web/log/agent-guard":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1101.slice":"user-1100.slice user-1101.slice"; do
         IFS=: read -r u n rw cg af <<<"$spec"
         want="[Unit]
 RequiresMountsFor=/home/$u
+Wants=$af
 After=$af
 [Service]
 PrivateNetwork=yes
@@ -1039,7 +1043,6 @@ ProtectHome=tmpfs
 BindPaths=/home/$u /run/user/$n
 ProtectSystem=strict
 ReadWritePaths=/home/$u /run/user/$n $rw
-ReadOnlyPaths=-/var/spool/cron -/var/spool/at -/var/spool/atjobs
 InaccessiblePaths=-/run/dbus/system_bus_socket
 InaccessiblePaths=$cg
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
@@ -1620,7 +1623,10 @@ S
     [ "$(/usr/bin/stat -c %a "$R/etc/tmpfiles.d")" = 755 ]
 }
 
-@test "cron and at: each agent user is denied once (a second apply adds nothing); an allow list naming one is refused" {
+@test "cron and at: an existing deny list gets each agent user once; none is created; an allow list naming one is refused" {
+    run "$P" --confirm
+    [ ! -e "$R/etc/cron.deny" ] && [ ! -e "$R/etc/at.deny" ]         # never created (at would open to everyone)
+    : > "$R/etc/cron.deny"; : > "$R/etc/at.deny"
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     for f in cron at; do [ "$(sort "$R/etc/$f.deny" | tr '\n' ' ')" = "agent agent-guard agent-web " ]; done
@@ -1642,9 +1648,13 @@ S
     # and with it unchanged, the live table holding every drop is ok, a table missing one is not
     NFT_LOADED=1 run "$P" --check
     [[ "$output" == *"ok   the agents' nftables table is loaded with every user's drop"* ]] || { echo "$output"; return 1; }
-    sed -i '/1500000/d' "$R/etc/airlock-agents.nft"   # what the live table would look like with guard's drop gone
-    NFT_LOADED=1 run "$P" --check
-    [[ "$output" == *"would: enable and (re)start airlock-agents-nft.service"* ]]
+    # the live table, apart from the installed file: guard's drop rule gone, its log rule still there
+    grep -v '1500000.* counter drop' "$R/etc/airlock-agents.nft" > "$T/live.nft"
+    NFT_LIVE="$T/live.nft" NFT_LOADED=1 run "$P" --check
+    [[ "$output" == *"would: enable and (re)start airlock-agents-nft.service"* ]] || { echo "$output"; return 1; }
+    cp "$R/etc/airlock-agents.nft" "$T/live.nft"
+    NFT_LIVE="$T/live.nft" NFT_LOADED=1 run "$P" --check
+    [[ "$output" == *"ok   the agents' nftables table is loaded with every user's drop"* ]]
     u="$RENDER/etc/systemd/system/airlock-agents-nft.service"
     grep -qx 'ReloadPropagatedFrom=nftables.service' "$u"
     grep -qx 'ExecReload=/usr/sbin/nft -f /etc/airlock-agents.nft' "$u"
@@ -1688,4 +1698,38 @@ S
     run timeout 10 "$O" web ls
     [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
     [[ "$output" == *"20261021T120001Z-aaaaa1  queued"* ]]
+}
+
+@test "a deny file without a final newline keeps its last entry; the agents are each on a line of their own" {
+    printf 'olduser' > "$R/etc/cron.deny"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(cat "$R/etc/cron.deny")" = "$(printf 'olduser\nagent\nagent-web\nagent-guard')" ]
+}
+
+@test "the queue, its lib/ or the inbox as a link is refused before anything is written there" {
+    mkdir -p "$R/srv" "$T/victim"; echo keep > "$T/victim/keep.txt"
+    ln -s "$T/victim" "$R/srv/agent-web"
+    run "$P" --confirm
+    [ "$status" -ne 0 ]; [[ "$output" == *"/srv/agent-web is not a plain directory"* ]]
+    [ -f "$T/victim/keep.txt" ]; [ "$(ls "$T/victim")" = keep.txt ]
+    rm "$R/srv/agent-web"; mkdir -p "$R/srv/agent-web"; ln -s "$T/victim" "$R/srv/agent-web/lib"
+    run "$P" --confirm
+    [ "$status" -ne 0 ]; [[ "$output" == *"/srv/agent-web/lib is not a plain directory"* ]]
+    [ "$(ls "$T/victim")" = keep.txt ]
+}
+
+@test "/var/lib/<user> holding anything but the image is refused (another program's state)" {
+    mkdir -p "$R/var/lib/agent-guard"; : > "$R/var/lib/agent-guard/state.db"
+    run "$P"
+    [ "$status" -ne 0 ]; [[ "$output" == *"/var/lib/agent-guard holds more than a home image"* ]]
+}
+
+@test "a unit file replacing an agent's manager or slice is refused; generic drop-ins are named" {
+    mkdir -p "$R/etc/systemd/system/user@.service.d"; : > "$R/etc/systemd/system/user@.service.d/90-site.conf"
+    run "$P"
+    [[ "$output" == *"note: /etc/systemd/system/user@.service.d/90-site.conf applies to every user's manager"* ]] || { echo "$output"; return 1; }
+    : > "$R/etc/systemd/system/user@1101.service"
+    run "$P"
+    [ "$status" -ne 0 ]; [[ "$output" == *"/etc/systemd/system/user@1101.service replaces the system's unit"* ]]
 }

@@ -169,7 +169,7 @@ systemd-tmpfiles --create /etc/tmpfiles.d/airlock-agents-queue.conf /etc/tmpfile
     && pass "systemd-tmpfiles --create is clean" || fail "systemd-tmpfiles --create reported errors (above)"
 out="$(airlock-agents-apply --check 2>&1)"
 grep -q "^ok   $Q: every dir root's" <<<"$out" && pass "airlock-agents-apply --check: the queue is ok" \
-    || fail "airlock-agents-apply --check doesn't call the queue ok: $(grep -A12 'srv/$W' <<<"$out" | head -14)"
+    || fail "airlock-agents-apply --check doesn't call the queue ok: $(grep -A12 "$Q" <<<"$out" | head -14)"
 grep -q "^ok   $IN " <<<"$out" && pass "airlock-agents-apply --check: the inbox is ok" || fail "airlock-agents-apply --check: the inbox isn't ok"
 grep -q "nothing to change" <<<"$out" && pass "airlock-agents-apply --check: nothing to change" || fail "airlock-agents-apply --check: $(grep -E '^(would|airlock-agents-apply):' <<<"$out")"
 echo "   getfacl of the queue, for the record:"; getfacl -Rpn "$Q" 2>/dev/null | grep -v "$TAG" | sed 's/^/     /'
@@ -328,13 +328,13 @@ for d in /proc/[0-9]*; do
     else fail "R1: $p ($comm, uid $uid) in the host's namespaces is dumpable"; fi
 done
 [ "$seen" -gt 0 ] || echo "     (no agent-user process in the host's namespaces right now: re-run with '$CMD attach' open)"
-echo "   (an attach through '$A' now leaves no reachable process below; a hand-typed"
+echo "   (an attach through '$CMD' now leaves no reachable process below; a hand-typed"
 echo "    'machinectl shell <user>@' or 'systemd-run -M <user>@' still does, as does this script's own"
-echo "    systemd-stdio-bridge: admin-only windows, R1 in $W.md)"
+echo "    systemd-stdio-bridge: admin-only windows, R1 in docs/agents.md)"
 echo "== R1 (registered residual): a user process in the host's namespaces opens the host's view to the user"
 # While `$CMD attach`/`$CMD shell` (or orun during `$CMD update`, or a host shell as the user)
 # runs, a process of the user's sits in the host's mount namespace; same uid and dumpable, so code in
-# the manager reaches the host's tree through /proc/<pid>/root. OPEN until fixed ($W.md gate).
+# the manager reaches the host's tree through /proc/<pid>/root. OPEN until fixed.
 # The marker is the admin's home: in the host's own tree it is there, in every manager's view (and in
 # podman's namespaces, which are copies of it) /home is a tmpfs without it. A different mount
 # namespace alone proves nothing (podman's pause process and conmon live in copies of the view).
@@ -367,5 +367,5 @@ for u in $USERS; do
 done
 
 echo
-echo "$W-host: $passes passed, $fails failed, $opens open (registered residuals, see the OPEN lines)"
+echo "host-test: $passes passed, $fails failed, $opens open (registered residuals, see the OPEN lines)"
 [ "$fails" = 0 ]

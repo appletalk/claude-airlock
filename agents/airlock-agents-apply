@@ -179,8 +179,8 @@ EOF
 }
 
 render_manager() {  # the user manager's sandbox for role $1
-    local r=$1 u=${NAME[$1]} id=${UID_OF[$1]} o after=""
-    for o in "${ROLES[@]}"; do [ "$o" = "$r" ] || after="$after user@${UID_OF[$o]}.service"; done
+    local r=$1 u=${NAME[$1]} id=${UID_OF[$1]} o slices="" rw
+    for o in $(others_of "$r"); do slices="$slices user-$o.slice"; done
     cat <<EOF
 # Rendered by airlock-agents-apply: $u (uid $id, the $r user). Its user manager, so every box
 # and session it starts, gets its own network namespace (loopback only: boxes reach out
@@ -189,10 +189,17 @@ render_manager() {  # the user manager's sandbox for role $1
 [Unit]
 RequiresMountsFor=/home/$u
 EOF
-    [ -z "${after# }" ] || {
-        echo "# The other agents' slices exist before it starts, so InaccessiblePaths below finds them."
-        echo "After=${after# }"
+    [ -z "$slices" ] || {
+        echo "# The other agents' slices exist before it starts, so InaccessiblePaths below finds them"
+        echo "# (ordered on the slices, not on the other managers: those would order back on this one)."
+        echo "Wants=${slices# }"
+        echo "After=${slices# }"
     }
+    case "$r" in
+        agent) rw="${QUEUE:+-$QUEUE/requests}" ;;
+        web) rw="-$QUEUE/held -$QUEUE/reports -$QUEUE/log/$u" ;;
+        guard) rw="-$QUEUE/answers -$QUEUE/quarantine -$QUEUE/log/$u" ;;
+    esac
     cat <<EOF
 
 [Service]
@@ -210,22 +217,13 @@ Environment=CONTAINERS_CONF_OVERRIDE=$SHARE/containers.conf
 # would list other units' processes and command lines), no cgroup names the other agents chose.
 ProtectHome=tmpfs
 BindPaths=/home/$u /run/user/$id
-EOF
-    if [ "$r" != agent ]; then
-        local rw
-        if [ "$r" = web ]; then rw="-$QUEUE/held -$QUEUE/reports -$QUEUE/log/$u"
-        else rw="-$QUEUE/answers -$QUEUE/quarantine -$QUEUE/log/$u"; fi
-        cat <<EOF
-# It writes nowhere but its home, runtime dir and its queue dirs (no world-writable spot
-# elsewhere, such as /var/spool/mail, to leave text for the agent).
+# It writes nowhere but its home, runtime dir and its queue dirs: no cron or at spool, no
+# world-writable spot such as /var/spool/mail, nothing that runs it outside this manager
+# (cron and at also deny it in cron.deny and at.deny).
 ProtectSystem=strict
-ReadWritePaths=/home/$u /run/user/$id $rw
+ReadWritePaths=/home/$u /run/user/$id${rw:+ $rw}
+InaccessiblePaths=-/run/dbus/system_bus_socket
 EOF
-    fi
-    echo "# No cron or at jobs: they would run outside this manager (its namespaces, slice and"
-    echo "# sandbox). Also refused in cron.deny and at.deny."
-    echo "ReadOnlyPaths=-/var/spool/cron -/var/spool/at -/var/spool/atjobs"
-    echo "InaccessiblePaths=-/run/dbus/system_bus_socket"
     local ia=""
     for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
     [ -z "$ia" ] || echo "InaccessiblePaths=${ia# }"
@@ -297,7 +295,7 @@ D $INBOX/airlock  2750 $OPERATOR ${UID_OF[agent]} 1d
 EOF
     # The ACL is always replaced, so readers taken out of agents.conf lose their entries.
     if [ "$WEB_ON" = 1 ]; then echo "a $INBOX/airlock  -    -     -    -   u:${UID_OF[web]}:r-x,u:${UID_OF[guard]}:r-x,d:u:${UID_OF[web]}:r--,d:u:${UID_OF[guard]}:r--"
-    else echo "a $INBOX/airlock  -    -     -    -   u::rwx,g::r-x,o::---"; fi
+    else echo "a $INBOX/airlock  -    -     -    -   u::rwx,g::r-x,o::---,d:u::rwx,d:g::r-x,d:o::---"; fi
 }
 
 # The web queue: path mode group ACL (getfacl -n form, the operator by name). Owner always root,
@@ -645,14 +643,21 @@ for d in /usr/bin /bin /usr/sbin /sbin; do
 done
 # Envoy: the agent's own listeners never have the open web (only the web user's do). Read from
 # Envoy's site file through its own parser, when this host has one.
-if [ -z "$ROOT" ] && command -v airlock-envoy-apply >/dev/null && [ -r /etc/airlock-envoy/site.conf ]; then
-    envoy_list="$(airlock-envoy-apply --list /etc/airlock-envoy/site.conf 2>/dev/null)" || envoy_list=""
-    while read -r l; do
-        [ -n "$l" ] || continue
-        if awk -v l="$l" '$1 == l && $2 == "web"' <<< "$envoy_list" | grep -q .; then
-            die "airlock-envoy listener $l is $AGENT's and has the open web; only $WEB's listeners may (research goes through the gate)"
-        fi
-    done < <(awk -v u="$AGENT" '$2 == "client" && $3 == u { print $1 }' <<< "$envoy_list")
+if [ -z "$ROOT" ] && { ! command -v airlock-envoy-apply >/dev/null || [ ! -r /etc/airlock-envoy/site.conf ]; }; then
+    echo "WARN: no airlock-envoy-apply or no readable /etc/airlock-envoy/site.conf: can't check the agents' listeners for the open web"
+elif [ -z "$ROOT" ]; then
+    if ! envoy_list="$(airlock-envoy-apply --list /etc/airlock-envoy/site.conf 2>/dev/null)"; then
+        echo "WARN: airlock-envoy-apply --list failed on its site file: can't check the agents' listeners for the open web"
+        envoy_list=""
+    fi
+    for u in "$AGENT" $GUARD; do
+        while read -r l; do
+            [ -n "$l" ] || continue
+            if awk -v l="$l" '$1 == l && $2 == "web"' <<< "$envoy_list" | grep -q .; then
+                die "airlock-envoy listener $l is $u's and has the open web; only ${WEB:-the web user}'s listeners may (research goes through the gate)"
+            fi
+        done < <(awk -v u="$u" '$2 == "client" && $3 == u { print $1 }' <<< "$envoy_list")
+    done
 fi
 
 # Files it would write must be its own: rendered by it before (in its manifest), or carrying its
@@ -675,6 +680,23 @@ for r in "${ROLES[@]}"; do
         done
     done
 done
+# The inbox, the queue and its lib/ are absent or root's real directories: root writes into them
+# (a link there would take its writes, and the lib/ clean-up, somewhere else).
+for d in "$INBOX" ${QUEUE:+"$QUEUE" "$QUEUE/lib"}; do
+    [ -e "$ROOT$d" ] || [ -L "$ROOT$d" ] || continue
+    if [ -L "$ROOT$d" ] || [ ! -d "$ROOT$d" ]; then die "$d is not a plain directory (a link?): move it away first"; fi
+    if [ -z "$ROOT" ] && [ "$(stat -c %u "$d")" != 0 ]; then die "$d is $(stat -c %U "$d")'s, not root's: another program's? pick another path or move it"; fi
+done
+# A unit file of its own for an agent user's manager or slice would replace the system's, drop-ins
+# included; generic drop-ins for every user's manager are named (they apply to the agents too).
+for r in "${ROLES[@]}"; do
+    for f in "/etc/systemd/system/user@${UID_OF[$r]}.service" "/etc/systemd/system/user-${UID_OF[$r]}.slice"; do
+        [ ! -e "$ROOT$f" ] || die "$f replaces the system's unit for ${NAME[$r]} (the sandbox drop-in would not apply as written): move it away"
+    done
+done
+for f in "$ROOT"/etc/systemd/system/user@.service.d/* "$ROOT"/etc/systemd/system/user-.slice.d/*; do
+    [ -e "$f" ] && echo "note: ${f#"$ROOT"} applies to every user's manager, the agents' too: check it weakens nothing"
+done
 # Each home image lives in /var/lib/<user>: absent, or a real directory, root's and 0700 (a name
 # like an existing service's would be that service's state; a writable one could hold a link).
 for r in "${ROLES[@]}"; do
@@ -685,6 +707,9 @@ for r in "${ROLES[@]}"; do
     fi
     if [ -z "$ROOT" ] && [ "$(stat -c %u:%a "$d")" != 0:700 ]; then
         die "$d is $(stat -c %U:%a "$d"), not root's 0700: another program's state, or tampered with; pick another name or fix it"
+    fi
+    if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 ! -name home.img ! -name home.img.new -print -quit)" ]; then
+        die "$d holds more than a home image: another program's state? pick another user name"
     fi
 done
 [ -z "$foreign" ] || die "these are not this toolkit's, and it won't overwrite or sit beside them; move them away first (a hand-built setup's files, say):$foreign"
@@ -801,8 +826,8 @@ nft_live() {
     t="$(nft -n list table inet airlock-agents 2>/dev/null)" || return 1   # -n: uids as numbers
     for r in "${ROLES[@]}"; do
         id=${UID_OF[$r]} s=${SUB[$r]}
-        grep -qF "meta skuid { $id, $s-$((s + SUB_COUNT - 1)) }" <<< "$t" || return 1
-        grep -q "meta skuid { $id, $s-$((s + SUB_COUNT - 1)) } .*drop" <<< "$t" || return 1
+        # the drop rule itself (counter, then drop), not the log rule before it
+        grep -qE "meta skuid \{ $id, $s-$((s + SUB_COUNT - 1)) \} counter( packets [0-9]+ bytes [0-9]+)? drop" <<< "$t" || return 1
     done
 }
 if systemctl is-enabled --quiet airlock-agents-nft.service 2>/dev/null && nft_live \
@@ -831,7 +856,7 @@ if [ "$WEB_ON" = 1 ] && [ -d "$ROOT$QUEUE/lib" ]; then
     while IFS= read -r f; do
         grep -qxF "$QUEUE/lib/$f" "$work/now" && continue
         step "remove $QUEUE/lib/$f (not rendered: nothing else belongs there)" rm -rf -- "$ROOT$QUEUE/lib/$f"
-    done < <(ls -A "$ROOT$QUEUE/lib")
+    done < <(find -P "$ROOT$QUEUE/lib" -mindepth 1 -maxdepth 1 -printf '%f\n')
 fi
 
 provision_user() {
@@ -875,9 +900,16 @@ provision_user() {
 }
 for r in "${ROLES[@]}"; do provision_user "$r"; done
 
-# No cron or at jobs for the agent users (they would run outside their managers). Each name is
-# added to cron.deny and at.deny once; an allow list that names one is refused.
+# No cron or at jobs for the agent users (they would run outside their managers). Their managers
+# see the spools read-only (ProtectSystem=strict), which is what stops a job; the lists are a
+# second layer: an allow list that names one is refused, an existing deny list gets each name
+# once. A deny list is never created: where neither list exists the tool's own default applies,
+# and for at that is root alone (a new deny list would open it to everyone else).
 for f in cron at; do
+    case $f in cron) tool="crontab" ;; at) tool="at" ;; esac
+    # Not installed: nothing to deny (and creating at.deny where neither list exists would open
+    # at to every other user: with no list, only root may use it).
+    if [ -z "$ROOT" ] && ! command -v "$tool" >/dev/null; then ok "$f not installed"; continue; fi
     if [ -f "$ROOT/etc/$f.allow" ]; then
         for r in "${ROLES[@]}"; do
             ! grep -qxF "${NAME[$r]}" "$ROOT/etc/$f.allow" || die "/etc/$f.allow names ${NAME[$r]}: take it out (agent users get no $f jobs)"
@@ -885,10 +917,11 @@ for f in cron at; do
         ok "/etc/$f.allow names no agent user"
         continue
     fi
+    if [ ! -f "$ROOT/etc/$f.deny" ]; then ok "no /etc/$f.allow or $f.deny: $f's default applies (the spool is read-only to the agents)"; continue; fi
     for r in "${ROLES[@]}"; do
         u=${NAME[$r]}
         if grep -qxF "$u" "$ROOT/etc/$f.deny" 2>/dev/null; then ok "$u in /etc/$f.deny"
-        else step "add $u to /etc/$f.deny" sh -c 'printf "%s\n" "$1" >> "$2" && chmod 0644 "$2"' _ "$u" "$ROOT/etc/$f.deny"; fi
+        else step "add $u to /etc/$f.deny" sh -c '[ ! -s "$2" ] || [ -z "$(tail -c1 "$2")" ] || echo >> "$2"; printf "%s\n" "$1" >> "$2" && chmod 0644 "$2"' _ "$u" "$ROOT/etc/$f.deny"; fi
     done
 done
 
@@ -916,7 +949,7 @@ has_defaults() { [[ " $* " == *" default:"* ]] && echo 1 || echo 0; }
 gid_of() { case "$1" in root) echo 0 ;; "$OPERATOR") echo "$OP_GID" ;; *) echo "$1" ;; esac; }
 
 # The drop box: the operator writes, the agent reads, never writes.
-inbox_acl="" inbox_what="$INBOX root 0755, pastes/ and airlock/ $OPERATOR:$AGENT 2750"
+inbox_acl="default:group::r-x" inbox_what="$INBOX root 0755, pastes/ and airlock/ $OPERATOR:$AGENT 2750"
 [ "$WEB_ON" = 0 ] || inbox_what="$inbox_what, airlock/ readable by $WEB and $GUARD"
 [ "$WEB_ON" = 0 ] || inbox_acl="user:${UID_OF[web]}:r-x user:${UID_OF[guard]}:r-x default:user:${UID_OF[web]}:r-- default:user:${UID_OF[guard]}:r--"
 # shellcheck disable=SC2086  # the ACL list splits on purpose
@@ -924,7 +957,7 @@ if [ "$(stat -c %u:%g:%a "$ROOT$INBOX" 2>/dev/null)" = "0:0:755" ] \
         && [ "$(stat -c %u:%g:%a "$ROOT$INBOX/pastes" 2>/dev/null)" = "$OP_UID:${UID_OF[agent]}:2750" ] \
         && [ "$(stat -c %u:%g:%a "$ROOT$INBOX/airlock" 2>/dev/null)" = "$OP_UID:${UID_OF[agent]}:2750" ] \
         && [ "$(acl_named "$ROOT$INBOX/pastes" 1)" = "" ] \
-        && { [ -z "$inbox_acl" ] && [ "$(acl_named "$ROOT$INBOX/airlock" 1)" = "" ] || [ "$(acl_named "$ROOT$INBOX/airlock" 1)" = "$(acl_want 2750 $inbox_acl)" ]; }; then
+        && [ "$(acl_named "$ROOT$INBOX/airlock" 1)" = "$(acl_want 2750 $inbox_acl)" ]; then
     ok "$inbox_what"
 else
     step "$inbox_what" systemd-tmpfiles --create /etc/tmpfiles.d/airlock-agents-inbox.conf
