@@ -20,7 +20,8 @@ _airlock_agents_names() {  # _airlock_agents_names <what> [verb]: the installed 
     while :; do
         [ ! -L "$f" ] || return 0
         owner=$(/usr/bin/stat -c %u -- "$f" 2>/dev/null) mode=$(/usr/bin/stat -c %a -- "$f" 2>/dev/null)
-        [[ " $_airlock_agents_owners " == *" $owner "* && $mode =~ ^[0-7]+$ ]] || return 0
+        case $mode in ''|*[!0-7]*) return 0 ;; esac      # (patterns, not =~: BASH_REMATCH untouched)
+        [[ " $_airlock_agents_owners " == *" $owner "* ]] || return 0
         (( (8#$mode & 8#022) == 0 )) || { [ "$f" != "$bin" ] && [ "$f" != "${bin%/*}" ] && (( 8#$mode & 8#1000 )); } || return 0
         [ "$f" = / ] && break
         f=${f%/*}; f=${f:-/}

@@ -2048,6 +2048,8 @@ S
     req 20261021T120001Z-aaaaa1 'held one';     : > "$Q/held/20261021T120001Z-aaaaa1.json"
     req 20261021T120002Z-aaaaa2 'answered one'; : > "$Q/answers/20261021T120002Z-aaaaa2.md"
     req 20261021T120003Z-aaaaa3 'quarantined';  mkdir "$Q/quarantine/20261021T120003Z-aaaaa3"
+    mkdir -p "$Q/log/agent-guard"   # (the guard logs the quarantine, as guard-worker does)
+    echo '{"ts":"x","user":"agent-guard","id":"20261021T120003Z-aaaaa3","stage":"release","result":"quarantined","exit":3}' >> "$Q/log/agent-guard/stages.jsonl"
     req 20261021T120004Z-aaaaa4 'gave up'
     echo '{"ts":"x","user":"agent-web","id":"20261021T120004Z-aaaaa4","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
     printf '{}' > "$Q/requests/not-an-id.json"
@@ -2405,4 +2407,27 @@ P
     completion_stub
     run env T="$T" bash -c '[[ xy =~ (x)(y) ]]; source "$T/completion.bash"; COMP_WORDS=(agent attach ""); COMP_CWORD=2; _airlock_agents; echo "${COMPREPLY[*]}|${BASH_REMATCH[*]}"'
     [ "$output" = "proj.main p2.review|xy x y" ] || { echo "$output"; return 1; }
+}
+
+
+@test "agent _complete ids: release and approve offer only what the command accepts (scrolled-out failures, decided records)" {
+    op_stubs; web_queue
+    mkdir -p "$Q/log/agent-guard"
+    X=20261021T120001Z-aaaaa1; req "$X" x; mkdir "$Q/quarantine/$X"
+    echo "{\"id\":\"$X\",\"stage\":\"release\",\"result\":\"release failed, gave up\"}" >> "$Q/log/agent-guard/stages.jsonl"
+    python3 -c 'import sys; open(sys.argv[1], "ab").write(b"{\"note\":\"filler\"}\n" * 70000)' "$Q/log/agent-guard/stages.jsonl"
+    run "$O" _complete ids release; [ -z "$output" ] || { echo "release: $output"; return 1; }
+    run "$O" web release "$X"; [ "$status" -ne 0 ]
+    # a pending quarantine and a pending held id still show among many newer decided ones
+    P=20261021T120002Z-bbbbb2; req "$P" p; mkdir "$Q/quarantine/$P"
+    echo "{\"id\":\"$P\",\"stage\":\"release\",\"result\":\"quarantined\"}" >> "$Q/log/agent-guard/stages.jsonl"
+    H=20261021T120003Z-ccccc3; req "$H" h; : > "$Q/held/$H.json"
+    sleep 1
+    for i in $(seq 10 70); do
+        d="20261021T1300${i}Z-dddd${i}"; req "$d" done; mkdir "$Q/quarantine/$d"; : > "$Q/answers/$d.md"
+        : > "$Q/held/$d.json"; : > "$Q/decisions/$d.approve"
+        echo "{\"id\":\"$d\",\"stage\":\"release\",\"result\":\"quarantined\"}" >> "$Q/log/agent-guard/stages.jsonl"
+    done
+    run "$O" _complete ids release; [[ "$output" == "$P"$'\t'quarantined ]] || { echo "release: $output"; return 1; }
+    run "$O" _complete ids approve; [[ "$output" == "$H"$'\t'held ]] || { echo "approve: $output"; return 1; }
 }

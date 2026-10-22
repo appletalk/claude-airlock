@@ -271,11 +271,12 @@ def read_tail(user):
         st = os.fstat(f)
         if not stat.S_ISREG(st.st_mode):
             return b""
-        start = max(0, min(st.st_size, 67108864) - TAIL)
+        # one byte before the tail too: a tail that starts on a line start keeps its first line
+        start = max(0, min(st.st_size, 67108864) - TAIL - 1)
         os.lseek(f, start, os.SEEK_SET)
         data = b""
-        while len(data) < TAIL:
-            c = os.read(f, TAIL - len(data))
+        while len(data) < TAIL + 1:
+            c = os.read(f, TAIL + 1 - len(data))
             if not c:
                 break
             data += c
@@ -303,12 +304,19 @@ def stages(user, want):
 reqs = names("requests", ".json")
 newest = lambda ids, n: sorted(ids, key=lambda i: (reqs[i], i), reverse=True)[:n]
 w, g = {}, {}
+exists = lambda p: os.path.exists(os.path.join(root, p))
 if verb in ("approve", "reject"):
-    cands = newest(set(names("held", ".json")) & set(reqs), 200)
+    # still waiting for a decision (as web_state_set): not decided, answered or quarantined
+    held = [i for i in set(names("held", ".json")) & set(reqs)
+            if not any(exists(p) for p in ("decisions/%s.approve" % i, "decisions/%s.reject" % i,
+                                           "answers/%s.md" % i, "quarantine/" + i))]
+    cands = newest(held, 50)
 elif verb == "release":
-    q = set(names("quarantine", "")) & set(reqs)
-    g = stages(guard, q)
-    cands = newest([i for i in q if "release failed, gave up" not in g.get(i, "")], 50)
+    # quarantined and not answered; and only an id the guard tail shows, its last state not a
+    # failed release (one whose line scrolled out is unknown: not offered, rather than guessed)
+    q = [i for i in set(names("quarantine", "")) & set(reqs) if not exists("answers/%s.md" % i)]
+    g = stages(guard, set(q))
+    cands = newest([i for i in q if i in g and "release failed, gave up" not in g[i]], 50)
 elif verb == "retry":
     w, g = stages(web, reqs), stages(guard, reqs)
     ok = [i for i in reqs if any(x in w.get(i, "") for x in ("gave up", "changed")) or "gave up" in g.get(i, "")]
