@@ -140,7 +140,7 @@ while IFS= read -r line || [ -n "$line" ]; do
             # Findings the operator has looked at and accepts: they no longer pause an apply.
             [ "${#w[@]}" -gt 1 ] || die "$where: accept lists nothing"
             for v in "${w[@]:1}"; do
-                case "$v" in wsl-interop|wsl-drives|generic-dropins|sssd-ranges) ACCEPT[$v]=1 ;; *) die "$where: unknown accept '$v' (wsl-interop, wsl-drives, generic-dropins, sssd-ranges)" ;; esac
+                case "$v" in wsl-interop|wsl-drives|generic-dropins|id-ranges) ACCEPT[$v]=1 ;; *) die "$where: unknown accept '$v' (wsl-interop, wsl-drives, generic-dropins, id-ranges)" ;; esac
             done ;;
         internal-host)
             [ "${#w[@]}" -gt 1 ] || die "$where: internal-host lists nothing"
@@ -646,7 +646,9 @@ if [ "$mode" = render ]; then
         esac
         mkdir -p "$out/external$(dirname "$1")"
         # not the toolkit's own once the site installs it: a header that says so
-        render_file "$1" | sed 's/Rendered by airlock-agents-apply/From airlock-agents-apply --render, for the site to install and keep/' > "$out/external$1"
+        # (and the rules in a table of the site's own: the toolkit's table name is never counted)
+        render_file "$1" | sed -e 's/Rendered by airlock-agents-apply/From airlock-agents-apply --render, for the site to install and keep/' \
+            -e 's/inet airlock-agents\b/inet airlock-agents-site/g' > "$out/external$1"
     done
     echo "rendered into $out${EXTERNAL[*]:+ (managed elsewhere, for reference: $out/external)}"
     exit 0
@@ -680,6 +682,28 @@ fi
 # the few things an operator may decide to live with, accepted in agents.conf).
 paused=""
 pause() { paused="$paused"$'\n'"  - $*"; }
+
+manifest="$ROOT$ETC/.installed"
+# The manifest: one line per file it installed, "<path> <sha256 of what it wrote>".
+# (paths compared as fixed strings: awk -v would read the backslash of a unit name like
+# home-a\x2db.mount as an escape)
+first_field_is() { cut -d' ' -f1 | grep -qxF -- "$1"; }
+in_manifest() { [ -f "$manifest" ] && first_field_is "$1" < "$manifest"; }
+recorded() { [ -f "$manifest" ] && while read -r mp ms; do [ "$mp" != "$1" ] || { echo "$ms"; return; }; done < "$manifest"; }
+sum_of() { sha256sum < "$ROOT$1" | cut -d' ' -f1; }
+# Exactly what an apply wrote there (in the manifest, the same bytes).
+as_installed() { local r; r="$(recorded "$1")"; [ -n "$r" ] && [ -f "$ROOT$1" ] && [ ! -L "$ROOT$1" ] && [ "$(sum_of "$1")" = "$r" ]; }
+# Its own to overwrite: as installed, or (not yet in the manifest) carrying its header.
+ours() { as_installed "$1" && return 0; ! in_manifest "$1" && grep -qs 'Rendered by airlock-agents-apply' "$ROOT$1"; }
+# The paths of the parts the site manages itself.
+external_path() {
+    case "$1" in
+        /etc/airlock-agents.nft|/etc/systemd/system/airlock-agents-nft.service) [ -n "${EXTERNAL[nftables]:-}" ] ;;
+        /etc/polkit-1/rules.d/50-airlock-agents.rules) [ -n "${EXTERNAL[polkit]:-}" ] ;;
+        /etc/profile.d/airlock-agents.sh) [ -n "${EXTERNAL[profile]:-}" ] ;;
+        *) return 1 ;;
+    esac
+}
 
 # The refusals come before anything changes: every uid/gid free or already its user's, every
 # existing user exactly its numbers and in no other group, every subid range exactly its own or
@@ -738,12 +762,15 @@ fi
 if [ -n "${EXTERNAL[nftables]:-}" ]; then
     # Only rules of chains hooked on output count, and never this toolkit's own table (it is
     # about to be withdrawn: it can't be what the site provides).
+    # Counted: a drop in an inet table (both IP families) that isn't dormant, in a chain hooked on
+    # output, with no rule before it that could let the packet through (accept, return, a jump).
     live="$(nft -n list ruleset 2>/dev/null | awk '
-        /^table / { skip = ($0 ~ /^table inet airlock-agents /); out = 0; next }
+        /^table / { skip = ($0 !~ /^table inet / || $0 ~ /^table inet airlock-agents /); out = 0; open_ = 1; next }
         skip { next }
-        /^[[:space:]]*chain / { out = 0; next }
+        /^[[:space:]]*flags .*dormant/ { skip = 1; next }
+        /^[[:space:]]*chain / { out = 0; open_ = 1; next }
         /type filter hook output / { out = 1; next }
-        out { print }')" || live=""
+        out && open_ { print; if ($0 ~ /(^|[[:space:]])(accept|return|jump|goto)([[:space:]]|$)/) open_ = 0 }')" || live=""
     for r in "${ROLES[@]}"; do
         id=${UID_OF[$r]} s0=${SUB[$r]}
         grep -qE "meta skuid \{ $id, $s0-$((s0 + SUB_COUNT - 1)) \} counter( packets [0-9]+ bytes [0-9]+)? drop" <<< "$live" \
@@ -754,7 +781,8 @@ if [ -n "${EXTERNAL[polkit]:-}" ]; then
     for r in "${ROLES[@]}"; do
         granted=0
         for f in "$ROOT"/etc/polkit-1/rules.d/*.rules "$ROOT"/usr/share/polkit-1/rules.d/*.rules; do
-            [ -f "$f" ] && [ "${f##*/}" != 50-airlock-agents.rules ] || continue   # never the toolkit's own
+            [ -f "$f" ] || continue
+            ! as_installed "${f#"$ROOT"}" || continue                  # never the toolkit's own copy
             grep -qF 'org.freedesktop.machine1.host-shell' "$f" && grep -qF "\"${NAME[$r]}\"" "$f" && grep -qF "\"$OPERATOR\"" "$f" && granted=1
         done
         [ "$granted" = 1 ] || pause "polkit is managed elsewhere, but no rule lets $OPERATOR open a host shell as ${NAME[$r]}: see --render's external/etc/polkit-1/rules.d/50-airlock-agents.rules"
@@ -777,27 +805,6 @@ fi
 # header. Anything else at those paths is someone else's: refused, never overwritten. And no
 # other drop-in for an agent user's manager or slice, which could override its sandbox (a
 # hand-built setup's, say): remove those first.
-manifest="$ROOT$ETC/.installed"
-# The manifest: one line per file it installed, "<path> <sha256 of what it wrote>".
-# (paths compared as fixed strings: awk -v would read the backslash of a unit name like
-# home-a\x2db.mount as an escape)
-first_field_is() { cut -d' ' -f1 | grep -qxF -- "$1"; }
-in_manifest() { [ -f "$manifest" ] && first_field_is "$1" < "$manifest"; }
-recorded() { [ -f "$manifest" ] && while read -r mp ms; do [ "$mp" != "$1" ] || { echo "$ms"; return; }; done < "$manifest"; }
-sum_of() { sha256sum < "$ROOT$1" | cut -d' ' -f1; }
-# Exactly what an apply wrote there (in the manifest, the same bytes).
-as_installed() { local r; r="$(recorded "$1")"; [ -n "$r" ] && [ -f "$ROOT$1" ] && [ ! -L "$ROOT$1" ] && [ "$(sum_of "$1")" = "$r" ]; }
-# Its own to overwrite: as installed, or (not yet in the manifest) carrying its header.
-ours() { as_installed "$1" && return 0; ! in_manifest "$1" && grep -qs 'Rendered by airlock-agents-apply' "$ROOT$1"; }
-# The paths of the parts the site manages itself.
-external_path() {
-    case "$1" in
-        /etc/airlock-agents.nft|/etc/systemd/system/airlock-agents-nft.service) [ -n "${EXTERNAL[nftables]:-}" ] ;;
-        /etc/polkit-1/rules.d/50-airlock-agents.rules) [ -n "${EXTERNAL[polkit]:-}" ] ;;
-        /etc/profile.d/airlock-agents.sh) [ -n "${EXTERNAL[profile]:-}" ] ;;
-        *) return 1 ;;
-    esac
-}
 # Its own files as it left them: one changed or deleted since is drift someone made by hand
 # (changes come from agents.conf or a toolkit update, which it renders itself). A file of a part
 # now managed elsewhere that someone changed is the site's now: left alone.
@@ -907,8 +914,10 @@ for r in "${ROLES[@]}"; do
     clash="$(getent group | awk -F: -v s="$s0" -v e="$((s0 + SUB_COUNT))" '$3 >= s && $3 < e { print $1; exit }' || true)"
     [ -z "$clash" ] || pause "group $clash has a gid inside ${NAME[$r]}'s subordinate ids ($s0+$SUB_COUNT): pick another subuid start"
 done
-if [ -e "$ROOT/etc/sssd/sssd.conf" ] && [ -z "${ACCEPT[sssd-ranges]:-}" ]; then
-    pause "SSSD is configured: check the agents' subordinate id ranges don't overlap its ID mapping (ldap_idmap_range_min/max, or the AD ranges), then accept sssd-ranges in agents.conf"
+# Users from a directory (SSSD, winbind, LDAP) can take uids the local files don't show.
+if { [ -e "$ROOT/etc/sssd/sssd.conf" ] || grep -qsE '^[[:space:]]*passwd:.*[[:space:]](sss|winbind|ldap)([[:space:]]|$)' "$ROOT/etc/nsswitch.conf"; } \
+        && [ -z "${ACCEPT[id-ranges]:-}" ]; then
+    pause "users come from a directory service (SSSD, winbind or LDAP): check the agents' uids and subordinate id ranges don't overlap its ID mapping, then accept id-ranges in agents.conf"
 fi
 # The agents' boxes run on crun (runc fails under their ProtectProc).
 command -v crun >/dev/null || pause "crun is not installed; the agents' boxes need it (apt install crun / pacman -S crun)"
@@ -983,6 +992,15 @@ else step "chmod 0700 $OP_HOME (was $mode_h)" chmod 0700 "$ROOT$OP_HOME"; fi
 # The rendered files, each installed when it differs (written beside and renamed in), and the
 # ones an earlier apply installed that this one no longer renders removed.
 units_changed=0 user_units_changed=0 nft_changed=0
+# What an earlier run changed but didn't get to apply (it stopped half-way): done now.
+pending="$ROOT$ETC/.pending"
+if [ -f "$pending" ]; then
+    grep -qx reload "$pending" && units_changed=1
+    grep -qx user-units "$pending" && user_units_changed=1
+    grep -qx nft "$pending" && nft_changed=1
+fi
+pend() { [ "$confirm" = 1 ] || return 0; grep -qsx "$1" "$pending" || echo "$1" >> "$pending"; }
+unpend() { [ "$confirm" = 1 ] && [ -f "$pending" ] || return 0; grep -vx "$1" "$pending" > "$pending.new" || true; mv -f "$pending.new" "$pending"; [ -s "$pending" ] || rm -f "$pending"; }
 install_file() {  # install_file <rendered> <dest> <mode>: a missing directory is made 0755; an
     # existing one is left as it is (its owner and mode are someone's choice: polkit's on Arch)
     [ -d "$(dirname "$2")" ] || install -d -m 0755 "$(dirname "$2")"
@@ -1004,7 +1022,7 @@ while read -r p m; do
     cp "$work/f" "$work/f.$changes"
     step "install $p" install_file "$work/f.$changes" "$ROOT$p" "$m"
     manifest_set "$p" "$(sha256sum < "$work/f" | cut -d' ' -f1)"
-    case "$p" in /etc/systemd/system/*) units_changed=1 ;; /etc/systemd/user/*) user_units_changed=1 ;; /etc/airlock-agents.nft) nft_changed=1 ;; esac
+    case "$p" in /etc/systemd/system/*) units_changed=1; pend reload ;; /etc/systemd/user/*) user_units_changed=1; pend user-units ;; /etc/airlock-agents.nft) nft_changed=1; pend nft ;; esac
 done < <(file_list)
 # nftables now managed elsewhere (checked live above): stop its own unit before its files go.
 if [ -n "${EXTERNAL[nftables]:-}" ] && as_installed /etc/systemd/system/airlock-agents-nft.service; then
@@ -1023,7 +1041,7 @@ if [ -f "$manifest" ]; then
         if ! as_installed "$p"; then echo "note: $p is no longer rendered and isn't as apply wrote it: left alone"; manifest_set "$p"; continue; fi
         step "remove $p (no longer rendered)" rm -f "$ROOT$p"
         manifest_set "$p"
-        case "$p" in /etc/systemd/system/*) units_changed=1 ;; /etc/systemd/user/*) user_units_changed=1 ;; esac
+        case "$p" in /etc/systemd/system/*) units_changed=1; pend reload ;; /etc/systemd/user/*) user_units_changed=1; pend user-units ;; esac
     done < "$manifest"
 fi
 if [ "$confirm" = 1 ]; then install -m 0644 "$work/now" "$manifest.new" && mv -f "$manifest.new" "$manifest"; fi
@@ -1039,6 +1057,7 @@ if [ "$units_changed" = 1 ]; then
         done
     fi
     step "systemctl daemon-reload" systemctl daemon-reload
+    unpend reload
 fi
 
 # The firewall table, loaded now and at every boot and nftables reload.
@@ -1057,6 +1076,7 @@ elif systemctl is-enabled --quiet airlock-agents-nft.service 2>/dev/null && nft_
         && [ "$units_changed" = 0 ] && [ "$nft_changed" = 0 ]; then ok "the agents' nftables table is loaded with every user's drop, its unit enabled"
 else step "enable and (re)start airlock-agents-nft.service (the agents' nftables table)" \
     sh -c 'systemctl enable airlock-agents-nft.service && systemctl restart airlock-agents-nft.service'; fi
+unpend nft
 
 # The R1 execute-only copies: present, 0711 root's, the same bytes as the originals.
 nd_ok=1
@@ -1227,4 +1247,22 @@ if [ -n "$missing_socks" ]; then
         echo "  $GUARD-anthropic @anthropic"; echo "  client $GUARD-anthropic $GUARD"
     fi
 fi
-if [ "$confirm" = 1 ] && [ "$user_units_changed" = 1 ]; then echo "next: $COMMAND reload (the agents' user units changed), then $COMMAND update"; fi
+if [ "$confirm" = 1 ] && [ "$user_units_changed" = 1 ]; then echo "next: $COMMAND reload (the agents' user units changed), then $COMMAND update"; unpend user-units; fi
+# A manager runs the sandbox it started with: one whose drop-in or slice changed since it started
+# is still on the old one until it restarts (that ends its sessions, so it is the operator's to do).
+stale=""
+if [ -z "$ROOT" ]; then
+    for r in "${ROLES[@]}"; do
+        id=${UID_OF[$r]}
+        systemctl is-active --quiet "user@$id.service" 2>/dev/null || continue
+        started="$(systemctl show -p ActiveEnterTimestamp --value "user@$id.service" 2>/dev/null)"
+        started="$(date -d "$started" +%s 2>/dev/null)" || continue
+        for f in "/etc/systemd/system/user@$id.service.d/10-airlock-agents.conf" "/etc/systemd/system/user-$id.slice.d/10-airlock-agents.conf"; do
+            [ -f "$f" ] && [ "$(stat -c %Y "$f")" -gt "$started" ] && { stale="$stale user@$id.service"; break; }
+        done
+    done
+fi
+if [ -n "$stale" ]; then
+    echo "restart:$stale run an older sandbox than their drop-ins (changed since they started): reboot, or systemctl restart them (that ends their sessions)"
+    [ "$check" = 0 ] || exit 1
+fi

@@ -191,6 +191,8 @@ class Check(Tree):
             "an address in dot words": "who is 192 dot 168 dot 1 dot 5",
             "fullwidth colons in a ULA": "route fd00\uff1a5\uff1a6\uff1a\uff1a10 how",
             "dashed domain spelled": "is q-z-x dot i-o up",
+            "an address in bracketed dots": "who owns 10[.]9[.]0[.]10",
+            "an address in parenthesised dots": "who owns 10(.)9(.)0(.)11",
             "invisible": "plain​question",
             "control": "bell\x07",
         }

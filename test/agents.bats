@@ -1839,6 +1839,18 @@ EOF
     { echo 'table inet filter {'; echo '	chain spare {'; echo '		meta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop'; echo '	}'; echo '}'; } > "$NFT_RULESET"
     run "$P"
     [ "$status" -eq 1 ]; [[ "$output" == *"no drop for agent (uid 1100"* ]]
+    # an output chain, but: an ip table (IPv6 gets through), an accept or jump before the drop, a dormant table
+    out() { printf 'table %s filter {\n%b\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n%b\t\tmeta skuid { 1100, 1100000-1165535 } counter packets 0 bytes 0 drop\n\t}\n}\n' "$1" "$2" "$3" > "$NFT_RULESET"; }
+    for c in "ip||" "inet||\t\tct state established accept\n" "inet||\t\tjump site\n" "inet|\tflags dormant\n|"; do
+        IFS='|' read -r fam fl pre <<< "$c"
+        out "$fam" "$fl" "$pre"
+        run "$P"
+        [ "$status" -eq 1 ] && [[ "$output" == *"no drop for agent (uid 1100"* ]] || { echo "counted ($c): $(cat "$NFT_RULESET")"; return 1; }
+    done
+    # the same in a working inet table counts (a log rule before it is fine)
+    out inet "" '\t\tmeta skuid 1100 log prefix "x"\n'
+    run "$P"
+    [[ "$output" != *"no drop for agent (uid 1100"* ]] || { echo "$output"; return 1; }
 }
 
 @test "external: a site's own copy at a part's path is never removed, even where the toolkit's copy was" {
@@ -1852,17 +1864,64 @@ EOF
     run "$P" --confirm; [ "$status" -eq 0 ]; [ -f "$R/etc/airlock-agents.nft" ]
 }
 
+@test "external nftables: the rendered copy, loaded as the site's only firewall, passes the check" {
+    printf 'external nftables\n' >> "$E/agents.conf"
+    "$P" --render "$T/r4" >/dev/null
+    export NFT_RULESET="$T/ruleset"
+    # roughly as nft lists it: the table block of the file, with counters
+    sed -n '/^table .* {$/,/^}$/p' "$T/r4/external/etc/airlock-agents.nft" | sed 's/counter drop/counter packets 0 bytes 0 drop/' > "$NFT_RULESET"
+    grep -q '^table inet airlock-agents-site {' "$NFT_RULESET"
+    run grep -c 'table inet airlock-agents ' "$T/r4/external/etc/airlock-agents.nft"; [ "$output" = 0 ]
+    run "$P"
+    [[ "$output" != *"no drop for"* ]] || { echo "$output"; cat "$NFT_RULESET"; return 1; }
+}
+
+@test "a run that stops before its reloads leaves them pending; the next run does them" {
+    cat > "$T/bin/systemctl" <<'S'
+#!/bin/bash
+case "$1" in is-enabled|is-active) [ -n "${NFT_LOADED:-}" ]; exit ;; esac
+echo "systemctl $*" >> "$LOG"
+[ "$1" = daemon-reload ] && [ -n "${FAIL_RELOAD:-}" ] && exit 1
+exit 0
+S
+    FAIL_RELOAD=1 run "$P" --confirm
+    [ "$status" -ne 0 ]
+    grep -qx reload "$E/.pending" && grep -qx nft "$E/.pending" && grep -qx user-units "$E/.pending" || { cat "$E/.pending"; return 1; }
+    : > "$LOG"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'systemctl daemon-reload' "$LOG"
+    grep -q 'systemctl restart airlock-agents-nft.service' "$LOG"
+    [ ! -e "$E/.pending" ]
+    # a dry run neither records nor clears
+    run "$P"; [ ! -e "$E/.pending" ]
+}
+
+@test "clean(): NUL or a bidi control can't split a C1 or ESC sequence past the filter" {
+    eval "$(sed -n '/^clean() {/,/^}/p' "$REPO/agents/operator")"
+    out="$(printf 'a\xc2\x00\x9b31mb \x1b\xe2\x80\x8e[2Jc \xc2\xe2\x81\xa6\x9d52;c;x\x07d\n' | clean)"
+    [ "$out" = "ab c d" ] || { printf '%s' "$out" | od -c; return 1; }
+}
+
 @test "external polkit: a rule of the site's must grant the operator a shell as each user; the toolkit's own doesn't count" {
     printf 'external polkit\n' >> "$E/agents.conf"
     run "$P"
     [ "$status" -eq 1 ]; [[ "$output" == *"no rule lets alice open a host shell as agent"* ]]
     mkdir -p "$R/etc/polkit-1/rules.d"
     printf 'polkit.addRule(function(action, subject) { if (action.id == "org.freedesktop.machine1.host-shell" && subject.user == "alice" && ["agent", "agent-web", "agent-guard"].indexOf(action.lookup("user")) >= 0) return polkit.Result.YES; });\n' > "$R/etc/polkit-1/rules.d/50-airlock-agents.rules"
-    run "$P"
-    [ "$status" -eq 1 ]                                              # the toolkit's file name: not counted
+    run "$P"                                                         # the site's own, at the toolkit's path: counted
+    [[ "$output" != *"no rule lets alice"* ]] || { echo "$output"; return 1; }
     mv "$R/etc/polkit-1/rules.d/50-airlock-agents.rules" "$R/etc/polkit-1/rules.d/40-site.rules"
     run "$P"
     [[ "$output" != *"no rule lets alice"* ]] || { echo "$output"; return 1; }
+}
+
+@test "external polkit: the toolkit's own installed rule is never the site's grant" {
+    run "$P" --confirm; [ "$status" -eq 0 ]
+    [ -f "$R/etc/polkit-1/rules.d/50-airlock-agents.rules" ]
+    printf 'external polkit\n' >> "$E/agents.conf"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"no rule lets alice open a host shell as agent"* ]] || { echo "$output"; return 1; }
 }
 
 @test "a user the last apply set up and agents.conf no longer has pauses (removing one is by hand)" {
@@ -1911,15 +1970,23 @@ EOF
     grep -q -- '-f /usr/local/share/airlock-agents/tmux-clipboard.conf ' "$T/r5/etc/systemd/user/agent-web-session@.service"
 }
 
-@test "subordinate ids that are someone's real id pause; so does SSSD until its ranges are checked" {
+@test "subordinate ids that are someone's real id pause; so does a directory service until its ranges are checked" {
     echo "dom:x:1100005:1100005::/home/dom:/bin/bash" >> "$PASSWD"
     run "$P"
     [ "$status" -eq 1 ]; [[ "$output" == *"user dom has a uid inside agent's subordinate ids"* ]] || { echo "$output"; return 1; }
     : > "$PASSWD"
     mkdir -p "$R/etc/sssd"; : > "$R/etc/sssd/sssd.conf"
     run "$P"
-    [ "$status" -eq 1 ]; [[ "$output" == *"SSSD is configured"* ]]
-    printf 'accept sssd-ranges\n' >> "$E/agents.conf"
+    [ "$status" -eq 1 ]; [[ "$output" == *"users come from a directory service"* ]]
+    rm "$R/etc/sssd/sssd.conf"
+    printf 'passwd: files winbind\n' > "$R/etc/nsswitch.conf"
     run "$P"
-    [[ "$output" != *"SSSD is configured"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"users come from a directory service"* ]]
+    printf 'passwd: files systemd\n' > "$R/etc/nsswitch.conf"
+    run "$P"
+    [[ "$output" != *"users come from a directory service"* ]] || { echo "$output"; return 1; }
+    printf 'passwd: files ldap\n' > "$R/etc/nsswitch.conf"
+    printf 'accept id-ranges\n' >> "$E/agents.conf"
+    run "$P"
+    [[ "$output" != *"users come from a directory service"* ]]
 }

@@ -82,6 +82,9 @@ To change limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see th
 `--confirm` to apply it. `--check` reports drift; `sudo /usr/local/lib/airlock-agents/host-test.sh`
 checks the whole setup live, as each user.
 
+A changed sandbox (limits, paths) reaches a running agent user when its manager restarts; apply
+names those. Reboot, or `systemctl restart user@<uid>` (it ends that user's sessions).
+
 ### When apply stops
 
 Apply never overwrites a file it didn't write, and never changes anything when something looks
@@ -93,8 +96,8 @@ wrong. It stops, says "paused, nothing changed", and lists what it found, for ex
 - on WSL, interop on or Windows drives readable by the agents.
 
 A few findings you can decide to live with: add `accept wsl-interop`, `accept wsl-drives`,
-`accept generic-dropins` or `accept sssd-ranges` (on a host with SSSD, once you have checked the
-agents' subordinate id ranges don't overlap its ID mapping) to `agents.conf`.
+`accept generic-dropins` or `accept id-ranges` (when users come from SSSD, winbind or LDAP,
+once you have checked the agents' ids don't overlap its ID mapping) to `agents.conf`.
 
 ### Parts you manage yourself
 
@@ -108,9 +111,10 @@ Files the toolkit owns aren't edited locally: changes come with a toolkit update
 
 ### The clipboard
 
-By default nothing in a session reaches your clipboard. `clipboard on` in `agents.conf` passes
-Claude's copy (select, then Ctrl+C) on to your terminal. The session's tmux runs as the agent
-user, so this also lets that user write your clipboard: turn it on only if you want it.
+By default the session's tmux doesn't pass clipboard writes on to your terminal. `clipboard on`
+in `agents.conf` passes Claude's copy (select, then Ctrl+C) on. Either way the tmux runs as the
+agent user, which could change that setting itself, so the real control is your terminal: use
+one that asks before a program writes the clipboard (OSC 52), or turn that off there.
 
 ### Removing a user, renaming, resizing
 
@@ -119,7 +123,8 @@ remove one (web research, say), as root:
 
 ```
 loginctl disable-linger <user>
-systemctl stop user@<uid>.service home-<user>.mount
+systemctl stop user@<uid>.service
+systemctl disable --now "$(systemd-escape --path /home/<user>).mount"
 userdel <user>; groupdel <user>
 sed -i '/^<user>:/d' /etc/subuid /etc/subgid
 rm -r /var/lib/<user> /etc/claude-airlock/agents/<user>.conf
