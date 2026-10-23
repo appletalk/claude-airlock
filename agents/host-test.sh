@@ -62,12 +62,17 @@ try:
         if os.listdir(p): print("error:not-empty"); sys.exit()
     elif op == "vsock":
         import socket; socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM).close()
+    elif op == "io_uring":
+        import ctypes; libc = ctypes.CDLL(None, use_errno=True)
+        params = ctypes.create_string_buffer(120)
+        if libc.syscall(425, 1, params) < 0:
+            raise OSError(ctypes.get_errno(), "io_uring_setup")
     else:
         print("error:unknown-op"); sys.exit()
     print("ok")
 except OSError as e:
     print("denied" if e.errno in (errno.EACCES, errno.EPERM) else "rofs" if e.errno == errno.EROFS else
-          "refused" if e.errno == errno.EAFNOSUPPORT else
+          "refused" if e.errno == errno.EAFNOSUPPORT else "nosys" if e.errno == errno.ENOSYS else
           "missing" if e.errno == errno.ENOENT else "error:" + errno.errorcode.get(e.errno, str(e.errno)))
 '
 probe() { as "$1" python3 -I -c "$PROBE" "$2" "$3" "${4:-}" 2>&1 | tail -1; }
@@ -228,7 +233,7 @@ users="$A:$AU"; [ -z "$W" ] || users="$users $W:$WU $G:$GU"
 mgr() { systemd-run --user -M "$1@" --wait --pipe --quiet --collect --expand-environment=no -- python3 -I -c "$PROBE" "$2" "$3" "${4:-}" 2>&1 | tail -1; }
 mcheck() {  # mcheck <want...> <what> <user> <op> <path>: the result must be one of the wants
     local wants=() got
-    while [[ "$1" =~ ^(ok|denied|missing|rofs|refused)$ ]]; do wants+=("$1"); shift; done
+    while [[ "$1" =~ ^(ok|denied|missing|rofs|refused|nosys)$ ]]; do wants+=("$1"); shift; done
     got="$(mgr "$2" "$3" "$4")"
     if [[ " ${wants[*]} " == *" $got "* ]]; then pass "$1"; else fail "$1 (expected ${wants[*]}, got ${got:-nothing})"; fi
 }
@@ -308,6 +313,14 @@ for spec in $users; do
     fi
     expect yes "user@$n: a rootless podman box runs (${img[$u]})" \
         systemd-run --user -M "$u@" --wait --pipe --quiet --collect --expand-environment=no -- podman run --rm --network none --entrypoint /bin/true "${img[$u]}"
+    # ...and Node runs in it (it calls io_uring_setup at startup: refused with ENOSYS, it falls
+    # back; killed, every Node program in the boxes would die)
+    expect yes "user@$n: Node runs in a box (${img[$u]}; skipped inside if the image has none)" \
+        systemd-run --user -M "$u@" --wait --pipe --quiet --collect --expand-environment=no -- podman run --rm --network none --entrypoint /bin/sh "${img[$u]}" -c 'command -v node >/dev/null || exit 0; node -e 0'
+    # io_uring outside the boxes too: an error, not a kill (SIGSYS would print nothing at all)
+    if grep -q '^SystemCallFilter=.*io_uring' "/etc/systemd/system/user@$n.service.d/10-airlock-agents.conf" 2>/dev/null; then
+        mcheck nosys "user@$n: io_uring_setup fails with ENOSYS (not killed)" "$u" io_uring -
+    fi
     expect yes "user@$n: AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf" sh -c "systemctl show -p Environment --value user@$n.service | grep -q 'AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf'"
     # no cron or at jobs: the spool read-only in its manager, and the user denied
     for sp in /var/spool/cron /var/spool/at; do

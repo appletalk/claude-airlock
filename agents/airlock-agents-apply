@@ -277,10 +277,12 @@ EOF
 # Sockets of the families boxes and the manager use, nothing else: no AF_VSOCK to the Windows
 # host (WSL interop rides it), no raw packet sockets, no Bluetooth or the rest. Native calls only
 # (the 32-bit ABI's socketcall would get round the filter) and no io_uring (it opens sockets
-# without socket()): nothing here uses either, and the boxes' own seccomp refuses both already.
+# without socket()). io_uring fails with ENOSYS, as the boxes' own seccomp makes it: a filter
+# that killed instead would win over theirs, and Node calls io_uring_setup at startup and falls
+# back only on an error.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
-SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
+SystemCallFilter=~io_uring_setup:ENOSYS io_uring_enter:ENOSYS io_uring_register:ENOSYS
 EOF
     else cat <<EOF
 # (No RestrictAddressFamilies, SystemCallArchitectures or SystemCallFilter: before systemd 255

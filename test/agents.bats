@@ -1030,7 +1030,7 @@ TemporaryFileSystem=/mnt:ro
 InaccessiblePaths=-/dev/dxg -/dev/vsock
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
-SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
+SystemCallFilter=~io_uring_setup:ENOSYS io_uring_enter:ENOSYS io_uring_register:ENOSYS
 InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
@@ -1059,7 +1059,7 @@ TemporaryFileSystem=/mnt:ro
 InaccessiblePaths=-/dev/dxg -/dev/vsock
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
-SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
+SystemCallFilter=~io_uring_setup:ENOSYS io_uring_enter:ENOSYS io_uring_register:ENOSYS
 InaccessiblePaths=$cg
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
         f="$d/user@$n.service.d/10-airlock-agents.conf"
