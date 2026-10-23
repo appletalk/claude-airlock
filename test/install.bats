@@ -303,16 +303,18 @@ _mkca() {
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$BATS_TEST_TMPDIR/$2.key" \
     -out "$1/$2.crt" -days 2 -subj "/CN=$2" -addext "$ext" 2>/dev/null
 }
-# _ca_root DIR: stat answers "root's, 0755" for DIR and what is in it (a test can't chown to root);
-# CA_MODE overrides the mode. Every other path gets the real stat.
+# _ca_root DIR: stat answers "root's, 0755" for DIR, what is in it and every directory above it
+# (a test can't chown to root). STUBBIN/.ca-mode overrides DIR's answer, .ca-file.<name> one
+# file's ("uid:mode"). Every other path gets the real stat.
 _ca_root() {
   printf '%s\n' "$1" > "$STUBBIN/.ca-root"
   cat > "$STUBBIN/stat" <<'S'
 #!/bin/bash
-r="$(cat "$(dirname "$0")/.ca-root")"
-p="${*: -1}"
-if [ "$1 $2" = "-c %u:%a" ] && { [ "$p" = "$r" ] || [ "${p%/*}" = "$r" ]; }; then
-  echo "0:$(cat "$(dirname "$0")/.ca-mode" 2>/dev/null || echo 755)"; exit 0
+d="$(dirname "$0")"; r="$(cat "$d/.ca-root")"; p="${*: -1}"
+if [ "$1 $2" = "-c %u:%a" ]; then
+  if [ "$p" = "$r" ]; then echo "0:$(cat "$d/.ca-mode" 2>/dev/null || echo 755)"; exit 0; fi
+  if [ "${p%/*}" = "$r" ]; then f="$d/.ca-file.${p##*/}"; [ -f "$f" ] && cat "$f" || echo 0:644; exit 0; fi
+  case "$r/" in "$p"/*|"$p"*) [ "$p" = / ] || [ "${r#"$p"/}" != "$r" ] && { echo 0:755; exit 0; } ;; esac
 fi
 exec /usr/bin/stat "$@"
 S
@@ -323,7 +325,7 @@ _ca_config() { mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"; printf '%s\n' "$
 @test "CA certs from the clone's image/certs/ (no host dir): checked, copied, listed; refreshed per install" {
   command -v openssl >/dev/null || skip "no openssl"
   mkclone
-  _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/no-such-dir"
+  _ca_config "AIRLOCK_CA_DIR=clone"
   _mkca "$CLONE/image/certs" corp-root
   _install_clone
   [ -f "$(IROOT)/versions/$(rev)/image/certs/corp-root.crt" ]
@@ -335,7 +337,7 @@ _ca_config() { mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"; printf '%s\n' "$
 @test "CA certs: a leaf certificate, a key, or anything else in a .crt is refused before anything is installed" {
   command -v openssl >/dev/null || skip "no openssl"
   mkclone
-  _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/no-such-dir"
+  _ca_config "AIRLOCK_CA_DIR=clone"
   _mkca "$CLONE/image/certs" leafy leaf
   _install_clone
   grep -q 'is not a CA' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
@@ -363,6 +365,56 @@ _ca_config() { mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"; printf '%s\n' "$
   grep -q "is not root's" "$BATS_TEST_TMPDIR/install.err"; refute test -d "$(IROOT)/versions/$(rev)"
   _ca_root "$H"; ln -s "$H/host-root.crt" "$H/linked.crt"; _install_clone
   grep -q 'is a link' "$BATS_TEST_TMPDIR/install.err"; refute test -d "$(IROOT)/versions/$(rev)"
+}
+
+@test "CA certs in the clone without AIRLOCK_CA_DIR=clone stop the install (a box could have put them there)" {
+  command -v openssl >/dev/null || skip "no openssl"
+  mkclone
+  _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/no-such-dir"
+  _mkca "$CLONE/image/certs" planted
+  _install_clone
+  grep -q 'used only with AIRLOCK_CA_DIR=clone' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  refute test -d "$(IROOT)/versions/$(rev)"
+  # ...nor does REQUIRED accept the clone, even when opted in
+  _ca_config AIRLOCK_CA_DIR=clone AIRLOCK_CA_REQUIRED=1
+  _install_clone
+  grep -q 'only from a root-owned host directory' "$BATS_TEST_TMPDIR/install.err"
+  refute test -d "$(IROOT)/versions/$(rev)"
+}
+
+@test "CA certs: a file not root's or writable in a good dir, a link in the dir's path, a link or an oversized file in the clone are refused" {
+  command -v openssl >/dev/null || skip "no openssl"
+  mkclone
+  H="$BATS_TEST_TMPDIR/hostca"; _mkca "$H" host-root; _ca_root "$H"; _ca_config "AIRLOCK_CA_DIR=$H"
+  echo 0:664 > "$STUBBIN/.ca-file.host-root.crt"; _install_clone
+  grep -q 'host-root.crt is writable by group or others' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  echo 1000:644 > "$STUBBIN/.ca-file.host-root.crt"; _install_clone
+  grep -q "host-root.crt is not root's" "$BATS_TEST_TMPDIR/install.err"
+  rm "$STUBBIN/.ca-file.host-root.crt"
+  ln -s "$H" "$BATS_TEST_TMPDIR/via-link"; _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/via-link/"
+  _install_clone
+  grep -q 'is a link\|has a link in its path' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  refute test -d "$(IROOT)/versions/$(rev)"
+  _ca_config AIRLOCK_CA_DIR=clone
+  _mkca "$BATS_TEST_TMPDIR/elsewhere" real; ln -s "$BATS_TEST_TMPDIR/elsewhere/real.crt" "$CLONE/image/certs/linked.crt"
+  _install_clone; grep -q 'linked.crt is a link' "$BATS_TEST_TMPDIR/install.err"
+  rm "$CLONE/image/certs/linked.crt"; head -c 70000 /dev/zero > "$CLONE/image/certs/big.crt"
+  _install_clone; grep -q 'over 64 KiB' "$BATS_TEST_TMPDIR/install.err"
+  refute test -d "$(IROOT)/versions/$(rev)"
+}
+
+@test "CA certs: what is built is the copy that was checked, not the path read again later" {
+  command -v openssl >/dev/null || skip "no openssl"
+  mkclone
+  H="$BATS_TEST_TMPDIR/hostca"; _mkca "$H" host-root; _ca_root "$H"; _ca_config "AIRLOCK_CA_DIR=$H"
+  cp "$H/host-root.crt" "$BATS_TEST_TMPDIR/checked.crt"
+  # git archive (the export, after the checks) swaps the file for something unchecked
+  printf '#!/bin/bash\nfor a in "$@"; do [ "$a" = archive ] && echo "NOT A CERT" > %s; done\nexec /usr/bin/git "$@"\n' "$H/host-root.crt" > "$STUBBIN/git"
+  chmod +x "$STUBBIN/git"
+  _install_clone
+  rm "$STUBBIN/git"
+  grep -q 'NOT A CERT' "$H/host-root.crt"                     # the swap happened
+  cmp "$(IROOT)/versions/$(rev)/image/certs/host-root.crt" "$BATS_TEST_TMPDIR/checked.crt" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
 }
 
 @test "AIRLOCK_CA_REQUIRED=1: no install without a CA cert" {

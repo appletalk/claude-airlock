@@ -54,11 +54,11 @@ RUN echo "apt refresh key: ${APT_REFRESH}" \
       socat \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Optional internal/corporate CA chain. Drop your org's CA certs (public certs
-# only — never private keys) into image/certs/ and they are trusted by external
-# tooling in the box (curl, git, the Python HTTP stack), so it can reach internal
-# HTTPS services whose leaf certs chain to a private PKI. The directory is empty
-# by default and the build is a no-op without it.
+# Optional internal/corporate CA chain. The install fills certs/ with the CA certs it
+# checked (from the host's /etc/claude-airlock/ca/, see docs/images.md) and they are
+# trusted by external tooling in the box (curl, git, the Python HTTP stack), so it can
+# reach internal HTTPS services whose leaf certs chain to a private PKI. The directory
+# is empty by default and the build is a no-op without it.
 #
 # update-ca-certificates folds them into the system store, which curl/git and
 # Python's ssl module use by default; REQUESTS_CA_BUNDLE/SSL_CERT_FILE extend that

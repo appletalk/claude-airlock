@@ -92,11 +92,19 @@ make install-airlock          # rebuild the images
   by group or others: every image trusts what is there, so whoever can write it can get into
   every box's trust. Each file must hold PEM CA certificates (`CA:TRUE`) and nothing else: no
   leaf certificates, **never private keys**.
-- `AIRLOCK_CA_REQUIRED=1` in the host config makes an install with no CA certificate an error,
-  for hosts that can't work without one. `AIRLOCK_CA_DIR` names another directory (same rules).
-- Without the host directory, the install takes `image/certs/` in the clone instead (untracked
-  by design; the same certificate checks, but not the ownership ones). Use it only where you
-  have no root.
+- The directory is checked all the way up: it and every directory above it must be root's and
+  not writable by group or others, with no link anywhere in its path. Each file is read once
+  into a private copy, and that copy is what is checked and built.
+- A file with comment or "Bag Attributes" lines is refused; `openssl x509 -in FILE -out
+  CLEAN.crt` cleans one. A root without `basicConstraints` (an old X.509 v1 root) is refused
+  too. The checks need OpenSSL 1.1.1 or later.
+- `AIRLOCK_CA_REQUIRED=1` in the host config makes an install with no CA certificate in the
+  host's directory an error, for hosts that can't work without one. `AIRLOCK_CA_DIR` names
+  another directory (same rules).
+- Without root: `AIRLOCK_CA_DIR=clone` in the host config takes `image/certs/` in the clone
+  instead (untracked by design; the certificate checks, not the ownership ones). Only with that
+  setting: certificates found in the clone otherwise stop the install, since a box that can
+  write the clone could have put them there. `AIRLOCK_CA_REQUIRED=1` never accepts them.
 - Nothing here is needed on a normal home network; with no certificates the CA layer is a no-op.
 - The chain is trusted by curl, git and Python only, never by Node, so Claude's own TLS
   stays on its built-in roots (see [security-model.md](security-model.md#a-private-ca-chain-stays-out-of-claudes-own-tls)).

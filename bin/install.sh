@@ -81,14 +81,15 @@ if ! flock -n 9; then
     exit 1
   fi
 fi
-# Corporate CA certs for the images (docs/images.md). From the host's own, root-owned
-# /etc/claude-airlock/ca/ (deployed with the host's config; AIRLOCK_CA_DIR names another) when it
-# exists, else the clone's untracked image/certs/. Every image trusts them, so the host's are
-# refused if a link, or not root's, or writable by group or others (a writable one is anyone's
-# way into every box's trust), and every file must be CA certificates and nothing else.
-# AIRLOCK_CA_REQUIRED=1: no install without at least one. A bundle's images carry their own.
-CA_FILES=() CA_INFO=() CA_FROM=""
-_ca_die() { echo "claude-airlock: $*; nothing was installed" >&2; exit 1; }
+# Corporate CA certs for the images (docs/images.md). Every image trusts them, so they come from
+# the host's own /etc/claude-airlock/ca/ (deployed with the host's config; AIRLOCK_CA_DIR names
+# another), which must be root's all the way up, no link anywhere in its path, writable by
+# no one else. The clone's untracked image/certs/ only with AIRLOCK_CA_DIR=clone (a box that can
+# write the clone could add one): found there otherwise, they stop the install. Each file is
+# read once, into a private copy, and that copy is what is checked and built (PEM CA certificates
+# only: CA:TRUE, no leaf, no key). AIRLOCK_CA_REQUIRED=1: no install without the host's.
+CA_FILES=() CA_INFO=() CA_FROM="" CA_TMP=""
+_ca_die() { [ -z "$CA_TMP" ] || rm -rf -- "$CA_TMP"; echo "claude-airlock: $*; nothing was installed" >&2; exit 1; }
 _ca_safe() {  # _ca_safe PATH: root's, no link, no group/other write
   local m
   [ ! -L "$1" ] || _ca_die "$1 is a link"
@@ -96,51 +97,77 @@ _ca_safe() {  # _ca_safe PATH: root's, no link, no group/other write
   [ "${m%%:*}" = 0 ] || _ca_die "$1 is not root's (every image would trust what its owner puts there)"
   [ $(( 8#${m#*:} & 8#022 )) = 0 ] || _ca_die "$1 is writable by group or others"
 }
-_ca_check() {  # _ca_check FILE: PEM CA certificates only; their subjects and fingerprints into CA_INFO
+_ca_check() {  # _ca_check COPY NAME: PEM CA certificates only; subjects and fingerprints into CA_INFO
   local pem b cur="" line blocks=()
-  [ -f "$1" ] || _ca_die "$1 is not a regular file"
-  [ "$(stat -c %s -- "$1")" -le 65536 ] || _ca_die "$1 is over 64 KiB: not a CA certificate or two"
-  command -v openssl >/dev/null || _ca_die "openssl is needed to check $1"
   pem="$(tr -d '\r' < "$1" | sed '/^[[:blank:]]*$/d')"
   awk '/^-----BEGIN CERTIFICATE-----$/ { if (inb) exit 1; inb = 1; n++; next }
        /^-----END CERTIFICATE-----$/ { if (!inb) exit 1; inb = 0; next }
        inb && /^[A-Za-z0-9+\/=]+$/ { next }
        { exit 1 }
        END { if (inb || n == 0) exit 1 }' <<< "$pem" \
-    || _ca_die "$1 is not PEM certificates only (BEGIN/END CERTIFICATE blocks, nothing else, no key)"
+    || _ca_die "$2 is not PEM certificates only (BEGIN/END CERTIFICATE blocks and nothing else: no key, no comment or Bag Attributes lines; openssl x509 -in FILE -out CLEAN.crt cleans one)"
   while IFS= read -r line; do
     cur+="$line"$'\n'
     [ "$line" != "-----END CERTIFICATE-----" ] || { blocks+=("$cur"); cur=""; }
   done <<< "$pem"
   for b in "${blocks[@]}"; do
     openssl x509 -noout -ext basicConstraints <<< "$b" 2>/dev/null | grep -q 'CA:TRUE' \
-      || _ca_die "$1: a certificate does not parse, or is not a CA (basicConstraints CA:TRUE)"
-    CA_INFO+=("$(basename "$1"): $(openssl x509 -noout -subject <<< "$b" | sed 's/^subject=[[:space:]]*//'), $(openssl x509 -noout -fingerprint -sha256 <<< "$b" | sed 's/^.*=//')")
+      || _ca_die "$2: a certificate does not parse, or is not a CA (basicConstraints CA:TRUE)"
+    CA_INFO+=("${2##*/}: $(openssl x509 -noout -subject <<< "$b" | sed 's/^subject=[[:space:]]*//'), $(openssl x509 -noout -fingerprint -sha256 <<< "$b" | sed 's/^.*=//')")
   done
 }
-if [ -z "$FROM_BUNDLE" ]; then
-  _ca_dir="$(_cfg_get AIRLOCK_CA_DIR)"; _ca_dir="${_ca_dir:-/etc/claude-airlock/ca}"
-  case "$_ca_dir" in /*) ;; *) _ca_die "AIRLOCK_CA_DIR must be an absolute path ($_ca_dir)" ;; esac
-  if [ -e "$_ca_dir" ] || [ -L "$_ca_dir" ]; then
-    CA_FROM="$_ca_dir"
-    _ca_safe "$_ca_dir"
-    [ -d "$_ca_dir" ] || _ca_die "$_ca_dir is not a directory"
-    for _c in "$_ca_dir"/*.crt; do
-      [ -e "$_c" ] || [ -L "$_c" ] || continue
-      _ca_safe "$_c"; _ca_check "$_c"; CA_FILES+=("$_c")
-    done
-    for _c in "$REPO_DIR"/image/certs/*.crt; do
-      [ -e "$_c" ] && { echo "    (the clone's image/certs/ is ignored: the host's $_ca_dir is used)"; break; }
-    done
-  else
-    CA_FROM="$REPO_DIR/image/certs"
-    for _c in "$REPO_DIR"/image/certs/*.crt; do
-      [ -e "$_c" ] || [ -L "$_c" ] || continue
-      [ ! -L "$_c" ] || _ca_die "$_c is a link"
-      _ca_check "$_c"; CA_FILES+=("$_c")
-    done
+_ca_take() {  # _ca_take FILE: read it once into the private copy, check the copy
+  local copy
+  [ ! -L "$1" ] || _ca_die "$1 is a link"
+  [ -f "$1" ] || _ca_die "$1 is not a regular file"
+  if [ -z "$CA_TMP" ]; then
+    command -v openssl >/dev/null || _ca_die "openssl is needed to check the CA certificates"
+    openssl x509 -help 2>&1 | grep -q -- '-ext' || _ca_die "openssl is too old to check the CA certificates (1.1.1 or later)"
+    CA_TMP="$(mktemp -d "$INSTALL_ROOT/.ca.XXXXXX")" || _ca_die "cannot make a private copy of the CA certificates"
   fi
-  _ca_req="$(_cfg_get AIRLOCK_CA_REQUIRED)"
+  copy="$CA_TMP/${1##*/}"
+  head -c 65537 -- "$1" > "$copy" || _ca_die "cannot read $1"
+  [ "$(stat -c %s -- "$copy")" -le 65536 ] || _ca_die "$1 is over 64 KiB: not a CA certificate or two"
+  _ca_check "$copy" "$1"
+  CA_FILES+=("$copy")
+}
+_ca_req="$(_cfg_get AIRLOCK_CA_REQUIRED)"
+if [ -n "$FROM_BUNDLE" ]; then
+  # The bundle's images were built with its writer's certs (its tree is that version's): with
+  # REQUIRED, check they are there and are CA certificates.
+  if [ "$_ca_req" = 1 ]; then
+    for _c in "$REPO_DIR"/image/certs/*.crt; do { [ -e "$_c" ] || [ -L "$_c" ]; } && _ca_take "$_c"; done
+    [ "${#CA_FILES[@]}" -gt 0 ] || _ca_die "AIRLOCK_CA_REQUIRED=1, but the bundle's images carry no CA certs"
+  fi
+else
+  _ca_dir="$(_cfg_get AIRLOCK_CA_DIR)"; _ca_dir="${_ca_dir:-/etc/claude-airlock/ca}"
+  if [ "$_ca_dir" = clone ]; then
+    [ "$_ca_req" != 1 ] || _ca_die "AIRLOCK_CA_REQUIRED=1 takes CA certs only from a root-owned host directory, not AIRLOCK_CA_DIR=clone"
+    CA_FROM="$REPO_DIR/image/certs (AIRLOCK_CA_DIR=clone)"
+    for _c in "$REPO_DIR"/image/certs/*.crt; do { [ -e "$_c" ] || [ -L "$_c" ]; } && _ca_take "$_c"; done
+  else
+    while [ "$_ca_dir" != / ] && [ "${_ca_dir%/}" != "$_ca_dir" ]; do _ca_dir="${_ca_dir%/}"; done
+    case "$_ca_dir" in /?*) ;; *) _ca_die "AIRLOCK_CA_DIR must be an absolute path to a directory, or clone ($_ca_dir)" ;; esac
+    CA_FROM="$_ca_dir"
+    if [ -e "$_ca_dir" ] || [ -L "$_ca_dir" ]; then
+      [ "$(realpath -e -- "$_ca_dir" 2>/dev/null)" = "$_ca_dir" ] || _ca_die "$_ca_dir has a link in its path: name its real path"
+      [ -d "$_ca_dir" ] || _ca_die "$_ca_dir is not a directory"
+      _p="$_ca_dir"
+      while :; do _ca_safe "$_p"; [ "$_p" = / ] && break; _p="${_p%/*}"; _p="${_p:-/}"; done
+      for _c in "$_ca_dir"/*.crt; do
+        { [ -e "$_c" ] || [ -L "$_c" ]; } || continue
+        _ca_safe "$_c"; _ca_take "$_c"
+      done
+      for _c in "$REPO_DIR"/image/certs/*.crt; do
+        [ -e "$_c" ] && { echo "    (the clone's image/certs/ is ignored: the host's $_ca_dir is used)"; break; }
+      done
+    else
+      for _c in "$REPO_DIR"/image/certs/*.crt; do
+        [ -e "$_c" ] || [ -L "$_c" ] || continue
+        _ca_die "the clone's image/certs/ holds CA certs, which are used only with AIRLOCK_CA_DIR=clone in the host config (a box that can write the clone could add one): move them to $_ca_dir (root's), or set AIRLOCK_CA_DIR=clone"
+      done
+    fi
+  fi
   if [ "$_ca_req" = 1 ] && [ "${#CA_FILES[@]}" = 0 ]; then
     _ca_die "AIRLOCK_CA_REQUIRED=1, but there are no CA certs in $CA_FROM"
   fi
@@ -152,6 +179,7 @@ _prev="$(readlink "$INSTALL_ROOT/current" 2>/dev/null || true)"
 # exported (it never activated, so it must not outrank older live ones in the prune) and
 # its per-commit image tags. Never remove whatever `current` points at.
 _cleanup() {
+  [ -n "$CA_TMP" ] && rm -rf -- "$CA_TMP"
   [ -n "$_stage" ] && rm -rf -- "$_stage"
   [ -n "$_live" ] && return 0
   if [ -n "$_fresh" ] && [ "$(readlink "$INSTALL_ROOT/current" 2>/dev/null)" != "versions/$REV" ]; then
@@ -218,7 +246,8 @@ fi
 # The CA certs checked above, into this version's build context (the export never carries
 # any: they are the host's, not the repo's). A bundle's images already hold theirs.
 if [ -z "$FROM_BUNDLE" ]; then
-  find "$DEST/image/certs" -maxdepth 1 -name '*.crt' -delete
+  # (only the checked set: nothing else under certs/, which the image copies whole)
+  find "$DEST/image/certs" -mindepth 1 ! -name .gitkeep -exec rm -rf -- {} +
   for _c in "${CA_FILES[@]}"; do install -m 0644 "$_c" "$DEST/image/certs/"; done
   if [ "${#CA_INFO[@]}" -gt 0 ]; then
     echo "    CA certs -> images (from $CA_FROM):"

@@ -43,8 +43,8 @@ see [dedicated-user.md](dedicated-user.md)).
 | `AIRLOCK_PASTE_PROJECT` | none | The project `airlock paste` writes into. Required to use paste. See [scratch-and-pastes.md](scratch-and-pastes.md). |
 | `AIRLOCK_PASTE_DIR` | none | A read-only paste drop box instead. See [scratch-and-pastes.md](scratch-and-pastes.md#a-drop-box-instead-airlock_paste_dir). |
 | `AIRLOCK_EXTRA_MOUNTS` | empty | Operator-only shared directories (`DIR:ro` / `DIR:rw`). Also read from the launching environment. See [dedicated-user.md](dedicated-user.md). |
-| `AIRLOCK_CA_DIR` | `/etc/claude-airlock/ca` | Where the install takes the images' CA certificates from (root's; see [images.md](images.md#corporate-or-internal-ca-certificates)). |
-| `AIRLOCK_CA_REQUIRED` | empty | `1`: an install with no CA certificate is an error. |
+| `AIRLOCK_CA_DIR` | `/etc/claude-airlock/ca` | Where the install takes the images' CA certificates from (root's all the way up; `clone`: the clone's `image/certs/`, without root). See [images.md](images.md#corporate-or-internal-ca-certificates). |
+| `AIRLOCK_CA_REQUIRED` | empty | `1`: an install with no CA certificate from the host's directory is an error. |
 | `AIRLOCK_MANAGED_SETTINGS` | empty | A Claude Code managed-settings drop-in for every box. See [dedicated-user.md](dedicated-user.md). |
 
 Environment only (refused, or not read, from the config file):
