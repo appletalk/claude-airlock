@@ -222,13 +222,21 @@ More in [docs/configuration.md](docs/configuration.md#secrets-airlock-secret).
 
 ```sh
 make bootstrap   # vendor the pinned shellcheck (sha256) + bats (commit) into .tooling/; re-run to re-verify
-make hooks       # install the git pre-commit hook (runs lint + tests)
+make hooks       # install the git hooks (lint + tests, and no site details: see below)
 make lint        # shellcheck the launcher, firewall and helper scripts (+ zsh -n on the integration)
 make test        # run the bats suite against both engines (podman + docker)
 make check       # lint + test (what the hook runs)
 make image-smoke # prove the dev image's validators work offline (needs a built :dev)
 make doctor      # live containment test on this host
 ```
+
+This repository is public. Keep site details out of it, commit messages included: names of
+people and hosts, domains, addresses, anything from one site's config. Use stand-ins (`alice`,
+`example.org`, `10.0.0.10`). `scripts/private-names-check` (run by the hooks and a test) checks
+against your own list of patterns, kept outside the repo: one regex per line in
+`~/.config/claude-airlock/private-names`, or the file `AIRLOCK_PRIVATE_NAMES` or
+`git config airlock.privateNames` names. Before publishing, run it over what you're about to
+push: `scripts/private-names-check --range origin/main..main`.
 
 `make help` lists every target. The launcher is Bash on purpose: it composes the engine,
 `iptables`, `pass` and `jq`. Keep it shellcheck-clean and covered by the bats suite, which

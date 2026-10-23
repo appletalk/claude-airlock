@@ -17,7 +17,8 @@ BATS       ?= $(shell command -v bats 2>/dev/null || echo .tooling/bin/bats)
 SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh \
                  image/init-firewall.sh image/entrypoint.sh \
                  config/airlock-statusline.sh \
-                 hooks/pre-commit scripts/bootstrap-tools.sh \
+                 hooks/pre-commit hooks/pre-merge-commit hooks/commit-msg scripts/private-names-check test/private-names-check-test.sh \
+                 scripts/bootstrap-tools.sh \
                  scripts/airlock-doctor.sh lib/host-dns.sh \
                  scripts/image-smoke.sh scripts/validator-checks.sh \
                  scripts/run-tests.sh \
@@ -92,9 +93,11 @@ image-smoke: ## prove the dev image's validators work offline (needs a built :de
 
 check: lint test ## lint + test (what the pre-commit hook runs)
 
-hooks: ## install the git pre-commit hook (symlink)
+hooks: ## install the git pre-commit, pre-merge-commit and commit-msg hooks (symlinks)
 	@ln -sf ../../hooks/pre-commit .git/hooks/pre-commit \
-	  && echo "installed .git/hooks/pre-commit -> hooks/pre-commit"
+	  && ln -sf ../../hooks/pre-merge-commit .git/hooks/pre-merge-commit \
+	  && ln -sf ../../hooks/commit-msg .git/hooks/commit-msg \
+	  && echo "installed .git/hooks/pre-commit, pre-merge-commit and commit-msg -> hooks/"
 
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh

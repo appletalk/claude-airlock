@@ -15,10 +15,19 @@ scripts=(
   bin/claude-airlock bin/install.sh
   image/init-firewall.sh image/entrypoint.sh
   config/airlock-statusline.sh
-  hooks/pre-commit scripts/bootstrap-tools.sh scripts/run-tests.sh
+  hooks/pre-commit hooks/pre-merge-commit hooks/commit-msg scripts/bootstrap-tools.sh
+  scripts/run-tests.sh
+  scripts/private-names-check
 )
 
 rc=0
+# This repo is public: no site details in what is committed (scripts/private-names-check; it
+# needs a private pattern list, and says so when there is none).
+echo "==> private names"
+pn=0; scripts/private-names-check --staged || pn=$?
+[ "$pn" = 2 ] && echo "!! private-names-check could not run (above): nothing was checked" >&2
+[ "$pn" = 1 ] && rc=1
+
 if command -v "$shellcheck_bin" >/dev/null 2>&1; then
   echo "==> shellcheck"
   "$shellcheck_bin" "${scripts[@]}" || rc=1

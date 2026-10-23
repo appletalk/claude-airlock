@@ -112,9 +112,20 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
 }
 
 @test "nothing site-specific is built in: no name, domain or address of any one site" {
+    # The patterns are private (listing them here would publish them): scripts/private-names-check
+    # says where they come from. Without them there is nothing to check against.
+    names="${AIRLOCK_PRIVATE_NAMES:-$(git -C "$REPO" config --get airlock.privateNames 2>/dev/null || true)}"
+    names="${names:-$HOME/.config/claude-airlock/private-names}"
+    [ -r "$names" ] || skip "no private pattern list ($names)"
+    pat="$({ grep -vE '^[[:space:]]*(#|$)' "$names" || true; } | paste -sd'|' -)"
+    [ -n "$pat" ] || skip "no patterns in $names"
     "$A" --render "$T/r" "$REPO/agents/agents.conf.example" >/dev/null
-    # (the names in pieces, so this file doesn't match itself)
-    pat="site-name-placeholder"
-    run grep -rliE "$pat" "$REPO/agents" "$T/r" "$REPO/test"
-    [ "$status" = 1 ] || { echo "site-specific names in: $output"; return 1; }
+    run grep -rliE -- "$pat" "$T/r"
+    [ "$status" = 1 ] || { echo "site-specific names in the rendered files: $output"; return 1; }
+    cd "$REPO"
+    run env AIRLOCK_PRIVATE_NAMES="$names" scripts/private-names-check --tree HEAD
+    [ "$status" = 0 ] || { echo "$output"; return 1; }
+    # and the working tree as it is now (uncommitted edits too)
+    run bash -c 'git ls-files -z | xargs -0 cat -- 2>/dev/null | tr -d "\000" | grep -aciE -- "$1"' _ "$pat"
+    [ "$output" = 0 ] || { echo "site-specific names in the working tree ($output lines)"; return 1; }
 }
