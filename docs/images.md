@@ -95,11 +95,13 @@ make install-airlock          # rebuild the images
 - The directory is checked all the way up: it and every directory above it must be root's and
   not writable by group or others, with no link anywhere in its path. Each file is read once
   into a private copy, and that copy is what is checked and built.
-- A file with comment or "Bag Attributes" lines is refused; `openssl x509 -in FILE -out
-  CLEAN.crt` cleans one. A root without `basicConstraints` (an old X.509 v1 root) is refused
+- A file with comment or "Bag Attributes" lines is refused. To keep only the certificates
+  (every one of a chain): `sed -n '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/p'
+  FILE > CLEAN.crt`. A root without `basicConstraints` (an old X.509 v1 root) is refused
   too. The checks need OpenSSL 1.1.1 or later.
 - `AIRLOCK_CA_REQUIRED=1` in the host config makes an install with no CA certificate in the
-  host's directory an error, for hosts that can't work without one. `AIRLOCK_CA_DIR` names
+  host's directory an error, for hosts that can't work without one. A bundle install (another
+  account's version, such as the agent users') checks the bundle's images carry some instead. `AIRLOCK_CA_DIR` names
   another directory (same rules).
 - Without root: `AIRLOCK_CA_DIR=clone` in the host config takes `image/certs/` in the clone
   instead (untracked by design; the certificate checks, not the ownership ones). Only with that

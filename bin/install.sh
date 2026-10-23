@@ -122,7 +122,8 @@ _ca_take() {  # _ca_take FILE: read it once into the private copy, check the cop
   [ -f "$1" ] || _ca_die "$1 is not a regular file"
   if [ -z "$CA_TMP" ]; then
     command -v openssl >/dev/null || _ca_die "openssl is needed to check the CA certificates"
-    openssl x509 -help 2>&1 | grep -q -- '-ext' || _ca_die "openssl is too old to check the CA certificates (1.1.1 or later)"
+    _h="$(openssl x509 -help 2>&1)" || true
+    grep -qE -- '(^|[[:space:]])-ext([[:space:]]|$)' <<< "$_h" || _ca_die "openssl is too old to check the CA certificates (1.1.1 or later)"
     CA_TMP="$(mktemp -d "$INSTALL_ROOT/.ca.XXXXXX")" || _ca_die "cannot make a private copy of the CA certificates"
   fi
   copy="$CA_TMP/${1##*/}"
@@ -150,7 +151,7 @@ else
     case "$_ca_dir" in /?*) ;; *) _ca_die "AIRLOCK_CA_DIR must be an absolute path to a directory, or clone ($_ca_dir)" ;; esac
     CA_FROM="$_ca_dir"
     if [ -e "$_ca_dir" ] || [ -L "$_ca_dir" ]; then
-      [ "$(realpath -e -- "$_ca_dir" 2>/dev/null)" = "$_ca_dir" ] || _ca_die "$_ca_dir has a link in its path: name its real path"
+      [ "$(realpath -e -- "$_ca_dir" 2>/dev/null)" = "$_ca_dir" ] || _ca_die "$_ca_dir is not its real path (a link in it, or . or //): name its real path"
       [ -d "$_ca_dir" ] || _ca_die "$_ca_dir is not a directory"
       _p="$_ca_dir"
       while :; do _ca_safe "$_p"; [ "$_p" = / ] && break; _p="${_p%/*}"; _p="${_p:-/}"; done
@@ -190,8 +191,9 @@ _cleanup() {
   fi
 }
 trap _cleanup EXIT
-# Stage dirs left by a hard kill (the trap never ran).
+# Stage dirs left by a hard kill (the trap never ran), and CA copies from one (made before it).
 find "$INSTALL_ROOT/versions" -mindepth 1 -maxdepth 1 -type d -name '.stage.*' -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
+find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -type d -name '.ca.*' -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
 if [ -n "$FROM_BUNDLE" ]; then
   # The commit the bundle names, and a source tree that is that commit's install.
   REV="$(sed -n 's/^commit \([0-9a-f]\{12\}\)$/\1/p' "$FROM_BUNDLE/MANIFEST" 2>/dev/null | head -1)"

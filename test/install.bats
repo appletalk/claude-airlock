@@ -314,7 +314,7 @@ d="$(dirname "$0")"; r="$(cat "$d/.ca-root")"; p="${*: -1}"
 if [ "$1 $2" = "-c %u:%a" ]; then
   if [ "$p" = "$r" ]; then echo "0:$(cat "$d/.ca-mode" 2>/dev/null || echo 755)"; exit 0; fi
   if [ "${p%/*}" = "$r" ]; then f="$d/.ca-file.${p##*/}"; [ -f "$f" ] && cat "$f" || echo 0:644; exit 0; fi
-  case "$r/" in "$p"/*|"$p"*) [ "$p" = / ] || [ "${r#"$p"/}" != "$r" ] && { echo 0:755; exit 0; } ;; esac
+  [ -e "$d/.ca-no-parents" ] || case "$r/" in "$p"/*|"$p"*) [ "$p" = / ] || [ "${r#"$p"/}" != "$r" ] && { echo 0:755; exit 0; } ;; esac
 fi
 exec /usr/bin/stat "$@"
 S
@@ -393,7 +393,7 @@ _ca_config() { mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"; printf '%s\n' "$
   rm "$STUBBIN/.ca-file.host-root.crt"
   ln -s "$H" "$BATS_TEST_TMPDIR/via-link"; _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/via-link/"
   _install_clone
-  grep -q 'is a link\|has a link in its path' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  grep -q 'is a link\|is not its real path' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
   refute test -d "$(IROOT)/versions/$(rev)"
   _ca_config AIRLOCK_CA_DIR=clone
   _mkca "$BATS_TEST_TMPDIR/elsewhere" real; ln -s "$BATS_TEST_TMPDIR/elsewhere/real.crt" "$CLONE/image/certs/linked.crt"
@@ -401,6 +401,28 @@ _ca_config() { mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"; printf '%s\n' "$
   rm "$CLONE/image/certs/linked.crt"; head -c 70000 /dev/zero > "$CLONE/image/certs/big.crt"
   _install_clone; grep -q 'over 64 KiB' "$BATS_TEST_TMPDIR/install.err"
   refute test -d "$(IROOT)/versions/$(rev)"
+}
+
+@test "CA certs: a parent of the host dir that isn't root's is refused (the whole path is checked)" {
+  command -v openssl >/dev/null || skip "no openssl"
+  mkclone
+  H="$BATS_TEST_TMPDIR/hostca"; _mkca "$H" host-root; _ca_root "$H"; _ca_config "AIRLOCK_CA_DIR=$H"
+  touch "$STUBBIN/.ca-no-parents"                 # the stub fakes only the dir and its files now
+  _install_clone
+  grep -q "$BATS_TEST_TMPDIR is not root's" "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  refute test -d "$(IROOT)/versions/$(rev)"
+  run find "$(IROOT)" -maxdepth 1 -name '.ca.*'; [ -z "$output" ]       # and no copy left behind
+}
+
+@test "CA certs: the build context holds only the checked set (a committed cert, even in a subdir, is gone)" {
+  command -v openssl >/dev/null || skip "no openssl"
+  mkclone
+  mkdir -p "$CLONE/image/certs/sub"; _mkca "$CLONE/image/certs/sub" committed
+  gitc add -f image/certs/sub/committed.crt && gitc commit -q -m "a committed cert"
+  _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/no-such-dir"
+  _install_clone
+  [ -d "$(IROOT)/versions/$(rev)" ] || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  [ "$(find "$(IROOT)/versions/$(rev)/image/certs" -mindepth 1)" = "$(IROOT)/versions/$(rev)/image/certs/.gitkeep" ]
 }
 
 @test "CA certs: what is built is the copy that was checked, not the path read again later" {
