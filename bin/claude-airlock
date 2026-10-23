@@ -2606,7 +2606,10 @@ _airlock_box_md_file() {   # $1 = what (for messages), $2 = path: prints its rea
      || [ "$(stat -c %s "$r")" -gt 65536 ]; then
     echo "claude-airlock: $1 '$r' must be a readable regular file of at most 64 KiB that no one else may write; not launching" >&2; return 1
   fi
-  if [ "${r%/*}" = "$own" ] && [ ! -L "$2" ] && [ "$(stat -c %u "$r")" = "$(id -u)" ]; then
+  # (named through the config dir itself, by its real path or through $HOME, never a link to it)
+  d="$(realpath -s -- "$2" 2>/dev/null)" || d=""
+  if [ "${r%/*}" = "$own" ] && [ ! -L "$2" ] && [ "$(stat -c %u "$r")" = "$(id -u)" ] \
+     && { [ "${d%/*}" = "$own" ] || [ "${d%/*}" = "$HOME/.config/claude-airlock" ]; }; then
     printf '%s' "$r"; return 0
   fi
   if [ "$r" = "$(realpath -s -- "$2" 2>/dev/null)" ] && [ "$(stat -c %u "$r")" = 0 ]; then
@@ -2618,7 +2621,7 @@ _airlock_box_md_file() {   # $1 = what (for messages), $2 = path: prints its rea
       d="${d%/*}"
     done
   fi
-  echo "claude-airlock: $1 '$2' must be root's in a tree only root may write (no symlinks), or a file of yours directly in $own; not launching" >&2
+  echo "claude-airlock: $1 '$2' must be root's in a tree only root may write (no symlinks), or a file of yours directly in $own (a regular file, not a link: copy it there); not launching" >&2
   return 1
 }
 _box_base="$_repo/config/box-CLAUDE.md"

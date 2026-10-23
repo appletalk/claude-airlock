@@ -235,7 +235,7 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   printf '%s %s\n' "$(id -u)" "$Q/lib/web-research-rule.md" >> "$FO"; plain "rule not root's"; sed -i '$d' "$FO"
   printf '664 %s\n' "$Q/lib/web-research-rule.md" >> "$FM"; plain "rule group-writable"; sed -i '$d' "$FM"
   printf '646 %s\n' "$Q/lib/web-research.md" >> "$FM"; plain "how-to world-writable"; sed -i '$d' "$FM"
-  chmod 000 "$Q/lib/web-research.md"; plain "how-to unreadable"; chmod 644 "$Q/lib/web-research.md"
+  chmod 200 "$Q/lib/web-research.md"; plain "how-to unreadable"; chmod 644 "$Q/lib/web-research.md"
   mv "$Q/lib/web-research.md" "$Q/lib/w.away"; mkdir "$Q/lib/web-research.md"; printf '0 %s\n' "$Q/lib/web-research.md" >> "$FO"
   plain "how-to a directory"; rmdir "$Q/lib/web-research.md"; sed -i '$d' "$FO"; mv "$Q/lib/w.away" "$Q/lib/web-research.md"
   mv "$Q/lib/web-research.md" "$Q/lib/w.away"; plain "how-to missing"
@@ -307,6 +307,15 @@ mdfile() {  # mdfile <path> <text> [owner] [mode]
   # root's file under a directory of another account's (not writable by others)
   mkdir -p "$T/theirs"; printf '4242 %s\n' "$T/theirs" >> "$FO"; printf '755 %s\n' "$T/theirs" >> "$FM"
   mdfile "$T/theirs/f.md" x; stops AIRLOCK_BOX_CLAUDE_MD "$T/theirs/f.md" "$where"
+  # root's file in a root-owned directory under a directory of the account's: the whole chain counts
+  mkdir -p "$p/../mine/rootdir"; m="$(readlink -f "$p/../mine")"
+  printf '%s %s\n' "$(id -u)" "$m" >> "$FO"; printf '755 %s\n' "$m" >> "$FM"
+  printf '0 %s\n' "$m/rootdir" >> "$FO"; printf '755 %s\n' "$m/rootdir" >> "$FM"
+  mdfile "$m/rootdir/f.md" x; stops AIRLOCK_BOX_CLAUDE_MD "$m/rootdir/f.md" "$where"
+  # a box-writable directory turned into a link to the config dir: the configured name is not in it
+  mdfile "$AIRLOCK_HOME/.config/claude-airlock/token" "SECRET-TOKEN" "$(id -u)" 600
+  ln -s "$AIRLOCK_HOME/.config/claude-airlock" "$p/sub"
+  stops AIRLOCK_BOX_CLAUDE_EXTRA "$p/sub/token" "$where"
   # root's file this account can't read
   mdfile "$Q/closed.md" x; chmod 000 "$Q/closed.md"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/closed.md" "readable regular file"
   # the account's files anywhere but its config dir: the workspace, the box state, $AIRLOCK_TMP

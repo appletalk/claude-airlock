@@ -345,7 +345,8 @@ launching process (never `.airlock/config`), and each must be a readable regular
 most 64 KiB that no one else may write, in a place no box can write: **a root-owned tree** (the
 file and every directory above it root's, the path free of symlinks), or **directly in your
 `~/.config/claude-airlock/`** (a file of yours). Anything else stops the launch, a bad default
-file included. Edit the files on the host: an edit in the box is gone at the next launch. The
+file included. Symlinks are not followed into either place, so a dotfile manager that links
+`~/.config/claude-airlock` or the file itself needs a real copy there. Edit the files on the host: an edit in the box is gone at the next launch. The
 file is per project, so a second launch of the same project with other layers changes it for a
 box already running there too.
 
