@@ -477,7 +477,7 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   manifest 'git.example.org 443 git yes\n'
   _launch "$P" >/dev/null 2>&1 || true
   md="$(box_md)"
-  [[ "$md" == "# RULE-TOP"$'\n'"$(seed_md)"* ]]
+  [[ "$md" == "# RULE-TOP"$'\n\n'"$(seed_md)"* ]]
   [[ "$md" == *"## HOW-TO-ASK" ]]
   h="$(grep -n '^## Hosts behind the egress proxy' <<< "$md" | cut -d: -f1)"
   w="$(grep -n '^## HOW-TO-ASK' <<< "$md" | cut -d: -f1)"
@@ -485,5 +485,5 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   # another posture: no hosts section, the web parts stay
   _launch "$P" egress minimal >/dev/null
   _launch "$P" >/dev/null 2>&1 || true
-  [ "$(box_md)" = "$(printf '# RULE-TOP\n'; seed_md; printf '\n## HOW-TO-ASK')" ]
+  [ "$(box_md)" = "$(printf '# RULE-TOP\n\n'; seed_md; printf '\n## HOW-TO-ASK')" ]
 }

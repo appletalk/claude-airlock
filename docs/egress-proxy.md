@@ -151,7 +151,7 @@ secret rm`. A `GH_TOKEN` secret also takes the placeholder's place.
 
 ### The box's CLAUDE.md
 
-The seeded conventions get a closing section listing these hosts: how to reach each
+The box CLAUDE.md ([configuration.md](configuration.md#the-boxs-claudemd)) gets a section listing these hosts: how to reach each
 (`http://`, never `https://`), what its rules allow and refuse, and which client is set up
 for it. So boxed Claude neither tries `https://` nor guesses at the limits. It is written
 each launch from the manifest. With no hosts (or no usable manifest), there is no section.

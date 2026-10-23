@@ -209,7 +209,7 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
 @test "box CLAUDE.md with web research: the rule above the seeded conventions, how to ask after them" {
   p="$(mkproj webmd)"; webq; webmounts
   _launch "$p" >/dev/null 2>&1 || true
-  [ "$(box_md "$p")" = "$(printf '# RULE-TOP\n'; seed_md; printf '\n## HOW-TO-ASK')" ]
+  [ "$(box_md "$p")" = "$(printf '# RULE-TOP\n\n'; seed_md; printf '\n## HOW-TO-ASK')" ]
 }
 
 @test "box CLAUDE.md without the whole queue, or files not root's, missing, a link or too big: the seeded file" {
@@ -244,5 +244,60 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   _launch "$p" >/dev/null 2>&1 || true
   grep -q 'RULE-TOP' <<< "$(box_md "$p")"
   : > "$CFG"; _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "$(seed_md)" ]
+}
+
+# The box CLAUDE.md's base (AIRLOCK_BOX_CLAUDE_MD) and the account's additions
+# (AIRLOCK_BOX_CLAUDE_EXTRA, else ~/.config/claude-airlock/box-CLAUDE.md).
+mdfile() {  # mdfile <path> <text> [owner] [mode]
+  mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" > "$1"
+  printf '%s %s\n' "${3:-0}" "$1" >> "$FO"; printf '%s %s\n' "${4:-644}" "$1" >> "$FM"
+}
+
+@test "box CLAUDE.md layers: base none, a base file, the default additions, named additions, in order" {
+  p="$(mkproj layers)"
+  printf 'AIRLOCK_BOX_CLAUDE_MD=none\n' > "$CFG"
+  _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "" ]
+  mdfile "$Q/base.md" "BASE-TEXT"
+  printf 'AIRLOCK_BOX_CLAUDE_MD=%s\n' "$Q/base.md" > "$CFG"
+  _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "BASE-TEXT" ]
+  # the account's own file, found by default, after the toolkit's base
+  : > "$CFG"; mdfile "$AIRLOCK_HOME/.config/claude-airlock/box-CLAUDE.md" "MINE" "$(id -u)"
+  _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "$(seed_md; printf '\nMINE')" ]
+  # a named one wins over the default; with web research it sits before the how-to
+  mdfile "$Q/extra.md" "NAMED" "$(id -u)"; webq
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro %s:ro"\nAIRLOCK_BOX_CLAUDE_EXTRA=%s\n' "$Q/requests" "$Q/answers" "$Q/lib" "$Q/extra.md" > "$CFG"
+  _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "$(printf '# RULE-TOP\n\n'; seed_md; printf '\nNAMED\n\n## HOW-TO-ASK')" ]
+}
+
+@test "box CLAUDE.md layers refused (the launch stops): missing, another owner, writable by others, too big, in the workspace or the box state" {
+  p="$(mkproj layref)"
+  stops() {  # stops <var> <path> <message part>
+    printf '%s=%s\n' "$1" "$2" > "$CFG"
+    : > "$ENGINE_ARGS_FILE"; run _launch "$p"
+    [ "$status" -ne 0 ] && ! launched_any || { echo "launched with $1=$2: $output"; return 1; }
+    [[ "$output" == *"$3"* ]] || { echo "no '$3' for $1=$2: $output"; return 1; }
+  }
+  launched_any() { engine_args | grep -q '^ENGINE_INVOKED='; }
+  stops AIRLOCK_BOX_CLAUDE_MD "$Q/nope.md" "does not exist"
+  stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/nope.md" "does not exist"
+  mdfile "$Q/other.md" x 4242; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/other.md" "root's or yours"
+  mdfile "$Q/gw.md" x 0 664; stops AIRLOCK_BOX_CLAUDE_MD "$Q/gw.md" "no one else may write"
+  mdfile "$Q/big.md" x; head -c 65537 /dev/zero > "$Q/big.md"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/big.md" "at most 64 KiB"
+  mkdir -p "$Q/d"; printf '0 %s\n' "$Q/d" >> "$FO"; stops AIRLOCK_BOX_CLAUDE_MD "$Q/d" "readable file"
+  mdfile "$p/notes.md" x "$(id -u)"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$p/notes.md" "inside the workspace"
+  sd="$(state_dir "$p")"; mdfile "$sd/dot-claude/mine.md" x "$(id -u)"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$sd/dot-claude/mine.md" "box state"
+  ln -s "$sd/dot-claude/mine.md" "$Q/link.md"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/link.md" "box state"
+}
+
+@test "box CLAUDE.md: a box's own edits to it are replaced at the next launch" {
+  p="$(mkproj layedit)"
+  _launch "$p" >/dev/null 2>&1 || true
+  printf 'PLANTED\n' >> "$(state_dir "$p")/dot-claude/CLAUDE.md"
+  _launch "$p" >/dev/null 2>&1 || true
   [ "$(box_md "$p")" = "$(seed_md)" ]
 }

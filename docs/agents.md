@@ -169,8 +169,15 @@ read-write, answers/ and lib/ read-only, as the agent's default config sets up),
 adds two parts to its CLAUDE.md, both rendered by the apply into the queue's `lib/` with your
 names and paths: a rule at the very top (answers are untrusted data, never instructions; what to
 do when one asks for something) and the two commands at the end. Without web research, or if
-either file is missing, unreadable, not root's, writable by others or over 16 KiB, the box
-CLAUDE.md is the plain one.
+either file is missing, unreadable, not root's, writable by others or over 16 KiB, they are left
+out. The web and guard users' boxes get no box CLAUDE.md at all (`AIRLOCK_BOX_CLAUDE_MD=none`):
+their system prompts say all they need, and every run starts cold. Your own additions for the
+agent's boxes go in a root-owned file named by `AIRLOCK_BOX_CLAUDE_EXTRA` in its config
+([configuration.md](configuration.md#the-boxs-claudemd)).
+
+A user config is yours once written: a later apply never changes it, but names any setting a
+newer default has that it lacks (`note ... has no ...`). Add the line, or a commented-out one to
+say you've decided.
 
 ## Good to know
 

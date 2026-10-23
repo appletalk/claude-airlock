@@ -1027,7 +1027,16 @@ work_conf="$work/conf"
 # Each user's claude-airlock config: the default, if it has none yet (then it is the site's).
 for r in "${ROLES[@]}"; do
     u=${NAME[$r]}
-    if [ -f "$ROOT$ETC/$u.conf" ]; then ok "$ETC/$u.conf"
+    if [ -f "$ROOT$ETC/$u.conf" ]; then
+        ok "$ETC/$u.conf"
+        # The site's file now; settings a newer default has that it lacks (set or commented out)
+        # are named, never added: the operator decides.
+        "$0" --user-conf "$u" "$site" > "$work_conf.$u" || die "could not make $u's default config"
+        while IFS= read -r line; do
+            k=${line%%=*}
+            grep -Eq "^[[:space:]#]*$k=" "$ROOT$ETC/$u.conf" \
+                || echo "note $ETC/$u.conf has no $k, which the current default sets (docs/agents.md): $line"
+        done < <(grep -E '^AIRLOCK_[A-Z_]+=' "$work_conf.$u")
     else
         "$0" --user-conf "$u" "$site" > "$work_conf.$u" || die "could not make $u's default config"
         step "write $ETC/$u.conf (the default; edit it to taste)" install -m 0644 -o root -g root "$work_conf.$u" "$ROOT$ETC/$u.conf"

@@ -40,7 +40,7 @@ need into the new directory, then remove `/tmp/airlock` when no session uses it 
 reboot do it).
 
 **Tell Claude about it.** Claude only follows the convention if told to. The box is
-briefed automatically (`config/box-CLAUDE.md` is copied in on every launch). For **host**
+briefed automatically (`config/box-CLAUDE.md` goes into its CLAUDE.md on every launch). For **host**
 Claude, paste [`config/host-CLAUDE.md`](../config/host-CLAUDE.md) into your global
 `~/.claude/CLAUDE.md`.
 

@@ -2120,7 +2120,8 @@ _seed() {
     return 1
   fi
 }
-_seed "$_repo/config/box-CLAUDE.md" "$STATE_DIR/dot-claude/CLAUDE.md"
+# The box CLAUDE.md is composed further down, once the proxy's hosts and any web research
+# queue are known: see "The box's CLAUDE.md".
 
 # Merge the airlock default settings.json baseline (env, attribution, permissions,
 # ...) into the box's settings each launch, so every session shares the same
@@ -2585,17 +2586,51 @@ if [ -n "$EGRESS_PROXY" ]; then
   # Plain-HTTP hosts behind it: their git remotes and gh are pointed at http:// below.
   _airlock_client_manifest "$_kc" || true
 fi
-# The box's CLAUDE.md, seeded above: with the proxy's hosts (how to reach each and what it
-# allows) and web research (the rule first, how to ask last) when this box has them.
-if { [ -n "$_CLIENT_HOSTS" ] || [ -n "$_web_end" ]; } && [ -f "$_repo/config/box-CLAUDE.md" ]; then
-  _bd="$(_airlock_private_tmp)" || exit 1
-  if ! { { [ -z "$_web_top" ] || cat "$_web_top"; } && cat "$_repo/config/box-CLAUDE.md" \
-         && _airlock_box_directives && { [ -z "$_web_end" ] || cat "$_web_end"; }; } > "$_bd" \
-     || ! chmod --reference="$_repo/config/box-CLAUDE.md" "$_bd"; then
-    rm -f "$_bd"; echo "claude-airlock: could not write the box CLAUDE.md; not launching" >&2; exit 1
+# The box's CLAUDE.md, written each launch (whatever the box left there is replaced), in layers:
+#   the web research rule (only with a queue mounted, above)
+#   the base: the toolkit's config/box-CLAUDE.md, or AIRLOCK_BOX_CLAUDE_MD (a file, or none)
+#   the account's own additions: AIRLOCK_BOX_CLAUDE_EXTRA, else
+#     ~/.config/claude-airlock/box-CLAUDE.md if it exists
+#   the proxy's hosts (from its manifest), then how to ask the web (with the queue)
+# The base and the additions come from the config or the launching process, never from
+# .airlock/config: each must be a regular file of root's or this account's that no one else may
+# write, at most 64 KiB, outside the workspace and the box-writable state. One that fails stops
+# the launch: it is what the operator configured the box with.
+_airlock_box_md_file() {   # $1 = what (for messages), $2 = path: prints its real path
+  local r m
+  r="$(readlink -e -- "$2" 2>/dev/null)" || { echo "claude-airlock: $1 '$2' does not exist; not launching" >&2; return 1; }
+  m="$(stat -c %a "$r" 2>/dev/null)" || m=777
+  if [ ! -f "$r" ] || [ ! -r "$r" ] || { [ "$(stat -c %u "$r")" != 0 ] && [ "$(stat -c %u "$r")" != "$(id -u)" ]; } \
+     || ! [[ "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#022 )) || [ "$(stat -c %s "$r")" -gt 65536 ]; then
+    echo "claude-airlock: $1 '$r' must be a readable file of at most 64 KiB, root's or yours, that no one else may write; not launching" >&2; return 1
   fi
-  _airlock_place "$_bd" "$STATE_DIR/dot-claude/CLAUDE.md"
+  case "$r/" in
+    "$WORKSPACE"/*|"$HOME/.config/claude-airlock/state/"*)
+      echo "claude-airlock: $1 '$r' is inside the workspace or the box state, which the box can write; not launching" >&2; return 1 ;;
+  esac
+  printf '%s' "$r"
+}
+_box_base="$_repo/config/box-CLAUDE.md"
+if [ "${AIRLOCK_BOX_CLAUDE_MD:-}" = none ]; then _box_base=""
+elif [ -n "${AIRLOCK_BOX_CLAUDE_MD:-}" ]; then _box_base="$(_airlock_box_md_file AIRLOCK_BOX_CLAUDE_MD "$AIRLOCK_BOX_CLAUDE_MD")" || exit 1
+elif [ ! -f "$_box_base" ]; then _box_base=""; fi
+_box_extra=""
+if [ -n "${AIRLOCK_BOX_CLAUDE_EXTRA:-}" ]; then
+  _box_extra="$(_airlock_box_md_file AIRLOCK_BOX_CLAUDE_EXTRA "$AIRLOCK_BOX_CLAUDE_EXTRA")" || exit 1
+elif [ -e "$HOME/.config/claude-airlock/box-CLAUDE.md" ]; then
+  _box_extra="$(_airlock_box_md_file "your box CLAUDE.md additions" "$HOME/.config/claude-airlock/box-CLAUDE.md")" || exit 1
 fi
+_bd="$(_airlock_private_tmp)" || exit 1
+_sep() { [ ! -s "$_bd" ] || echo; }   # a blank line between layers, none before the first
+if ! { { [ -z "$_web_top" ] || cat "$_web_top"; } > "$_bd" \
+       && { [ -z "$_box_base" ] || { _sep; cat "$_box_base"; }; } >> "$_bd" \
+       && { [ -z "$_box_extra" ] || { _sep; cat "$_box_extra"; }; } >> "$_bd" \
+       && _airlock_box_directives >> "$_bd" \
+       && { [ -z "$_web_end" ] || cat "$_web_end"; } >> "$_bd"; } \
+   || ! chmod 0644 "$_bd"; then
+  rm -f "$_bd"; echo "claude-airlock: could not write the box CLAUDE.md; not launching" >&2; exit 1
+fi
+_airlock_place "$_bd" "$STATE_DIR/dot-claude/CLAUDE.md"
 
 # Host git must not read instructions a box wrote. In each read-write root (the workspace and
 # every share_rw) that holds a git repo, every config file host git reads for it is bound

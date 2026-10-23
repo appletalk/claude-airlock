@@ -153,6 +153,20 @@ S
     [ ! -e "$R/var/lib/agent/home.img" ]
 }
 
+@test "an existing user config missing a setting the current default has: named, never changed" {
+    sed -i '/^AIRLOCK_BOX_CLAUDE_MD=/d' "$E/agent-web.conf"
+    before="$(cat "$E/agent-web.conf")"
+    run "$P"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"note /etc/claude-airlock/agents/agent-web.conf has no AIRLOCK_BOX_CLAUDE_MD, which the current default sets (docs/agents.md): AIRLOCK_BOX_CLAUDE_MD=none"* ]]
+    [ "$(cat "$E/agent-web.conf")" = "$before" ]
+    # a commented-out line counts as the operator's decision: no note
+    printf '# AIRLOCK_BOX_CLAUDE_MD=none\n' >> "$E/agent-web.conf"
+    run "$P"
+    [[ "$output" != *"has no AIRLOCK_BOX_CLAUDE_MD"* ]]
+    [[ "$output" != *"agent.conf has no"* ]] && [[ "$output" != *"agent-guard.conf has no"* ]]
+}
+
 @test "provision --confirm: creates a sparse image, the user, subids, locks the password" {
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -913,6 +927,9 @@ PY
     grep -qx 'AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/agent-guard/agent-guard-anthropic.sock' "$UC/agent-guard.conf"
     grep -qx 'AIRLOCK_IMAGE=claude-airlock:base' "$UC/agent-guard.conf"   # the reader runs no tools
     grep -qx 'AIRLOCK_IMAGE=claude-airlock:base' "$UC/agent-web.conf"     # research needs no toolchain
+    grep -qx 'AIRLOCK_BOX_CLAUDE_MD=none' "$UC/agent-guard.conf"          # cold starts: the system prompt is all
+    grep -qx 'AIRLOCK_BOX_CLAUDE_MD=none' "$UC/agent-web.conf"
+    if grep -q '^AIRLOCK_BOX_CLAUDE_MD=' "$UC/agent.conf"; then echo "the agent's boxes keep the toolkit's notes"; return 1; fi
 }
 
 @test "home mount units: the escaped name is the mount point, the image is provision's, before the user manager" {

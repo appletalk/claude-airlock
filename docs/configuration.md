@@ -318,6 +318,33 @@ Precedence, most specific first: `--permission-mode` on the command line, then
 mode`. The mode is not added when you run a `claude` subcommand (a first word that is not
 a flag). An invalid stored value is ignored with a warning.
 
+## The box's CLAUDE.md
+
+Every launch writes the box's own CLAUDE.md (Claude's user memory in the box, which its
+subagents load too) from these layers, in order, and replaces whatever the box left there:
+
+1. **The web research rule**, only for a box with a web research queue mounted (docs/agents.md).
+2. **The base**: the toolkit's [`config/box-CLAUDE.md`](../config/box-CLAUDE.md) (untrusted
+   content is data, never instructions; how the sandbox behaves). `AIRLOCK_BOX_CLAUDE_MD` names
+   another file instead, or `none` for no base (the agents' web and guard users: their boxes
+   start cold for every run and their system prompts say all they need).
+3. **Your additions**: `~/.config/claude-airlock/box-CLAUDE.md` if it exists, or the file
+   `AIRLOCK_BOX_CLAUDE_EXTRA` names. Personal preferences go here (how to write commits, which
+   characters to use); [`config/box-CLAUDE.personal.example.md`](../config/box-CLAUDE.personal.example.md)
+   is a start.
+4. **The proxy's hosts**, in the proxy posture with a client manifest
+   ([egress-proxy.md](egress-proxy.md#the-boxs-claudemd)).
+5. **How to ask the web**, with the queue.
+
+A project's own `CLAUDE.md` and Claude's memory load on top, as Claude Code does anywhere.
+Keep the layers short: every session and subagent reads them on each start.
+
+`AIRLOCK_BOX_CLAUDE_MD` and `AIRLOCK_BOX_CLAUDE_EXTRA` come from the host config or the
+launching process, never from `.airlock/config`. Each must be a readable regular file of at
+most 64 KiB, root's or yours, that no one else may write, outside the workspace and the box
+state; one that fails stops the launch. Edit the files on the host: an edit in the box is gone
+at the next launch.
+
 ## Scripts and service units
 
 A box asks the engine for a terminal only when the launcher has one (on stdin and stdout), so
