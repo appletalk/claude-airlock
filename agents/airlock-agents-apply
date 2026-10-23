@@ -275,12 +275,18 @@ InaccessiblePaths=-/dev/dxg -/dev/vsock
 EOF
     if [ "$(systemd_version)" -ge 255 ]; then cat <<EOF
 # Sockets of the families boxes and the manager use, nothing else: no AF_VSOCK to the Windows
-# host (WSL interop rides it), no raw packet sockets, no Bluetooth or the rest.
+# host (WSL interop rides it), no raw packet sockets, no Bluetooth or the rest. Native calls only
+# (the 32-bit ABI's socketcall would get round the filter) and no io_uring (it opens sockets
+# without socket()): nothing here uses either, and the boxes' own seccomp refuses both already.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
 EOF
     else cat <<EOF
-# (No RestrictAddressFamilies: before systemd 255 it implies NoNewPrivileges here, which stops
-# newuidmap, so every rootless box under this manager would fail. Vsock stays open.)
+# (No RestrictAddressFamilies, SystemCallArchitectures or SystemCallFilter: before systemd 255
+# any seccomp setting implies NoNewPrivileges here, which stops newuidmap, so every rootless box
+# under this manager would fail. Vsock stays open to its processes outside the boxes; the
+# boxes' own seccomp refuses it.)
 EOF
     fi
     local ia=""

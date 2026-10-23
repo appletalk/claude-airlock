@@ -172,10 +172,12 @@ Each question goes through three steps:
 - **WSL2** (being tried; report what breaks). Turn on systemd (`systemd=true` under `[boot]` in
   `/etc/wsl.conf`).
   - The agents' sandbox already shuts out what WSL adds: nothing under `/mnt` (the Windows
-    drives, WSLg's audio, microphone and display sockets, the tmpfs every distro shares), no
-    `/dev/dxg` or `/dev/vsock`, and no vsock sockets, which WSL interop rides to Windows (that
-    one needs systemd 255 or later: before it, the restriction would stop rootless podman).
-    `host-test.sh` checks each, as each agent user.
+    drives, WSLg's audio, microphone and display sockets, the tmpfs every distro shares), and
+    `/dev/dxg` and `/dev/vsock` can't be opened. With systemd 255 or later it also refuses vsock
+    sockets, which WSL interop rides to Windows (before 255 that restriction would stop rootless
+    podman, so it is left out; the boxes refuse vsock themselves either way). Interop's own
+    socket, under `/run/WSL`, is hidden with the rest of `/run`. `host-test.sh` checks these, as
+    each agent user.
   - Two WSL defaults still reach past it (a shell opened as an agent user outside its sandbox,
     or anything else running as that user), and apply warns about both:
     - `/mnt/c` is readable by every Linux user: your whole Windows profile, which on a work
@@ -183,9 +185,11 @@ Each question goes through three steps:
       `options = "uid=1000,gid=1000,umask=077"` under `[automount]`.
     - Interop lets any Linux user run Windows programs as you, and Windows can open a root
       shell in the distro without a password. Turn it off with `enabled=false` under
-      `[interop]`, or accept it once `host-test.sh` shows the agents can't reach it.
-  - WSL terminals have no login session, so on WSL the polkit rule lets the operator in without
-    one (still only the operator, and only as the agent users).
+      `[interop]`, or accept it once `host-test.sh` passes (it checks the ways in above, not
+      interop end to end).
+  - WSL terminals may have no login session (`loginctl` shows none for you), so on WSL the
+    polkit rule lets the operator in without one: still only the operator, only as the agent
+    users, but from any of your processes (an ssh session or a timer too), not only a terminal.
   - WSL may stop the distro when no Windows terminal is attached, which ends the agents'
     sessions. Check, and if it does, raise the idle timeout in `.wslconfig`.
 - **Moving a hand-built setup over:** write `agents.conf` with the same names and uids. Unit names

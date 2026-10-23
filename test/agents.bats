@@ -1029,6 +1029,8 @@ InaccessiblePaths=-/var/lib/sss/pipes
 TemporaryFileSystem=/mnt:ro
 InaccessiblePaths=-/dev/dxg -/dev/vsock
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
 InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
@@ -1056,6 +1058,8 @@ InaccessiblePaths=-/var/lib/sss/pipes
 TemporaryFileSystem=/mnt:ro
 InaccessiblePaths=-/dev/dxg -/dev/vsock
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register
 InaccessiblePaths=$cg
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
         f="$d/user@$n.service.d/10-airlock-agents.conf"
@@ -2448,15 +2452,28 @@ P
     grep -qF 'subject.user == "alice" &&' "$w"
     run grep -c 'subject.local\|subject.active' "$w"; [ "$output" = 1 ]      # (the comment only)
     grep -qF '["agent", "agent-web", "agent-guard"].indexOf(action.lookup("user")) >= 0' "$w"
+    # /run/WSL alone also says WSL (a custom kernel's release string may not)
+    rm "$R/proc/sys/kernel/osrelease"; mkdir -p "$R/run/WSL"
+    "$P" --render "$T/rw2" >/dev/null
+    run grep -cF 'subject.local && subject.active &&' "$T/rw2/etc/polkit-1/rules.d/50-airlock-agents.rules"; [ "$output" = 0 ]
     run grep -c ' $' "$f" "$w"; [[ "$output" != *:[1-9]* ]]                 # no trailing spaces
 }
 
 
 @test "before systemd 255 the managers get no RestrictAddressFamilies (it would imply NoNewPrivileges and stop newuidmap)" {
-    AIRLOCK_AGENTS_SYSTEMD_VERSION=252 "$P" --render "$T/r252" >/dev/null
+    for v in 254 252; do
+        AIRLOCK_AGENTS_SYSTEMD_VERSION=$v "$P" --render "$T/r$v" >/dev/null
+        run grep -cE '^(RestrictAddressFamilies|SystemCallArchitectures|SystemCallFilter)=' "$T/r$v/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+        [ "$output" = 0 ] || { echo "$v: $output"; return 1; }
+    done
+    AIRLOCK_AGENTS_SYSTEMD_VERSION=255 "$P" --render "$T/r255" >/dev/null
+    grep -qx 'SystemCallArchitectures=native' "$T/r255/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+    # the version hook is a test root's only: a real run asks systemctl (here a stub saying 252)
+    printf '#!/bin/sh\necho "systemd 252 (252.1)"\n' > "$T/bin/systemctl"; chmod +x "$T/bin/systemctl"
+    env -u AIRLOCK_AGENTS_ROOT AIRLOCK_AGENTS_SYSTEMD_VERSION=999 "$P" --render "$T/rreal" "$E/agents.conf" >/dev/null
+    run grep -c '^RestrictAddressFamilies=' "$T/rreal/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"; [ "$output" = 0 ]
     f="$T/r252/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
-    run grep -c '^RestrictAddressFamilies=' "$f"; [ "$output" = 0 ]
-    grep -q 'No RestrictAddressFamilies: before systemd 255' "$f"
+    grep -q 'No RestrictAddressFamilies, SystemCallArchitectures or SystemCallFilter: before systemd 255' "$f"
     grep -qx 'TemporaryFileSystem=/mnt:ro' "$f"
     grep -qx 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "$RENDER/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
 }

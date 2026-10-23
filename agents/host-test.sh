@@ -272,9 +272,14 @@ for spec in $users; do
     done
     mcheck missing denied "user@$n: no $OP's home" "$u" list "$OP_HOME"
     # Nothing of /mnt (WSL: the Windows drives, WSLg's sockets), no hypervisor devices, no vsock
-    [ -d /mnt ] && mcheck ok "user@$n: /mnt is empty here (on WSL: no drives, no WSLg sockets)" "$u" empty /mnt
+    if [ -d /mnt ]; then
+        mcheck ok "user@$n: /mnt is empty here (on WSL: no drives, no WSLg sockets)" "$u" empty /mnt
+        # ...because it is the sandbox's read-only tmpfs, not merely empty on this host
+        mcheck rofs "user@$n: /mnt is the sandbox's read-only tmpfs" "$u" create "/mnt/$TAG-$u"
+    fi
+    # (hidden by a mode-0000 node mounted over each: the path stays, opening it is refused)
     for dv in /dev/dxg /dev/vsock; do
-        [ -e "$dv" ] && mcheck missing denied "user@$n: no $dv" "$u" stat "$dv"
+        [ -e "$dv" ] && mcheck missing denied "user@$n: $dv can't be opened" "$u" read "$dv"
     done
     if ! grep -q '^RestrictAddressFamilies=' "/etc/systemd/system/user@$n.service.d/10-airlock-agents.conf" 2>/dev/null; then
         echo "     (no RestrictAddressFamilies for $u: systemd before 255, see its drop-in; vsock is open to it)"
