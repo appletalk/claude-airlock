@@ -214,7 +214,11 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
 
 @test "box CLAUDE.md without the whole queue, or files not root's, missing, a link or too big: the seeded file" {
   p="$(mkproj webno)"; webq
-  plain() { _launch "$p" >/dev/null 2>&1 || true; [ "$(box_md "$p")" = "$(seed_md)" ] || { echo "not plain: $1"; return 1; }; }
+  plain() {
+    : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
+    engine_args | grep -q '^ENGINE_INVOKED=' || { echo "no launch: $1"; return 1; }
+    [ "$(box_md "$p")" = "$(seed_md)" ] || { echo "not plain: $1"; return 1; }
+  }
   : > "$CFG"; plain "no mounts"
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro %s:ro"\n' "$Q/answers" "$Q/lib" > "$CFG"; plain "no requests"
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro"\n' "$Q/requests" "$Q/lib" > "$CFG"; plain "no answers"
@@ -263,35 +267,80 @@ mdfile() {  # mdfile <path> <text> [owner] [mode]
   printf 'AIRLOCK_BOX_CLAUDE_MD=%s\n' "$Q/base.md" > "$CFG"
   _launch "$p" >/dev/null 2>&1 || true
   [ "$(box_md "$p")" = "BASE-TEXT" ]
+  [ "$(stat -c %a "$(state_dir "$p")/dot-claude/CLAUDE.md")" = 644 ]
   # the account's own file, found by default, after the toolkit's base
-  : > "$CFG"; mdfile "$AIRLOCK_HOME/.config/claude-airlock/box-CLAUDE.md" "MINE" "$(id -u)"
+  : > "$CFG"; mdfile "$AIRLOCK_HOME/.config/claude-airlock/box-CLAUDE.md" "MINE" "$(id -u)" 600
   _launch "$p" >/dev/null 2>&1 || true
   [ "$(box_md "$p")" = "$(seed_md; printf '\nMINE')" ]
-  # a named one wins over the default; with web research it sits before the how-to
-  mdfile "$Q/extra.md" "NAMED" "$(id -u)"; webq
+  # a named one (root's) wins over the default; with web research it sits before the how-to
+  mdfile "$Q/extra.md" "NAMED"; webq
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro %s:ro"\nAIRLOCK_BOX_CLAUDE_EXTRA=%s\n' "$Q/requests" "$Q/answers" "$Q/lib" "$Q/extra.md" > "$CFG"
   _launch "$p" >/dev/null 2>&1 || true
   [ "$(box_md "$p")" = "$(printf '# RULE-TOP\n\n'; seed_md; printf '\nNAMED\n\n## HOW-TO-ASK')" ]
+  # another file of the account's own in its config dir, named
+  mdfile "$AIRLOCK_HOME/.config/claude-airlock/work.md" "WORK" "$(id -u)" 600
+  printf 'AIRLOCK_BOX_CLAUDE_EXTRA=%s\n' "$AIRLOCK_HOME/.config/claude-airlock/work.md" > "$CFG"
+  _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "$(seed_md; printf '\nWORK')" ]
 }
 
-@test "box CLAUDE.md layers refused (the launch stops): missing, another owner, writable by others, too big, in the workspace or the box state" {
+@test "box CLAUDE.md layers refused (the launch stops): missing, unsafe file, outside the two trusted places, through a link" {
   p="$(mkproj layref)"
+  launched_any() { engine_args | grep -q '^ENGINE_INVOKED='; }
   stops() {  # stops <var> <path> <message part>
     printf '%s=%s\n' "$1" "$2" > "$CFG"
     : > "$ENGINE_ARGS_FILE"; run _launch "$p"
     [ "$status" -ne 0 ] && ! launched_any || { echo "launched with $1=$2: $output"; return 1; }
     [[ "$output" == *"$3"* ]] || { echo "no '$3' for $1=$2: $output"; return 1; }
+    if grep -q SECRET "$(state_dir "$p")/dot-claude/CLAUDE.md" 2>/dev/null; then echo "secret copied: $1=$2"; return 1; fi
   }
-  launched_any() { engine_args | grep -q '^ENGINE_INVOKED='; }
+  where="root's in a tree only root may write"
   stops AIRLOCK_BOX_CLAUDE_MD "$Q/nope.md" "does not exist"
   stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/nope.md" "does not exist"
-  mdfile "$Q/other.md" x 4242; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/other.md" "root's or yours"
+  mdfile "$Q/other.md" x 4242; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/other.md" "$where"
   mdfile "$Q/gw.md" x 0 664; stops AIRLOCK_BOX_CLAUDE_MD "$Q/gw.md" "no one else may write"
   mdfile "$Q/big.md" x; head -c 65537 /dev/zero > "$Q/big.md"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/big.md" "at most 64 KiB"
-  mkdir -p "$Q/d"; printf '0 %s\n' "$Q/d" >> "$FO"; stops AIRLOCK_BOX_CLAUDE_MD "$Q/d" "readable file"
-  mdfile "$p/notes.md" x "$(id -u)"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$p/notes.md" "inside the workspace"
-  sd="$(state_dir "$p")"; mdfile "$sd/dot-claude/mine.md" x "$(id -u)"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$sd/dot-claude/mine.md" "box state"
-  ln -s "$sd/dot-claude/mine.md" "$Q/link.md"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/link.md" "box state"
+  mkdir -p "$Q/d"; printf '0 %s\n' "$Q/d" >> "$FO"; stops AIRLOCK_BOX_CLAUDE_MD "$Q/d" "readable regular file"
+  # root's file under a directory someone else may write
+  mkdir -p "$T/open"; printf '0 %s\n' "$T/open" >> "$FO"; printf '775 %s\n' "$T/open" >> "$FM"
+  mdfile "$T/open/f.md" x; stops AIRLOCK_BOX_CLAUDE_MD "$T/open/f.md" "$where"
+  # root's file under a directory of another account's (not writable by others)
+  mkdir -p "$T/theirs"; printf '4242 %s\n' "$T/theirs" >> "$FO"; printf '755 %s\n' "$T/theirs" >> "$FM"
+  mdfile "$T/theirs/f.md" x; stops AIRLOCK_BOX_CLAUDE_MD "$T/theirs/f.md" "$where"
+  # root's file this account can't read
+  mdfile "$Q/closed.md" x; chmod 000 "$Q/closed.md"; stops AIRLOCK_BOX_CLAUDE_EXTRA "$Q/closed.md" "readable regular file"
+  # the account's files anywhere but its config dir: the workspace, the box state, $AIRLOCK_TMP
+  mdfile "$p/notes.md" x "$(id -u)" 600; stops AIRLOCK_BOX_CLAUDE_EXTRA "$p/notes.md" "$where"
+  sd="$(state_dir "$p")"; mdfile "$sd/dot-claude/mine.md" x "$(id -u)" 600; stops AIRLOCK_BOX_CLAUDE_EXTRA "$sd/dot-claude/mine.md" "$where"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock/sub"; mdfile "$AIRLOCK_HOME/.config/claude-airlock/sub/x.md" x "$(id -u)" 600
+  stops AIRLOCK_BOX_CLAUDE_EXTRA "$AIRLOCK_HOME/.config/claude-airlock/sub/x.md" "$where"
+  # a box-writable name turned into a link to a secret of the account's: never copied in
+  mkdir -p "$AIRLOCK_HOME/.ssh"; printf 'SECRET-KEY\n' > "$AIRLOCK_HOME/.ssh/id_test"; chmod 600 "$AIRLOCK_HOME/.ssh/id_test"
+  printf '%s %s\n' "$(id -u)" "$AIRLOCK_HOME/.ssh/id_test" >> "$FO"
+  rm -f "$p/notes.md"; ln -s "$AIRLOCK_HOME/.ssh/id_test" "$p/notes.md"
+  stops AIRLOCK_BOX_CLAUDE_EXTRA "$p/notes.md" "$where"
+  # ...even to a root's file, and a link into the config dir from outside it
+  ln -sf "$Q/base.md" "$p/notes.md" 2>/dev/null; mdfile "$Q/base.md" "BASE"; stops AIRLOCK_BOX_CLAUDE_MD "$p/notes.md" "$where"
+  ln -s "$AIRLOCK_HOME/.config/claude-airlock/work.md" "$p/w.md"; mdfile "$AIRLOCK_HOME/.config/claude-airlock/work.md" x "$(id -u)" 600
+  ln -s "$AIRLOCK_HOME/.config/claude-airlock/work.md" "$AIRLOCK_HOME/.config/claude-airlock/link.md"
+  stops AIRLOCK_BOX_CLAUDE_EXTRA "$AIRLOCK_HOME/.config/claude-airlock/link.md" "$where"
+  # a bad default file stops the launch too (a directory there, or another owner's file)
+  : > "$CFG"; mkdir -p "$AIRLOCK_HOME/.config/claude-airlock/box-CLAUDE.md"
+  : > "$ENGINE_ARGS_FILE"; run _launch "$p"; [ "$status" -ne 0 ] && ! launched_any
+  [[ "$output" == *"readable regular file"* ]]
+  rmdir "$AIRLOCK_HOME/.config/claude-airlock/box-CLAUDE.md"; mdfile "$AIRLOCK_HOME/.config/claude-airlock/box-CLAUDE.md" x 4242
+  : > "$ENGINE_ARGS_FILE"; run _launch "$p"; [ "$status" -ne 0 ] && ! launched_any
+  [[ "$output" == *"$where"* ]]
+}
+
+@test "box CLAUDE.md: the default additions are found through a symlinked HOME" {
+  p="$(mkproj layhome)"
+  mdfile "$AIRLOCK_HOME/.config/claude-airlock/box-CLAUDE.md" "MINE" "$(id -u)" 600
+  ln -s "$AIRLOCK_HOME" "$T/homelink"
+  real="$AIRLOCK_HOME"; export AIRLOCK_HOME="$T/homelink"
+  : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -q '^ENGINE_INVOKED='
+  grep -qx MINE "$real/.config/claude-airlock/state/$(_slug "$p")/dot-claude/CLAUDE.md"
 }
 
 @test "box CLAUDE.md: a box's own edits to it are replaced at the next launch" {

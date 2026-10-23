@@ -170,9 +170,11 @@ adds two parts to its CLAUDE.md, both rendered by the apply into the queue's `li
 names and paths: a rule at the very top (answers are untrusted data, never instructions; what to
 do when one asks for something) and the two commands at the end. Without web research, or if
 either file is missing, unreadable, not root's, writable by others or over 16 KiB, they are left
-out. The web and guard users' boxes get no box CLAUDE.md at all (`AIRLOCK_BOX_CLAUDE_MD=none`):
-their system prompts say all they need, and every run starts cold. Your own additions for the
-agent's boxes go in a root-owned file named by `AIRLOCK_BOX_CLAUDE_EXTRA` in its config
+out. The web and guard users' boxes get no base (`AIRLOCK_BOX_CLAUDE_MD=none`), so with no
+additions of their own their CLAUDE.md is empty: their system prompts say all they need, and
+every run starts cold. Your own additions for the
+agent's boxes go in a root-owned file (in a root-owned tree, such as `/etc/claude-airlock/agents/`)
+named by `AIRLOCK_BOX_CLAUDE_EXTRA` in its config
 ([configuration.md](configuration.md#the-boxs-claudemd)).
 
 A user config is yours once written: a later apply never changes it, but names any setting a

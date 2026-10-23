@@ -2593,22 +2593,33 @@ fi
 #     ~/.config/claude-airlock/box-CLAUDE.md if it exists
 #   the proxy's hosts (from its manifest), then how to ask the web (with the queue)
 # The base and the additions come from the config or the launching process, never from
-# .airlock/config: each must be a regular file of root's or this account's that no one else may
-# write, at most 64 KiB, outside the workspace and the box-writable state. One that fails stops
-# the launch: it is what the operator configured the box with.
+# .airlock/config, and are text the box will trust, so each must be a readable regular file of at
+# most 64 KiB that no one else may write, in one of two places no box can write: a root-owned
+# tree (the file and every directory above it root's, no symlink on the way), or directly in
+# this account's ~/.config/claude-airlock/ (only its state/ is ever mounted). One that fails
+# stops the launch: it is what the operator configured the box with.
 _airlock_box_md_file() {   # $1 = what (for messages), $2 = path: prints its real path
-  local r m
+  local r m d own="$_home_real/.config/claude-airlock"
   r="$(readlink -e -- "$2" 2>/dev/null)" || { echo "claude-airlock: $1 '$2' does not exist; not launching" >&2; return 1; }
   m="$(stat -c %a "$r" 2>/dev/null)" || m=777
-  if [ ! -f "$r" ] || [ ! -r "$r" ] || { [ "$(stat -c %u "$r")" != 0 ] && [ "$(stat -c %u "$r")" != "$(id -u)" ]; } \
-     || ! [[ "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#022 )) || [ "$(stat -c %s "$r")" -gt 65536 ]; then
-    echo "claude-airlock: $1 '$r' must be a readable file of at most 64 KiB, root's or yours, that no one else may write; not launching" >&2; return 1
+  if [ ! -f "$r" ] || [ ! -r "$r" ] || ! [[ "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#022 )) \
+     || [ "$(stat -c %s "$r")" -gt 65536 ]; then
+    echo "claude-airlock: $1 '$r' must be a readable regular file of at most 64 KiB that no one else may write; not launching" >&2; return 1
   fi
-  case "$r/" in
-    "$WORKSPACE"/*|"$HOME/.config/claude-airlock/state/"*)
-      echo "claude-airlock: $1 '$r' is inside the workspace or the box state, which the box can write; not launching" >&2; return 1 ;;
-  esac
-  printf '%s' "$r"
+  if [ "${r%/*}" = "$own" ] && [ ! -L "$2" ] && [ "$(stat -c %u "$r")" = "$(id -u)" ]; then
+    printf '%s' "$r"; return 0
+  fi
+  if [ "$r" = "$(realpath -s -- "$2" 2>/dev/null)" ] && [ "$(stat -c %u "$r")" = 0 ]; then
+    d="${r%/*}"
+    while :; do
+      m="$(stat -c %a "${d:-/}" 2>/dev/null)" || m=777
+      if [ "$(stat -c %u "${d:-/}" 2>/dev/null)" != 0 ] || ! [[ "$m" =~ ^[0-7]{3,4}$ ]] || (( 8#$m & 8#022 )); then break; fi
+      if [ -z "$d" ]; then printf '%s' "$r"; return 0; fi
+      d="${d%/*}"
+    done
+  fi
+  echo "claude-airlock: $1 '$2' must be root's in a tree only root may write (no symlinks), or a file of yours directly in $own; not launching" >&2
+  return 1
 }
 _box_base="$_repo/config/box-CLAUDE.md"
 if [ "${AIRLOCK_BOX_CLAUDE_MD:-}" = none ]; then _box_base=""

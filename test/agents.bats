@@ -160,11 +160,18 @@ S
     [ "$status" -eq 0 ]
     [[ "$output" == *"note /etc/claude-airlock/agents/agent-web.conf has no AIRLOCK_BOX_CLAUDE_MD, which the current default sets (docs/agents.md): AIRLOCK_BOX_CLAUDE_MD=none"* ]]
     [ "$(cat "$E/agent-web.conf")" = "$before" ]
-    # a commented-out line counts as the operator's decision: no note
+    # a mention mid-line is not a setting; every missing key is named, in each file
+    printf '# see AIRLOCK_BOX_CLAUDE_MD=none in the docs\n' >> "$E/agent-web.conf"
+    sed -i '/^AIRLOCK_EGRESS_PROXY=/d' "$E/agent.conf"
+    run "$P"
+    [[ "$output" == *"agent-web.conf has no AIRLOCK_BOX_CLAUDE_MD"* ]]
+    [[ "$output" == *"/etc/claude-airlock/agents/agent.conf has no AIRLOCK_EGRESS_PROXY, which the current default sets (docs/agents.md): AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/agent/agent-anthropic.sock"* ]]
+    # a commented-out line or an export counts as the operator's decision: no note
     printf '# AIRLOCK_BOX_CLAUDE_MD=none\n' >> "$E/agent-web.conf"
+    printf 'export AIRLOCK_EGRESS_PROXY=/x.sock\n' >> "$E/agent.conf"
     run "$P"
     [[ "$output" != *"has no AIRLOCK_BOX_CLAUDE_MD"* ]]
-    [[ "$output" != *"agent.conf has no"* ]] && [[ "$output" != *"agent-guard.conf has no"* ]]
+    [[ "$output" != *"has no"* ]]
 }
 
 @test "provision --confirm: creates a sparse image, the user, subids, locks the password" {

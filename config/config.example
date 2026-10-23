@@ -80,10 +80,10 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 
 # The box's CLAUDE.md (docs/configuration.md): the base instead of the toolkit's notes (a file,
 # or none), and your own additions after it (default: ~/.config/claude-airlock/box-CLAUDE.md if
-# it exists). Root's or yours, no one else may write, at most 64 KiB; a failing one stops the
-# launch.
+# it exists). Each in a root-owned tree or directly in ~/.config/claude-airlock/, no one else
+# may write it, at most 64 KiB; a failing one stops the launch.
 # AIRLOCK_BOX_CLAUDE_MD="/etc/agent/box-CLAUDE.md"
-# AIRLOCK_BOX_CLAUDE_EXTRA="$HOME/notes/box-CLAUDE.md"
+# AIRLOCK_BOX_CLAUDE_EXTRA="$HOME/.config/claude-airlock/box-CLAUDE-work.md"
 
 # CA certificates every image trusts (docs/images.md): /etc/claude-airlock/ca/ by default, root's
 # all the way up; make install-airlock refuses one anyone else can write. "clone" takes the
