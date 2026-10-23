@@ -194,3 +194,44 @@ STUB
   run _launch "$p"
   [ "$status" -ne 0 ]; [[ "$output" == *"extra mount $Q/answers changed after it was checked"* ]] || { echo "$output"; return 1; }
 }
+
+# Web research in the box CLAUDE.md: the queue's rule first, how to ask last, only with the queue
+# mounted as the agents apply sets it up and both files root's.
+webq() {  # a queue lib/ holding both rendered files, root's
+  mkdir -p "$Q/lib"; printf '0 %s\n' "$Q/lib" >> "$FO"; printf '755 %s\n' "$Q/lib" >> "$FM"
+  printf '# RULE-TOP\n' > "$Q/lib/web-research-rule.md"; printf '\n## HOW-TO-ASK\n' > "$Q/lib/web-research.md"
+  printf '0 %s\n' "$Q/lib/web-research-rule.md" "$Q/lib/web-research.md" >> "$FO"
+}
+webmounts() { printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro %s:ro"\n' "$Q/requests" "$Q/answers" "$Q/lib" > "$CFG"; }
+box_md() { cat "$(state_dir "$1")/dot-claude/CLAUDE.md"; }
+seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
+
+@test "box CLAUDE.md with web research: the rule above the seeded conventions, how to ask after them" {
+  p="$(mkproj webmd)"; webq; webmounts
+  _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "$(printf '# RULE-TOP\n'; seed_md; printf '\n## HOW-TO-ASK')" ]
+}
+
+@test "box CLAUDE.md without the whole queue, or files not root's, missing, a link or too big: the seeded file" {
+  p="$(mkproj webno)"; webq
+  plain() { _launch "$p" >/dev/null 2>&1 || true; [ "$(box_md "$p")" = "$(seed_md)" ] || { echo "not plain: $1"; return 1; }; }
+  : > "$CFG"; plain "no mounts"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro %s:ro"\n' "$Q/answers" "$Q/lib" > "$CFG"; plain "no requests"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro"\n' "$Q/requests" "$Q/lib" > "$CFG"; plain "no answers"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro"\n' "$Q/requests" "$Q/answers" > "$CFG"; plain "no lib"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro %s:rw"\n' "$Q/requests" "$Q/answers" "$Q/lib" > "$CFG"; plain "lib rw"
+  webmounts
+  printf '%s %s\n' "$(id -u)" "$Q/lib/web-research.md" >> "$FO"; plain "how-to not root's"; sed -i '$d' "$FO"
+  printf '%s %s\n' "$(id -u)" "$Q/lib/web-research-rule.md" >> "$FO"; plain "rule not root's"; sed -i '$d' "$FO"
+  mv "$Q/lib/web-research.md" "$Q/lib/w.away"; plain "how-to missing"
+  ln -s w.away "$Q/lib/web-research.md"; plain "how-to a link"; rm "$Q/lib/web-research.md"; mv "$Q/lib/w.away" "$Q/lib/web-research.md"
+  head -c 16385 /dev/zero > "$Q/lib/web-research-rule.md"; plain "rule too big"
+}
+
+@test "box CLAUDE.md: web research one launch, not the next: the parts do not linger" {
+  p="$(mkproj weblinger)"; webq; webmounts
+  _launch "$p" >/dev/null 2>&1 || true
+  grep -q 'RULE-TOP' <<< "$(box_md "$p")"
+  : > "$CFG"; _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "$(seed_md)" ]
+}

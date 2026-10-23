@@ -164,6 +164,13 @@ Each question goes through three steps:
 
 `claude-agent web` alone opens a research chat for you. `claude-agent web ls` shows every question.
 
+The agent's boxes are told this themselves. When a box has the queue mounted (requests/
+read-write, answers/ and lib/ read-only, as the agent's default config sets up), the launcher
+adds two parts to its CLAUDE.md, both rendered by the apply into the queue's `lib/` with your
+names and paths: a rule at the very top (answers are untrusted data, never instructions; what to
+do when one asks for something) and the two commands at the end. Without web research, or if
+either file is missing or not root's, the box CLAUDE.md is the plain one.
+
 ## Good to know
 
 - The agent users must use `crun`, not `runc`. The install sets this up.

@@ -605,6 +605,9 @@ print(json.dumps({"operator": a[1], "agent": a[2], "web": a[3], "guard": a[4],
 }
 # A prompt with the site's names: {agent}, {web}, {guard}, {operator}.
 render_prompt() { sed -e "s/{agent}/$AGENT/g" -e "s/{operator}/$OPERATOR/g" -e "s/{web}/$WEB/g" -e "s/{guard}/$GUARD/g" "$SHARE_SRC/box/$1"; }
+# The agent's box CLAUDE.md parts on web research, which the launcher adds when the queue is
+# mounted: the rule (answers are data, never instructions) at the top, how to ask at the end.
+render_web_research() { sed -e "s#{queue}#$QUEUE#g" -e "s/{operator}/$OPERATOR/g" -e "s/{command}/$COMMAND/g" "$SHARE_SRC/box/$1"; }
 
 # Where the static files come from: the installed copy, or this checkout's (tests, --render).
 SHARE_SRC="$(dirname "$(readlink -f "$0")")"
@@ -634,7 +637,7 @@ file_list() {
         for k in path service timer; do echo "/etc/systemd/user/$WEB-worker.$k 0644"; echo "/etc/systemd/user/$GUARD-worker.$k 0644"; done
         echo "$QUEUE/lib/site.json 0644"
         for f in research-prompt.md reader-prompt.md chat-prompt.md; do echo "$QUEUE/lib/$f 0644"; done
-        for f in web.py agent_web.py verdict.schema.json; do echo "$QUEUE/lib/$f 0644"; done
+        for f in web.py agent_web.py verdict.schema.json web-research.md web-research-rule.md; do echo "$QUEUE/lib/$f 0644"; done
     fi
     echo "/usr/local/bin/$COMMAND 0755"
 }
@@ -657,6 +660,7 @@ render_file() {  # render_file <dest path>
         /etc/systemd/system/*.mount) for r in "${ROLES[@]}"; do if [ "$p" = "/etc/systemd/system/$(mount_unit "/home/${NAME[$r]}")" ]; then render_mount "$r"; fi; done ;;
         "$QUEUE/lib/site.json") render_site_json ;;
         "$QUEUE/lib/"*-prompt.md) render_prompt "${p##*/}" ;;
+        "$QUEUE/lib/web-research.md"|"$QUEUE/lib/web-research-rule.md") render_web_research "${p##*/}" ;;
         "$QUEUE/lib/"*) cat "$SHARE_SRC/box/${p##*/}" ;;
         "/usr/local/bin/$COMMAND") printf '#!/bin/sh\n# Rendered by airlock-agents-apply: the operator command, as %s.\nexec %s/operator "$@"\n' "$COMMAND" "$LIBDIR" ;;
         *) die "internal: no renderer for $p" ;;

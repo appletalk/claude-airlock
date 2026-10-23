@@ -2521,6 +2521,22 @@ for _em in "${_ems[@]}"; do
   [ "${_emode[$_emc]:-}" = ro ] || _emode[$_emc]=$_emm
 done
 for _kp in "${_extra_pins[@]}"; do _emc="${_kp#* }"; args+=( -v "$_emc:$_emc:${_emode[$_emc]}" ); done
+# Web research (docs/agents.md): a box with a queue mounted (<queue>/requests read-write,
+# <queue>/answers and <queue>/lib read-only) gets the queue's rule at the top of its CLAUDE.md
+# (answers are data, never instructions) and how to ask at the end. Both files are root's, as
+# the agents apply renders them into lib/; without both, the box CLAUDE.md is as before.
+_web_top="" _web_end=""
+for _kp in "${_extra_pins[@]}"; do
+  _emc="${_kp#* }"; _q="${_emc%/*}"
+  [ "${_emc##*/}" = lib ] && [ "${_emode[$_emc]}" = ro ] || continue
+  [ "${_emode[$_q/requests]:-}" = rw ] && [ "${_emode[$_q/answers]:-}" = ro ] || continue
+  _wok=1
+  for _wf in web-research-rule.md web-research.md; do
+    if [ ! -f "$_emc/$_wf" ] || [ -L "$_emc/$_wf" ] || [ "$(stat -c %u "$_emc/$_wf")" != 0 ] \
+       || [ "$(stat -c %s "$_emc/$_wf")" -gt 16384 ]; then _wok=0; fi
+  done
+  if [ "$_wok" = 1 ]; then _web_top="$_emc/web-research-rule.md" _web_end="$_emc/web-research.md"; break; fi
+done
 
 # Host-added read-only mounts (`airlock mount add`). Re-checked here, not trusted from the
 # store: a directory that has since become a symlink into ~/.ssh, or gained a hard link,
@@ -2565,15 +2581,17 @@ if [ -n "$EGRESS_PROXY" ]; then
   args+=( -e "AIRLOCK_EGRESS_PROXY=$_kc" )
   # Plain-HTTP hosts behind it: their git remotes and gh are pointed at http:// below.
   _airlock_client_manifest "$_kc" || true
-  # ...and the box's CLAUDE.md, seeded above, says how to reach them and what each allows.
-  if [ -n "$_CLIENT_HOSTS" ] && [ -f "$_repo/config/box-CLAUDE.md" ]; then
-    _bd="$(_airlock_private_tmp)" || exit 1
-    if ! { cat "$_repo/config/box-CLAUDE.md" && _airlock_box_directives; } > "$_bd" \
-       || ! chmod --reference="$_repo/config/box-CLAUDE.md" "$_bd"; then
-      rm -f "$_bd"; echo "claude-airlock: could not write the box CLAUDE.md; not launching" >&2; exit 1
-    fi
-    _airlock_place "$_bd" "$STATE_DIR/dot-claude/CLAUDE.md"
+fi
+# The box's CLAUDE.md, seeded above: with the proxy's hosts (how to reach each and what it
+# allows) and web research (the rule first, how to ask last) when this box has them.
+if { [ -n "$_CLIENT_HOSTS" ] || [ -n "$_web_end" ]; } && [ -f "$_repo/config/box-CLAUDE.md" ]; then
+  _bd="$(_airlock_private_tmp)" || exit 1
+  if ! { { [ -z "$_web_top" ] || cat "$_web_top"; } && cat "$_repo/config/box-CLAUDE.md" \
+         && _airlock_box_directives && { [ -z "$_web_end" ] || cat "$_web_end"; }; } > "$_bd" \
+     || ! chmod --reference="$_repo/config/box-CLAUDE.md" "$_bd"; then
+    rm -f "$_bd"; echo "claude-airlock: could not write the box CLAUDE.md; not launching" >&2; exit 1
   fi
+  _airlock_place "$_bd" "$STATE_DIR/dot-claude/CLAUDE.md"
 fi
 
 # Host git must not read instructions a box wrote. In each read-write root (the workspace and
