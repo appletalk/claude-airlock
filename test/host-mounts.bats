@@ -220,9 +220,20 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro"\n' "$Q/requests" "$Q/lib" > "$CFG"; plain "no answers"
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro"\n' "$Q/requests" "$Q/answers" > "$CFG"; plain "no lib"
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro %s:rw"\n' "$Q/requests" "$Q/answers" "$Q/lib" > "$CFG"; plain "lib rw"
+  # the worker steps' shapes: requests read-only, answers read-write
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro %s:ro %s:ro"\n' "$Q/requests" "$Q/answers" "$Q/lib" > "$CFG"; plain "requests ro"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:rw %s:ro"\n' "$Q/requests" "$Q/answers" "$Q/lib" > "$CFG"; plain "answers rw"
+  # ro wins: the config's rw requests, read-only from the launching process
+  webmounts; AIRLOCK_EXTRA_MOUNTS="$Q/requests:ro" _launch "$p" >/dev/null 2>&1 || true
+  [ "$(box_md "$p")" = "$(seed_md)" ] || { echo "not plain: requests ro from the environment"; return 1; }
   webmounts
   printf '%s %s\n' "$(id -u)" "$Q/lib/web-research.md" >> "$FO"; plain "how-to not root's"; sed -i '$d' "$FO"
   printf '%s %s\n' "$(id -u)" "$Q/lib/web-research-rule.md" >> "$FO"; plain "rule not root's"; sed -i '$d' "$FO"
+  printf '664 %s\n' "$Q/lib/web-research-rule.md" >> "$FM"; plain "rule group-writable"; sed -i '$d' "$FM"
+  printf '646 %s\n' "$Q/lib/web-research.md" >> "$FM"; plain "how-to world-writable"; sed -i '$d' "$FM"
+  chmod 000 "$Q/lib/web-research.md"; plain "how-to unreadable"; chmod 644 "$Q/lib/web-research.md"
+  mv "$Q/lib/web-research.md" "$Q/lib/w.away"; mkdir "$Q/lib/web-research.md"; printf '0 %s\n' "$Q/lib/web-research.md" >> "$FO"
+  plain "how-to a directory"; rmdir "$Q/lib/web-research.md"; sed -i '$d' "$FO"; mv "$Q/lib/w.away" "$Q/lib/web-research.md"
   mv "$Q/lib/web-research.md" "$Q/lib/w.away"; plain "how-to missing"
   ln -s w.away "$Q/lib/web-research.md"; plain "how-to a link"; rm "$Q/lib/web-research.md"; mv "$Q/lib/w.away" "$Q/lib/web-research.md"
   head -c 16385 /dev/zero > "$Q/lib/web-research-rule.md"; plain "rule too big"

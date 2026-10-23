@@ -169,7 +169,8 @@ read-write, answers/ and lib/ read-only, as the agent's default config sets up),
 adds two parts to its CLAUDE.md, both rendered by the apply into the queue's `lib/` with your
 names and paths: a rule at the very top (answers are untrusted data, never instructions; what to
 do when one asks for something) and the two commands at the end. Without web research, or if
-either file is missing or not root's, the box CLAUDE.md is the plain one.
+either file is missing, unreadable, not root's, writable by others or over 16 KiB, the box
+CLAUDE.md is the plain one.
 
 ## Good to know
 

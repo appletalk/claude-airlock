@@ -365,7 +365,7 @@ done
 expect yes "lib/ root's, 0755" sh -c "[ \"\$(stat -c %U:%G:%a $Q/lib)\" = root:root:755 ]"
 # The box CLAUDE.md parts the launcher adds for the agent: present and root's, or it leaves them out.
 for f in web-research-rule.md web-research.md; do
-    expect yes "lib/$f root's" sh -c "[ -f $Q/lib/$f ] && [ ! -L $Q/lib/$f ] && [ \"\$(stat -c %u $Q/lib/$f)\" = 0 ]"
+    expect yes "lib/$f root's, 0644" sh -c "[ -f $Q/lib/$f ] && [ ! -L $Q/lib/$f ] && [ \"\$(stat -c %u:%a $Q/lib/$f)\" = 0:644 ]"
     check ok "$A read lib/$f" "$A" read "$Q/lib/$f"
 done
 for l in default.target.wants/$W-worker.path timers.target.wants/$W-worker.timer \

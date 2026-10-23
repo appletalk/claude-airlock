@@ -6,7 +6,8 @@
 # ends up in git config, so a file that is not root's, or has any line out of form, is not
 # used at all, and the launch goes on without it.
 #
-# Same socket fixtures as egress-proxy.bats: a `stat` stub reports owners from $FAKE_OWNERS.
+# Same socket fixtures as egress-proxy.bats: a `stat` stub reports owners from $FAKE_OWNERS
+# (and modes from $FAKE_OWNERS.modes).
 
 load helper
 setup() {
@@ -18,6 +19,10 @@ setup() {
   cat > "$STUBBIN/stat" <<'STUB'
 #!/usr/bin/env bash
 if [ "$1" = -f ] && [ -n "${FAKE_FSTYPE:-}" ]; then echo "$FAKE_FSTYPE"; exit 0; fi
+if [ "$1" = -c ] && [ "$2" = %a ] && [ -s "${FAKE_OWNERS:-}.modes" ]; then
+  m="$(awk -v p="$3" '{ q = $0; sub(/^[^ ]+ /, "", q) } q == p { m = $1 } END { print m }' "$FAKE_OWNERS.modes")"
+  [ -n "$m" ] && { echo "$m"; exit 0; }
+fi
 if [ "$1" = -c ] && [ "$2" = %u ] && [ -s "${FAKE_OWNERS:-}" ]; then
   u="$(awk -v p="$3" '{ q = $0; sub(/^[^ ]+ /, "", q) } q == p { u = $1 } END { print u }' "$FAKE_OWNERS")"
   [ -n "$u" ] && { echo "$u"; exit 0; }
@@ -457,4 +462,28 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   manifest ''
   _launch "$P" >/dev/null 2>&1 || true
   [ "$(box_md)" = "$(seed_md)" ]
+}
+
+@test "box CLAUDE.md with the proxy's hosts and web research: rule, seeded conventions, hosts, how to ask" {
+  Q="$BATS_TEST_TMPDIR/srv/q"; mkdir -p "$Q/requests" "$Q/answers" "$Q/lib"
+  chmod 755 "$BATS_TEST_TMPDIR/srv" "$Q" "$Q/requests" "$Q/answers" "$Q/lib"
+  rootdirs "$Q/lib"; owns 0 "$Q/requests"; owns 0 "$Q/answers"
+  # the queue's parents as /srv's would be: root's and closed (the tmpdir's are open)
+  d="$(dirname "$Q")"
+  while :; do printf '755 %s\n' "$d" >> "$FAKE_OWNERS.modes"; [ "$d" = / ] && break; d="$(dirname "$d")"; done
+  printf '# RULE-TOP\n' > "$Q/lib/web-research-rule.md"; printf '\n## HOW-TO-ASK\n' > "$Q/lib/web-research.md"
+  chmod 644 "$Q/lib/"*.md; owns 0 "$Q/lib/web-research-rule.md"; owns 0 "$Q/lib/web-research.md"
+  host_config "AIRLOCK_EXTRA_MOUNTS=\"$Q/requests:rw $Q/answers:ro $Q/lib:ro\""
+  manifest 'git.example.org 443 git yes\n'
+  _launch "$P" >/dev/null 2>&1 || true
+  md="$(box_md)"
+  [[ "$md" == "# RULE-TOP"$'\n'"$(seed_md)"* ]]
+  [[ "$md" == *"## HOW-TO-ASK" ]]
+  h="$(grep -n '^## Hosts behind the egress proxy' <<< "$md" | cut -d: -f1)"
+  w="$(grep -n '^## HOW-TO-ASK' <<< "$md" | cut -d: -f1)"
+  [ -n "$h" ] && [ "$h" -lt "$w" ]
+  # another posture: no hosts section, the web parts stay
+  _launch "$P" egress minimal >/dev/null
+  _launch "$P" >/dev/null 2>&1 || true
+  [ "$(box_md)" = "$(printf '# RULE-TOP\n'; seed_md; printf '\n## HOW-TO-ASK')" ]
 }

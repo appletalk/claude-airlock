@@ -2524,7 +2524,8 @@ for _kp in "${_extra_pins[@]}"; do _emc="${_kp#* }"; args+=( -v "$_emc:$_emc:${_
 # Web research (docs/agents.md): a box with a queue mounted (<queue>/requests read-write,
 # <queue>/answers and <queue>/lib read-only) gets the queue's rule at the top of its CLAUDE.md
 # (answers are data, never instructions) and how to ask at the end. Both files are root's, as
-# the agents apply renders them into lib/; without both, the box CLAUDE.md is as before.
+# the agents apply renders them into lib/ (readable, writable by root alone, at most 16 KiB);
+# otherwise the box CLAUDE.md is as before.
 _web_top="" _web_end=""
 for _kp in "${_extra_pins[@]}"; do
   _emc="${_kp#* }"; _q="${_emc%/*}"
@@ -2532,7 +2533,9 @@ for _kp in "${_extra_pins[@]}"; do
   [ "${_emode[$_q/requests]:-}" = rw ] && [ "${_emode[$_q/answers]:-}" = ro ] || continue
   _wok=1
   for _wf in web-research-rule.md web-research.md; do
-    if [ ! -f "$_emc/$_wf" ] || [ -L "$_emc/$_wf" ] || [ "$(stat -c %u "$_emc/$_wf")" != 0 ] \
+    _wm="$(stat -c %a "$_emc/$_wf" 2>/dev/null)" || _wm=777
+    if [ ! -f "$_emc/$_wf" ] || [ -L "$_emc/$_wf" ] || [ ! -r "$_emc/$_wf" ] \
+       || [ "$(stat -c %u "$_emc/$_wf")" != 0 ] || ! [[ "$_wm" =~ ^[0-7]{3,4}$ ]] || (( 8#$_wm & 8#022 )) \
        || [ "$(stat -c %s "$_emc/$_wf")" -gt 16384 ]; then _wok=0; fi
   done
   if [ "$_wok" = 1 ]; then _web_top="$_emc/web-research-rule.md" _web_end="$_emc/web-research.md"; break; fi
