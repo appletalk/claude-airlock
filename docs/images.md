@@ -78,16 +78,25 @@ Only the Debian packages float, on the weekly refresh.
 ## Corporate or internal CA certificates
 
 If you sit behind a TLS-inspecting proxy, or need to reach internal HTTPS services whose
-certificates chain to a private PKI, put the CA chain in `image/certs/` and rebuild:
+certificates chain to a private PKI, give the images your CA chain. Put it in the host's own
+directory, root's, kept with the rest of the host's config, and rebuild:
 
 ```sh
-cp /path/to/your-root-ca.crt image/certs/
+sudo install -d -m 0755 /etc/claude-airlock/ca
+sudo install -m 0644 /path/to/your-root-ca.crt /etc/claude-airlock/ca/
 make install-airlock          # rebuild the images
 ```
 
-- Public CA certificates only, **never private keys**.
-- The directory is empty by default (and untracked by design), and the CA layer is a no-op
-  without it. Nothing here is needed on a normal home network.
-- `make install-airlock` copies local certs from `image/certs/` into each install.
+- `make install-airlock` checks every `.crt` there and lists each certificate's subject and
+  fingerprint. It refuses the directory or a file that is a link, isn't root's, or is writable
+  by group or others: every image trusts what is there, so whoever can write it can get into
+  every box's trust. Each file must hold PEM CA certificates (`CA:TRUE`) and nothing else: no
+  leaf certificates, **never private keys**.
+- `AIRLOCK_CA_REQUIRED=1` in the host config makes an install with no CA certificate an error,
+  for hosts that can't work without one. `AIRLOCK_CA_DIR` names another directory (same rules).
+- Without the host directory, the install takes `image/certs/` in the clone instead (untracked
+  by design; the same certificate checks, but not the ownership ones). Use it only where you
+  have no root.
+- Nothing here is needed on a normal home network; with no certificates the CA layer is a no-op.
 - The chain is trusted by curl, git and Python only, never by Node, so Claude's own TLS
   stays on its built-in roots (see [security-model.md](security-model.md#a-private-ca-chain-stays-out-of-claudes-own-tls)).

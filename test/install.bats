@@ -296,14 +296,81 @@ _install_clone() {
   refute test -d "$(IROOT)/versions/$b"
 }
 
-@test "local CA certs (untracked by design) are copied into the build context and listed" {
+# _mkca DIR NAME [leaf]: a CA certificate (or, with leaf, a non-CA one) at DIR/NAME.crt
+_mkca() {
+  local ext="basicConstraints=critical,CA:TRUE"; [ "${3:-}" = leaf ] && ext="basicConstraints=CA:FALSE"
+  mkdir -p "$1"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$BATS_TEST_TMPDIR/$2.key" \
+    -out "$1/$2.crt" -days 2 -subj "/CN=$2" -addext "$ext" 2>/dev/null
+}
+# _ca_root DIR: stat answers "root's, 0755" for DIR and what is in it (a test can't chown to root);
+# CA_MODE overrides the mode. Every other path gets the real stat.
+_ca_root() {
+  printf '%s\n' "$1" > "$STUBBIN/.ca-root"
+  cat > "$STUBBIN/stat" <<'S'
+#!/bin/bash
+r="$(cat "$(dirname "$0")/.ca-root")"
+p="${*: -1}"
+if [ "$1 $2" = "-c %u:%a" ] && { [ "$p" = "$r" ] || [ "${p%/*}" = "$r" ]; }; then
+  echo "0:$(cat "$(dirname "$0")/.ca-mode" 2>/dev/null || echo 755)"; exit 0
+fi
+exec /usr/bin/stat "$@"
+S
+  chmod +x "$STUBBIN/stat"
+}
+_ca_config() { mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"; printf '%s\n' "$@" > "$AIRLOCK_HOME/.config/claude-airlock/config"; }
+
+@test "CA certs from the clone's image/certs/ (no host dir): checked, copied, listed; refreshed per install" {
+  command -v openssl >/dev/null || skip "no openssl"
   mkclone
-  printf 'CERT\n' > "$CLONE/image/certs/corp-root.crt"
+  _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/no-such-dir"
+  _mkca "$CLONE/image/certs" corp-root
   _install_clone
   [ -f "$(IROOT)/versions/$(rev)/image/certs/corp-root.crt" ]
   rm "$CLONE/image/certs/corp-root.crt"
   _install_clone
   refute test -f "$(IROOT)/versions/$(rev)/image/certs/corp-root.crt"
+}
+
+@test "CA certs: a leaf certificate, a key, or anything else in a .crt is refused before anything is installed" {
+  command -v openssl >/dev/null || skip "no openssl"
+  mkclone
+  _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/no-such-dir"
+  _mkca "$CLONE/image/certs" leafy leaf
+  _install_clone
+  grep -q 'is not a CA' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  refute test -d "$(IROOT)/versions/$(rev)"
+  rm "$CLONE/image/certs/leafy.crt"
+  _mkca "$CLONE/image/certs" withkey; cat "$BATS_TEST_TMPDIR/withkey.key" >> "$CLONE/image/certs/withkey.crt"
+  _install_clone
+  grep -q 'not PEM certificates only' "$BATS_TEST_TMPDIR/install.err"
+  refute test -d "$(IROOT)/versions/$(rev)"
+}
+
+@test "CA certs from the host's root-owned dir win over the clone's; a writable dir, a link or a non-root owner is refused" {
+  command -v openssl >/dev/null || skip "no openssl"
+  mkclone
+  H="$BATS_TEST_TMPDIR/hostca"; _mkca "$H" host-root; _ca_root "$H"
+  _mkca "$CLONE/image/certs" clone-root
+  _ca_config "AIRLOCK_CA_DIR=$H"
+  _install_clone
+  [ -f "$(IROOT)/versions/$(rev)/image/certs/host-root.crt" ] || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  refute test -f "$(IROOT)/versions/$(rev)/image/certs/clone-root.crt"
+  gitc commit -q --allow-empty -m next
+  echo 775 > "$STUBBIN/.ca-mode"; _install_clone
+  grep -q 'writable by group or others' "$BATS_TEST_TMPDIR/install.err"; refute test -d "$(IROOT)/versions/$(rev)"
+  rm "$STUBBIN/.ca-mode"; rm "$STUBBIN/stat"; _install_clone      # really the test user's: not root's
+  grep -q "is not root's" "$BATS_TEST_TMPDIR/install.err"; refute test -d "$(IROOT)/versions/$(rev)"
+  _ca_root "$H"; ln -s "$H/host-root.crt" "$H/linked.crt"; _install_clone
+  grep -q 'is a link' "$BATS_TEST_TMPDIR/install.err"; refute test -d "$(IROOT)/versions/$(rev)"
+}
+
+@test "AIRLOCK_CA_REQUIRED=1: no install without a CA cert" {
+  mkclone
+  _ca_config "AIRLOCK_CA_DIR=$BATS_TEST_TMPDIR/no-such-dir" AIRLOCK_CA_REQUIRED=1
+  _install_clone
+  grep -q 'AIRLOCK_CA_REQUIRED=1, but there are no CA certs' "$BATS_TEST_TMPDIR/install.err" || { cat "$BATS_TEST_TMPDIR/install.err"; return 1; }
+  refute test -d "$(IROOT)/versions/$(rev)"
 }
 
 @test "a failed image build leaves the previous version live" {

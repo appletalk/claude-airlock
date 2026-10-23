@@ -78,6 +78,12 @@ AIRLOCK_SHARE_BASE="$HOME/development"
 # tools. A file that fails the check stops the launch.
 # AIRLOCK_MANAGED_SETTINGS="/etc/agent/managed-settings.json"
 
+# CA certificates every image trusts (docs/images.md): /etc/claude-airlock/ca/ by default, root's;
+# make install-airlock refuses one writable by others. Set REQUIRED where a host can't work
+# without them (a corporate network): an install with none is then an error.
+# AIRLOCK_CA_DIR="/etc/claude-airlock/ca"
+# AIRLOCK_CA_REQUIRED=1
+
 # Broad read-only roots mounted at /roots/<name> for cross-project inspection.
 # EMPTY by default (no other project is visible unless a project `share =`s it and
 # you approve it). Only set this if you deliberately want every listed tree readable

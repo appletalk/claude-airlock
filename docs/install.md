@@ -30,8 +30,9 @@ from a checkout, the install warns: that line keeps the launcher in the working 
 shells pick up a new install on their next `airlock`.
 
 The live version and the two most recently activated others are kept. `current/VERSION`
-says which commit is live. Local CA certs in `image/certs/` (untracked by design) are
-copied into each install.
+says which commit is live. CA certificates for the images (from `/etc/claude-airlock/ca/`, or
+the clone's untracked `image/certs/`) are checked and copied into each install; see
+[images.md](images.md#corporate-or-internal-ca-certificates).
 
 ## Updating
 
