@@ -185,8 +185,8 @@ Each question goes through three steps:
       `options = "uid=1000,gid=1000,umask=077"` under `[automount]`.
     - Interop lets any Linux user run Windows programs as you, and Windows can open a root
       shell in the distro without a password. Turn it off with `enabled=false` under
-      `[interop]`, or accept it once `host-test.sh` passes (it checks the ways in above, not
-      interop end to end).
+      `[interop]`, or accept it once `host-test.sh` passes: on WSL it also runs a real Windows
+      program as each agent user, inside its sandbox, and expects it to fail.
   - WSL terminals may have no login session (`loginctl` shows none for you), so on WSL the
     polkit rule lets the operator in without one: still only the operator, only as the agent
     users, but from any of your processes (an ssh session or a timer too), not only a terminal.

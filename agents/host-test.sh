@@ -230,6 +230,17 @@ echo "== the user managers: their own network, /tmp, /proc, homes, runtime dirs;
 echo "   (a manager gets a new drop-in only once user@<uid> has restarted: reboot first)"
 users="$A:$AU"; [ -z "$W" ] || users="$users $W:$WU $G:$GU"
 # mgr <user> <op> <path> [<to>]: the probe run as a unit in that user's manager (its namespaces)
+# WSL with interop working for root outside the sandboxes: the Windows program the per-user
+# interop probe runs (empty: not WSL, interop off, or no such program; the probe is skipped).
+WIN_EXE=""
+if grep -qsiE 'microsoft|wsl' /proc/sys/kernel/osrelease; then
+    for w in /mnt/c/Windows/System32/whoami.exe /mnt/c/WINDOWS/system32/whoami.exe; do
+        [ -f "$w" ] || continue
+        if timeout 20 "$w" >/dev/null 2>&1; then WIN_EXE=$w
+        else echo "     (Windows interop doesn't work for root here either: the interop probe would mean nothing, skipped)"; fi
+        break
+    done
+fi
 mgr() { systemd-run --user -M "$1@" --wait --pipe --quiet --collect --expand-environment=no -- python3 -I -c "$PROBE" "$2" "$3" "${4:-}" 2>&1 | tail -1; }
 mcheck() {  # mcheck <want...> <what> <user> <op> <path>: the result must be one of the wants
     local wants=() got
@@ -320,6 +331,14 @@ for spec in $users; do
     # io_uring outside the boxes too: an error, not a kill (SIGSYS would print nothing at all)
     if grep -q '^SystemCallFilter=.*io_uring' "/etc/systemd/system/user@$n.service.d/10-airlock-agents.conf" 2>/dev/null; then
         mcheck nosys "user@$n: io_uring_setup fails with ENOSYS (not killed)" "$u" io_uring -
+    fi
+    # WSL: Windows interop end to end. A real Windows program copied into its home, run in its
+    # manager, must fail; run as root outside, it must work, or the probe would mean nothing.
+    if [ -n "$WIN_EXE" ]; then
+        install -m 0755 -o "$u" -g "$(id -g "$u")" "$WIN_EXE" "/home/$u/$TAG-win.exe"
+        expect no "user@$n: a Windows program can't run in its sandbox (interop unreachable)" \
+            timeout 30 systemd-run --user -M "$u@" --wait --pipe --quiet --collect -- "/home/$u/$TAG-win.exe"
+        rm -f "/home/$u/$TAG-win.exe"
     fi
     expect yes "user@$n: AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf" sh -c "systemctl show -p Environment --value user@$n.service | grep -q 'AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf'"
     # no cron or at jobs: the spool read-only in its manager, and the user denied
