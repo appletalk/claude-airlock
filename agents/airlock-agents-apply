@@ -267,7 +267,22 @@ ProtectSystem=strict
 ReadWritePaths=/home/$u /run/user/$id${rw:+ $rw}
 # SSSD's NSS socket lives outside /run (directory lookups, AD recon).
 InaccessiblePaths=-/var/lib/sss/pipes
+# Nothing under /mnt is the agents' (on WSL: the Windows drives, WSLg's audio, microphone and
+# display sockets, the tmpfs every distro shares), nor the hypervisor's devices (WSL's GPU
+# paravirtualization and vsock into Windows; absent elsewhere, so ignored).
+TemporaryFileSystem=/mnt:ro
+InaccessiblePaths=-/dev/dxg -/dev/vsock
 EOF
+    if [ "$(systemd_version)" -ge 255 ]; then cat <<EOF
+# Sockets of the families boxes and the manager use, nothing else: no AF_VSOCK to the Windows
+# host (WSL interop rides it), no raw packet sockets, no Bluetooth or the rest.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+EOF
+    else cat <<EOF
+# (No RestrictAddressFamilies: before systemd 255 it implies NoNewPrivileges here, which stops
+# newuidmap, so every rootless box under this manager would fail. Vsock stays open.)
+EOF
+    fi
     local ia=""
     for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
     [ -z "$ia" ] || echo "InaccessiblePaths=${ia# }"
@@ -309,16 +324,31 @@ WantedBy=local-fs.target
 EOF
 }
 
+# WSL: its terminals have no logind session, so polkit sees the operator as neither local nor
+# active there (on the host's own console they are).
+on_wsl() { grep -qsiE 'microsoft|wsl' "$ROOT/proc/sys/kernel/osrelease" || [ -d "$ROOT/run/WSL" ]; }
+# systemd's version as a number (0 if unknown): settings that older versions handle differently.
+# (Under a test root, AIRLOCK_AGENTS_SYSTEMD_VERSION stands in for it.)
+systemd_version() {
+    local v
+    if [ -n "$ROOT" ] && [ -n "${AIRLOCK_AGENTS_SYSTEMD_VERSION:-}" ]; then v=$AIRLOCK_AGENTS_SYSTEMD_VERSION
+    else v="$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2 }')"; fi
+    [[ "$v" =~ ^[0-9]+$ ]] && echo "$v" || echo 0
+}
 render_polkit() {
-    local list="" r
+    local list="" r seat=" subject.local && subject.active &&" why=""
     for r in "${ROLES[@]}"; do list="$list${list:+, }\"${NAME[$r]}\""; done
+    if on_wsl; then
+        seat=""
+        why=$'\n// On WSL, without subject.local and subject.active: its terminals have no logind session.\n// Still only the operator, and only as the agent users (a box has no system bus to ask from).'
+    fi
     cat <<EOF
 // Rendered by airlock-agents-apply: $OPERATOR may open a shell as the agent users, and only as
 // them (the operator command runs every agent-side process through it). machined passes the
-// target user for host shells only.
+// target user for host shells only.$why
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.machine1.host-shell" &&
-        subject.user == "$OPERATOR" && subject.local && subject.active &&
+        subject.user == "$OPERATOR" &&${seat}
         [$list].indexOf(action.lookup("user")) >= 0) {
         return polkit.Result.YES;
     }

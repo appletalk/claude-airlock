@@ -21,7 +21,7 @@ env_set() { sed -i "s#^$1=.*#$1=$2#" "$AIRLOCK_AGENTS_ENV"; }
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; export REPO
     T="$BATS_TEST_TMPDIR"
-    export AIRLOCK_AGENTS_ROOT="$T/root" LOG="$T/calls"
+    export AIRLOCK_AGENTS_ROOT="$T/root" LOG="$T/calls" AIRLOCK_AGENTS_SYSTEMD_VERSION=257
     R="$AIRLOCK_AGENTS_ROOT"
     # The site file and each user's claude-airlock config, where apply reads them (under the root).
     E="$R/etc/claude-airlock/agents"; mkdir -p "$E"
@@ -1026,6 +1026,9 @@ BindPaths=/home/agent /run/user/1100
 ProtectSystem=strict
 ReadWritePaths=/home/agent /run/user/1100 -/srv/agent-web/requests
 InaccessiblePaths=-/var/lib/sss/pipes
+TemporaryFileSystem=/mnt:ro
+InaccessiblePaths=-/dev/dxg -/dev/vsock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
@@ -1050,6 +1053,9 @@ BindPaths=/home/$u /run/user/$n
 ProtectSystem=strict
 ReadWritePaths=/home/$u /run/user/$n $rw
 InaccessiblePaths=-/var/lib/sss/pipes
+TemporaryFileSystem=/mnt:ro
+InaccessiblePaths=-/dev/dxg -/dev/vsock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 InaccessiblePaths=$cg
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
         f="$d/user@$n.service.d/10-airlock-agents.conf"
@@ -2430,4 +2436,27 @@ P
     done
     run "$O" _complete ids release; [[ "$output" == "$P"$'\t'quarantined ]] || { echo "release: $output"; return 1; }
     run "$O" _complete ids approve; [[ "$output" == "$H"$'\t'held ]] || { echo "approve: $output"; return 1; }
+}
+
+
+@test "polkit: the rule asks for a local, active session, except on WSL (whose terminals have none)" {
+    f="$RENDER/etc/polkit-1/rules.d/50-airlock-agents.rules"
+    grep -qF 'subject.user == "alice" && subject.local && subject.active &&' "$f"
+    mkdir -p "$R/proc/sys/kernel"; echo 6.18.33.2-microsoft-standard-WSL2 > "$R/proc/sys/kernel/osrelease"
+    "$P" --render "$T/rw" >/dev/null
+    w="$T/rw/etc/polkit-1/rules.d/50-airlock-agents.rules"
+    grep -qF 'subject.user == "alice" &&' "$w"
+    run grep -c 'subject.local\|subject.active' "$w"; [ "$output" = 1 ]      # (the comment only)
+    grep -qF '["agent", "agent-web", "agent-guard"].indexOf(action.lookup("user")) >= 0' "$w"
+    run grep -c ' $' "$f" "$w"; [[ "$output" != *:[1-9]* ]]                 # no trailing spaces
+}
+
+
+@test "before systemd 255 the managers get no RestrictAddressFamilies (it would imply NoNewPrivileges and stop newuidmap)" {
+    AIRLOCK_AGENTS_SYSTEMD_VERSION=252 "$P" --render "$T/r252" >/dev/null
+    f="$T/r252/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+    run grep -c '^RestrictAddressFamilies=' "$f"; [ "$output" = 0 ]
+    grep -q 'No RestrictAddressFamilies: before systemd 255' "$f"
+    grep -qx 'TemporaryFileSystem=/mnt:ro' "$f"
+    grep -qx 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "$RENDER/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
 }

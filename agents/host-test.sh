@@ -58,11 +58,16 @@ try:
     elif op == "stat": os.stat(p)
     elif op == "connect":
         import socket; c = socket.socket(socket.AF_UNIX); c.connect(p)
+    elif op == "empty":
+        if os.listdir(p): print("error:not-empty"); sys.exit()
+    elif op == "vsock":
+        import socket; socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM).close()
     else:
         print("error:unknown-op"); sys.exit()
     print("ok")
 except OSError as e:
     print("denied" if e.errno in (errno.EACCES, errno.EPERM) else "rofs" if e.errno == errno.EROFS else
+          "refused" if e.errno == errno.EAFNOSUPPORT else
           "missing" if e.errno == errno.ENOENT else "error:" + errno.errorcode.get(e.errno, str(e.errno)))
 '
 probe() { as "$1" python3 -I -c "$PROBE" "$2" "$3" "${4:-}" 2>&1 | tail -1; }
@@ -223,7 +228,7 @@ users="$A:$AU"; [ -z "$W" ] || users="$users $W:$WU $G:$GU"
 mgr() { systemd-run --user -M "$1@" --wait --pipe --quiet --collect --expand-environment=no -- python3 -I -c "$PROBE" "$2" "$3" "${4:-}" 2>&1 | tail -1; }
 mcheck() {  # mcheck <want...> <what> <user> <op> <path>: the result must be one of the wants
     local wants=() got
-    while [[ "$1" =~ ^(ok|denied|missing|rofs)$ ]]; do wants+=("$1"); shift; done
+    while [[ "$1" =~ ^(ok|denied|missing|rofs|refused)$ ]]; do wants+=("$1"); shift; done
     got="$(mgr "$2" "$3" "$4")"
     if [[ " ${wants[*]} " == *" $got "* ]]; then pass "$1"; else fail "$1 (expected ${wants[*]}, got ${got:-nothing})"; fi
 }
@@ -266,6 +271,18 @@ for spec in $users; do
         mcheck missing denied "user@$n: $o's cgroups hidden" "$u" list "/sys/fs/cgroup/user.slice/user-$on.slice"
     done
     mcheck missing denied "user@$n: no $OP's home" "$u" list "$OP_HOME"
+    # Nothing of /mnt (WSL: the Windows drives, WSLg's sockets), no hypervisor devices, no vsock
+    [ -d /mnt ] && mcheck ok "user@$n: /mnt is empty here (on WSL: no drives, no WSLg sockets)" "$u" empty /mnt
+    for dv in /dev/dxg /dev/vsock; do
+        [ -e "$dv" ] && mcheck missing denied "user@$n: no $dv" "$u" stat "$dv"
+    done
+    if ! grep -q '^RestrictAddressFamilies=' "/etc/systemd/system/user@$n.service.d/10-airlock-agents.conf" 2>/dev/null; then
+        echo "     (no RestrictAddressFamilies for $u: systemd before 255, see its drop-in; vsock is open to it)"
+    elif python3 -I -c 'import socket; socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM).close()' 2>/dev/null; then
+        mcheck refused "user@$n: no AF_VSOCK socket (WSL interop rides vsock to Windows)" "$u" vsock -
+    else
+        echo "     (AF_VSOCK isn't available to root here either: that probe would mean nothing, skipped)"
+    fi
     if [ "$u" != "$A" ]; then
         # ProtectSystem=strict: read-only outside its paths (EROFS, not merely a permission)
         if [ "$(stat -c %a /var/spool/mail 2>/dev/null)" = 1777 ]; then
