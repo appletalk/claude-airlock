@@ -440,6 +440,15 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   grep -qF "\`gh\` is set up, no token needed (not set up here: the proxy holds no credential for it). Reads" <<< "$md"
   grep -qF -- "- **\`10.0.0.10\`** (rules \`kubernetes-read\`, the proxy adds the credential): \`kubectl\` is set up read-only, KUBECONFIG is set: get" <<< "$md"
   grep -qF "rules the launcher doesn't know" <<< "$md"
+  # Repo scoping: what a 403 means on git and GitHub hosts, and REST through gh api for GitHub.
+  grep -qF "tea\` logged in. API" <<< "$md"
+  grep -qF "the web UI. It may be scoped to some repos: a 403 for another repo is that scope" <<< "$md"
+  grep -qF "deletes. It may be scoped to some repos" <<< "$md"
+  grep -qF "If \`/graphql\` gets 403" <<< "$md"
+  grep -qF "\`gh api repos/<owner>/<repo>/pulls -f title=... -f head=<branch> -f base=main\` (create)" <<< "$md"
+  grep -qF "\`git fetch origin pull/<n>/head\`" <<< "$md"
+  [ "$(grep -c 'If `/graphql` gets 403' <<< "$md")" = 1 ]
+  ! grep -q 'metrics.example.org.*scoped to some repos' <<< "$md"
   [ "$(grep -c '^- \*\*`' <<< "$md")" = 5 ]
 }
 

@@ -116,6 +116,11 @@ socket itself (`http_unix_socket`), with a placeholder `GH_TOKEN` the proxy repl
 - gh's telemetry and update checks are off.
 - gh reaches only `api.github.com` this way. Uploads and other GitHub hosts are refused by
   the proxy.
+- If the proxy scopes the host to some repos (airlock-envoy's `repos`), it refuses GraphQL,
+  which most `gh pr` and `gh issue` commands use. The manifest doesn't say which hosts are
+  scoped, so the box's CLAUDE.md section for GitHub and git hosts says what a 403 for another
+  repo or for `/graphql` means, and gives the `gh api` (REST) forms for PRs, issues, comments
+  and checks.
 
 ### tea
 

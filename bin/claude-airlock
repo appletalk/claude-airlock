@@ -386,7 +386,12 @@ nothing for it to do. A 403 from `airlock-envoy: refused by the ... rules` is th
 not an outage: say what was refused instead of retrying another way.
 
 EOF
-  local unset
+  # The proxy may scope a host to some repos (airlock-envoy's repos); the manifest doesn't
+  # say which, so the box learns it from a 403 and is told what that means and what works.
+  local unset scoped gh_rest
+  scoped=" It may be scoped to some repos: a 403 for another repo is that scope, not an outage."
+  # shellcheck disable=SC2016  # literal backquotes: Markdown code spans
+  gh_rest=' If `/graphql` gets 403 (refused under repo scoping; most `gh pr` and `gh issue` commands use it), use the REST API through `gh api`: `gh api repos/<owner>/<repo>/pulls -f title=... -f head=<branch> -f base=main` (create), `gh api "repos/<owner>/<repo>/pulls?state=open"` (list), `gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -f body=...` (edit), `gh api repos/<owner>/<repo>/issues/<n>/comments -f body=...` (comment), `gh api repos/<owner>/<repo>/issues -f title=... -f body=...` (issue), `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` (checks); check out a PR with `git fetch origin pull/<n>/head`. Draft to ready and resolving review threads need GraphQL: ask the human.'
   while read -r host rules cred; do
     [ -n "$host" ] || continue
     unset=""
@@ -397,11 +402,11 @@ EOF
     case "$rules" in
       victoria-metrics) echo "Prometheus-style query API, reads only: \`curl 'http://$host/api/v1/query?query=up'\`; also query_range, series, labels, label values, metadata." ;;
       victoria-logs) echo "LogsQL, reads only: \`curl 'http://$host/select/logsql/query' -d 'query=...'\` (also hits, stats_query and the rest under /select/logsql/)." ;;
-      git) echo "git fetch and push over http:// (remotes are rewritten in the box). The server's branch protection decides what a push may touch." ;;
-      git-read) echo "git fetch only (remotes are rewritten in the box); a push is refused." ;;
-      forgejo) echo "Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`tea\` logged in$unset. API reads, PR create and edit, comments, labels, reviewers. Refused: merge, approve, files written through the API, branch and tag API, releases, settings, keys, deletes, the web UI." ;;
-      github-api) echo "\`gh\` is set up, no token needed$unset. Reads, issues, PR create and edit, comments, labels, reviewers. Refused: merge, approve, auto-merge, settings, hooks, keys, deletes, Projects beyond the pinned boards." ;;
-      github-issues) echo "\`gh\` is set up, no token needed$unset. Reads, issues, comments, labels, assignees. Refused: PR create and edit, merge, approve, settings, deletes." ;;
+      git) echo "git fetch and push over http:// (remotes are rewritten in the box). The server's branch protection decides what a push may touch.$scoped" ;;
+      git-read) echo "git fetch only (remotes are rewritten in the box); a push is refused.$scoped" ;;
+      forgejo) echo "Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`tea\` logged in$unset. API reads, PR create and edit, comments, labels, reviewers. Refused: merge, approve, files written through the API, branch and tag API, releases, settings, keys, deletes, the web UI.$scoped" ;;
+      github-api) echo "\`gh\` is set up, no token needed$unset. Reads, issues, PR create and edit, comments, labels, reviewers. Refused: merge, approve, auto-merge, settings, hooks, keys, deletes, Projects beyond the pinned boards.$scoped$gh_rest" ;;
+      github-issues) echo "\`gh\` is set up, no token needed$unset. Reads, issues, comments, labels, assignees. Refused: PR create and edit, merge, approve, settings, deletes.$scoped$gh_rest" ;;
       kubernetes-read) echo "\`kubectl\` is set up read-only, KUBECONFIG is set$unset: get, describe, list, watch, logs, events, top, \`auth can-i\`, \`auth whoami\`. Refused: every write, exec, attach, cp, port-forward, proxy. What it may read is the token's RBAC. \"the server has asked for the client to provide credentials\" means the proxy's token expired: ask the human to renew it." ;;
       any) echo "any method and path; nothing is checked beyond the host." ;;
       *) echo "rules the launcher doesn't know: expect 403 for anything outside them." ;;
