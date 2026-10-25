@@ -53,6 +53,12 @@ if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ] && [[ "\$*" == *org.claude-a
   echo "\${STUB_IMAGE_EGRESS_PROXY-1}"
   exit 0
 fi
+# The launcher's box-name check (is the name taken?): answered, not recorded. STUB_TAKEN_NAMES
+# lists names that exist (comma separated); any other is not found.
+if [ "\${1:-}" = container ] && [ "\${2:-}" = inspect ]; then
+  case ",\${STUB_TAKEN_NAMES:-}," in *",\${*: -1},"*) exit 0 ;; esac
+  exit 1
+fi
 printf '%s\n' "\$@" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 printf '%s\n' "ENGINE_INVOKED=$_e" >> "\${ENGINE_ARGS_FILE:-/dev/null}"
 # Snapshot the session pidfiles that exist WHILE this session is live. Cleanup unlinks
@@ -166,6 +172,7 @@ _launch_env() {
     ${STUB_IMAGE_EGRESS_PROXY+STUB_IMAGE_EGRESS_PROXY="$STUB_IMAGE_EGRESS_PROXY"}
     ${STUB_IMAGE_MISSING:+STUB_IMAGE_MISSING="$STUB_IMAGE_MISSING"}
     ${STUB_RUN_EXIT:+STUB_RUN_EXIT="$STUB_RUN_EXIT"}
+    ${STUB_TAKEN_NAMES:+STUB_TAKEN_NAMES="$STUB_TAKEN_NAMES"}
     ${TEST_AIRLOCK_CONFIG:+AIRLOCK_CONFIG="$TEST_AIRLOCK_CONFIG"}
     ${TEST_EGRESS_MODE:+AIRLOCK_EGRESS_MODE="$TEST_EGRESS_MODE"}
     ${TEST_EGRESS_PROXY:+AIRLOCK_EGRESS_PROXY="$TEST_EGRESS_PROXY"}

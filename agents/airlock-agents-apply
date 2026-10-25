@@ -506,6 +506,9 @@ render_session_unit() {
 [Unit]
 Description=$AGENT session %i
 ConditionUser=$AGENT
+# [Unit] keys: under [Service] systemd ignores them ("Unknown key").
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=forking
@@ -516,8 +519,6 @@ ExecStop=$LIBDIR/session-stop %t/$AGENT-%i.sock %t/$AGENT-%i.cg
 TimeoutStopSec=90
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
 [Install]
 WantedBy=default.target

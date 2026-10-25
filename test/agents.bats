@@ -2038,6 +2038,12 @@ S
     [[ "$output" != *"users come from a directory service"* ]]
 }
 
+@test "the session unit: its start limit is in [Unit], where systemd reads it" {
+    f="$RENDER/etc/systemd/user/agent-session@.service"
+    sect="$(awk '/^\[/ { s = $0 } /^StartLimit(IntervalSec|Burst)=/ { print s ":" $0 }' "$f")"
+    [ "$sect" = "$(printf '[Unit]:StartLimitIntervalSec=600\n[Unit]:StartLimitBurst=5')" ] || { echo "$sect"; return 1; }
+}
+
 @test "the workers: no start limit, and every timer run puts a failed queue watch back" {
     for u in agent-web agent-guard; do
         f="$RENDER/etc/systemd/user/$u-worker.service"

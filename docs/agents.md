@@ -183,6 +183,12 @@ say you've decided.
 
 ## Good to know
 
+- Each box is named after its session: `airlock-<project>.<name>` (a web session's, its label),
+  so `podman ps`, the journal and `htop` say which session a box is. A name still taken (a box
+  still being removed after a crash) gets a suffix (`-2`, `-3`, ...); nothing is replaced.
+  Boxes outside a session take `airlock-<project>`.
+- An interactive box's screen doesn't go to the journal (`--log-driver none` when it has a
+  terminal); the terminal is the only copy.
 - The agent users must use `crun`, not `runc`. The install sets this up.
 - Switching an agent user from `runc` to `crun` leaves stale containers behind. Before removing
   `runc`, run `podman ps -a` as each agent user and `podman rm -f` the old ones.

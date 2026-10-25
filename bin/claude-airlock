@@ -3176,7 +3176,13 @@ fi
 
 # A terminal only when there is one: a run from a script or a service unit (`claude -p`,
 # `airlock exec`) has none, and the engine refuses -t then.
-if [ -t 0 ] && [ -t 1 ]; then args+=( -t ); fi
+if [ -t 0 ] && [ -t 1 ]; then
+  args+=( -t )
+  # An interactive box's output is the session's screen: with a terminal the engine's default
+  # log driver (journald under podman on systemd) copies every screen update into the host
+  # journal (privacy, disk). The terminal is the only place it belongs.
+  args+=( --log-driver none )
+fi
 # An exec'd command is the box's PID 1, where a signal with no handler is ignored: stopping
 # the unit that ran it would wait out its timeout and leave the box running. An init (the
 # engine's own: catatonit under podman, docker-init under docker) passes signals on and reaps.
@@ -3293,6 +3299,29 @@ for _kp in "${_extra_pins[@]}"; do
     exit 1
   fi
 done
+
+# The box's name, so journal lines, `podman ps` and htop say which box this is: the session's
+# (Claude's --name, which agent sessions pass as <project>.<name>), else the project's, as
+# airlock-<name>. One still taken (a crashed box still being removed, a second box of the
+# project) gets a suffix: nothing that exists is replaced or touched.
+_box_base=""
+if [ ${#AIRLOCK_EXEC[@]} -eq 0 ] && [ "$AIRLOCK_SHELL" != 1 ]; then
+  _prev=""
+  for _a in "$@"; do
+    case "$_a" in --name=*) _box_base="${_a#--name=}" ;; esac
+    [ "$_prev" != --name ] || _box_base="$_a"
+    _prev="$_a"
+  done
+fi
+[ -n "$_box_base" ] || _box_base="$(basename "$WORKSPACE")"
+_box_base="airlock-$(printf '%s' "$_box_base" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '-' | cut -c1-48)"
+_box_name="$_box_base"
+_n=2
+while "$AIRLOCK_ENGINE" container inspect --format '{{.Name}}' "$_box_name" >/dev/null 2>&1; do
+  _box_name="$_box_base-$_n"; _n=$((_n + 1))
+  [ "$_n" -le 20 ] || { _box_name="$_box_base-$$"; break; }
+done
+args+=( --name "$_box_name" )
 
 MOUNTED=1
 if [ ${#AIRLOCK_EXEC[@]} -gt 0 ]; then
