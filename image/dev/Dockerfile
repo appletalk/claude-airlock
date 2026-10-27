@@ -31,7 +31,7 @@ ARG ENVOY_VERSION=1.40.0
 ARG ENVOY_KEY_FPR=0AFCE836BA4D1D35763C8523D8CDC3750181F31F
 COPY envoy-release-key.asc /tmp/envoy-release-key.asc
 RUN set -eux; \
-    apt-get update; apt-get install -y --no-install-recommends gnupg; \
+    apt-get update; apt-get install -y --no-install-recommends gnupg; apt-get clean; \
     case "$(dpkg --print-architecture)" in \
       amd64) earch=x86_64 ;; \
       arm64) earch=aarch_64 ;; \
