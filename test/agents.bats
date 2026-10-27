@@ -1491,7 +1491,7 @@ S
     grep -q '"result":"agent-web ended (stop)"' "$T/q/log/agent-web/stages.jsonl"
     # Ctrl-C (SIGINT to the pane's foreground group): the box ends, the runner writes the record
     rm -f "$T/boxpid" "$T/q/log/agent-web/stages.jsonl"
-    printf '#!/bin/bash\necho $$ > "%s"\nsleep 30 & wait\n' "$T/boxpid" > "$HOME/.local/bin/airlock"
+    printf '#!/bin/bash\necho $$ > "%s"\nsed -n "s/^SigIgn:[[:space:]]*//p" /proc/self/status > "%s"\nsleep 30 & wait\n' "$T/boxpid" "$T/boxign" > "$HOME/.local/bin/airlock"
     # started as tmux starts a pane: its own session, no signal ignored (a bats background job
     # starts with INT ignored, which bash can never reset)
     python3 -c 'import os, signal, sys
@@ -1500,6 +1500,8 @@ os.setsid(); os.execvp("bash", ["bash"] + sys.argv[1:])' "$REPO/agents/lib/web-s
     for _ in $(seq 50); do [ -s "$T/boxpid" ] && break; sleep 0.1; done
     sleep 0.3; kill -INT -- -"$runner"
     for _ in $(seq 50); do kill -0 "$runner" 2>/dev/null || break; sleep 0.1; done
+    # the box started with INT and QUIT at their defaults (bash 5.3 kept INT ignored after trap -)
+    if (( 0x$(cat "$T/boxign") & 0x6 )); then echo "the box started with INT or QUIT ignored: $(cat "$T/boxign")"; return 1; fi
     if kill -0 "$runner" 2>/dev/null; then kill -KILL -- -"$runner"; echo "runner hung after Ctrl-C"; return 1; fi
     grep -q '"result":"agent-web ended (exit)"' "$T/q/log/agent-web/stages.jsonl" || { echo "Ctrl-C lost the record"; return 1; }
 }

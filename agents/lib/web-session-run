@@ -71,13 +71,16 @@ active_at() { find -P "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name "$u
 # is waited for, so the handler runs at once (bash runs a trap only after a foreground command
 # has finished); it starts with no signal ignored (a background job inherits INT and QUIT
 # ignored) and the pane's terminal as its stdin. This shell ignores Ctrl-C itself (a prompt of
-# the launcher's, in cooked mode, would otherwise end it and lose the record).
+# the launcher's, in cooked mode, would otherwise end it and lose the record). The box gets
+# INT and QUIT back through env --default-signal: bash 5.3 keeps INT ignored in the subshell
+# despite its `trap - INT` (this shell's own `trap '' INT`), so the launcher would start deaf to
+# Ctrl-C.
 grace="${AGENTS_WEB_STOP_GRACE:-15}"
 why='exit' hup=0
 trap 'why=${why/exit/stop}; hup=1; trap "" HUP; kill -HUP 0 2>/dev/null' HUP
 trap '' INT
 exec 3<&0
-( trap - HUP INT QUIT; exec "$HOME/.local/bin/airlock" --remote-control --name "$label" --session-id "$uuid" \
+( trap - HUP INT QUIT; exec env --default-signal=INT,QUIT "$HOME/.local/bin/airlock" --remote-control --name "$label" --session-id "$uuid" \
     --append-system-prompt "$prompt" ) <&3 3<&- &
 box=$!
 exec 3<&-
