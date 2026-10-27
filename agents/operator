@@ -107,6 +107,14 @@ orun() {
     return "$rc"
 }
 
+# Before a start or restart: a unit an apply rewrote since $AS's manager read it would start as the
+# old one (a reload doesn't touch what runs, so it is done here rather than left to the operator).
+fresh() {
+    [ "$(OCTL_RAW=1 octl show -p NeedDaemonReload --value "$1" 2>/dev/null)" = yes ] || return 0
+    echo "$1 changed on disk since $AS's manager read it: reloading first"
+    octl daemon-reload || die "the reload failed (above); $1 not started"
+}
+
 name_ok() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; }
 session() {  # session <project>[.name] or <project> <name> -> <project>.<name>
     local p=${1%%.*} n=${2:-}
@@ -420,11 +428,13 @@ web() {
             AS=$WEB octl stop "$WEB-session@$n.service" ;;
         restart)
             n="$(web_target restart "${2:-}")" || exit 1
+            AS=$WEB fresh "$WEB-session@$n.service"
             AS=$WEB octl restart "$WEB-session@$n.service"
             echo "a fresh $WEB session $n: $CMD web $n" ;;
         new)
             # another interactive session, by name (a typo'd `<command> web <name>` never starts one)
             n="${2:-}"; name_ok "$n" || die "usage: $CMD web new <name> (letters, digits, - and _)"
+            AS=$WEB fresh "$WEB-session@$n.service"
             AS=$WEB octl start "$WEB-session@$n.service"
             AS=$WEB oexec /usr/bin/tmux -S "$(wsock "$n")" attach ;;
         *)
@@ -435,6 +445,7 @@ web() {
                 n="$(web_running)"
                 [ "$(printf '%s' "$n" | grep -c .)" -le 1 ] || die "several $WEB sessions run ($(printf '%s' "$n" | tr '\n' ' ')): say which, $CMD web <name>"
                 n="${n:-main}"
+                AS=$WEB fresh "$WEB-session@$n.service"
                 AS=$WEB octl start "$WEB-session@$n.service"
             else
                 name_ok "$n" || die "unknown command or bad session name '$n' ($CMD --help)"
@@ -452,6 +463,7 @@ case "$cmd" in
     new)
         [ $# -ge 1 ] || die "usage: $CMD new <project> [name]"
         s="$(session "$@")"
+        fresh "$UNIT$s.service"
         octl enable --now "$UNIT$s.service"
         echo "started $s: $CMD attach $s" ;;
     attach)
@@ -465,6 +477,7 @@ case "$cmd" in
     restart)
         [ $# -ge 1 ] || die "usage: $CMD restart <project>[.name]"
         s="$(target "$1")" || exit 1
+        fresh "$UNIT$s.service"
         octl reset-failed "$UNIT$s.service" 2>/dev/null || true
         octl restart "$UNIT$s.service" ;;
     paste)

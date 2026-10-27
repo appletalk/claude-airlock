@@ -1312,8 +1312,21 @@ if [ "$WEB_ON" = 1 ]; then
         done
     done
 fi
+# Asked live on every run, so the reminder lasts until the reload is done: a running manager
+# still holds the units it read before an apply rewrote them, and a session started or restarted
+# there runs the old one.
+unread=""
+for r in "${ROLES[@]}"; do
+    u=${NAME[$r]} id=${UID_OF[$r]}
+    systemctl is-active --quiet "user@$id.service" 2>/dev/null || continue
+    mapfile -t loaded < <(systemctl --user -M "$u@" list-units --all --full --no-legend --plain 2>/dev/null | awk '{ print $1 }')
+    [ "${#loaded[@]}" -gt 0 ] || continue
+    need="$(systemctl --user -M "$u@" show -p NeedDaemonReload --value -- "${loaded[@]}" 2>/dev/null)" || true
+    if grep -qx yes <<< "$need"; then unread="$unread $u"; fi
+done
+say_unread() { [ -z "$unread" ] || echo "next: $COMMAND reload (the user managers of$unread haven't read the agents' changed user units yet)"; }
 if [ "$changes" = 0 ]; then echo "==> the agents are provisioned; nothing to change"
-elif [ "$check" = 1 ]; then echo "==> $changes change(s): drifted from the site file"; exit 1
+elif [ "$check" = 1 ]; then echo "==> $changes change(s): drifted from the site file"; say_unread; exit 1
 elif [ "$confirm" = 0 ]; then echo "==> $changes change(s); run with --confirm to apply"
 else echo "==> done"; fi
 if [ -n "$missing_socks" ]; then
@@ -1324,7 +1337,8 @@ if [ -n "$missing_socks" ]; then
         echo "  $GUARD-anthropic @anthropic"; echo "  client $GUARD-anthropic $GUARD"
     fi
 fi
-if [ "$confirm" = 1 ] && [ "$user_units_changed" = 1 ]; then echo "next: $COMMAND reload (the agents' user units changed), then $COMMAND update"; unpend user-units; fi
+if [ "$confirm" = 1 ] && [ "$user_units_changed" = 1 ]; then echo "next: $COMMAND reload (the agents' user units changed), then $COMMAND update"; unpend user-units
+elif [ -n "$unread" ]; then say_unread; [ "$check" = 0 ] || exit 1; fi
 # A manager runs the sandbox it started with: one whose drop-in or slice changed since it started
 # is still on the old one until it restarts (that ends its sessions, so it is the operator's to do).
 stale=""

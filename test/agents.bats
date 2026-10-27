@@ -267,6 +267,10 @@ echo "machinectl $*" >> "$LOG"
 if [[ "$4" == */sh && "$5" == -c && "$6" == *'/systemd-run" --user --wait --pipe'* ]]; then
     exec "$4" -c "$6" "${@:7}"
 fi
+# a unit's NeedDaemonReload: UNREAD names the managers (user@) that haven't read their changed units
+case "$*" in *"show -p NeedDaemonReload"*)
+    r=no; for a; do case "$a" in *@) case " ${UNREAD:-} " in *" ${a%@} "*) r=yes ;; esac ;; esac; done
+    printf '%s\r\nagent-rc=0\r\n' "$r"; exit 0 ;; esac
 case "$*" in *"agent-rc="*) printf '%s\r\nagent-rc=%s\r\n' "${REMOTE_OUT:-remote output}" "${REMOTE_RC:-0}" ;; esac
 exit 0
 S
@@ -330,6 +334,35 @@ octl_call() {  # the systemctl arguments octl sent, from the log
     grep -E "machinectl shell -q .* agent-web@ .*start agent-web-worker.path agent-web-worker.timer" "$LOG" >/dev/null
     if grep -qE " agent@ .*start " "$LOG"; then echo "started units in agent's manager"; return 1; fi
     if grep -q "agent-guard@" "$LOG"; then echo "agent-guard isn't provisioned"; return 1; fi
+}
+
+@test "agent new/restart and web new/restart/attach reload a manager that hasn't read a changed unit first; attach and a current one don't" {
+    op_stubs
+    reloads() { octl_call | grep -cx daemon-reload || true; }
+    for c in "new k8s" "restart k8s.main"; do
+        : > "$LOG"; UNREAD=agent REMOTE_OUT="agent-session@k8s.main.service loaded active running x" run "$O" $c
+        [ "$status" -eq 0 ] || { echo "$c: $output"; return 1; }
+        [ "$(reloads)" = 1 ] || { echo "$c: no reload"; cat "$LOG"; return 1; }
+        # the reload comes before the start
+        octl_call | grep -vx 'show -p NeedDaemonReload --value agent-session@k8s.main.service' | head -1 | grep -qx daemon-reload || { echo "$c: order"; octl_call; return 1; }
+        [[ "$output" == *"agent-session@k8s.main.service changed on disk since agent's manager read it: reloading first"* ]]
+        : > "$LOG"; REMOTE_OUT="agent-session@k8s.main.service loaded active running x" run "$O" $c
+        [ "$status" -eq 0 ] && [ "$(reloads)" = 0 ] || { echo "$c: reloaded a current manager"; return 1; }
+    done
+    # agent-web's manager, never agent's
+    : > "$LOG"; UNREAD=agent-web REMOTE_OUT="agent-web-session@main.service loaded active running x" run "$O" web restart
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qE "agent-web@ .*daemon-reload" "$LOG"; ! grep -qE " agent@ .*daemon-reload" "$LOG"
+    for c in "web new research2" "web"; do
+        : > "$LOG"; UNREAD=agent-web REMOTE_OUT="" run "$O" $c
+        grep -qE "agent-web@ .*daemon-reload" "$LOG" || { echo "$c: no reload"; return 1; }
+    done
+    # attach starts nothing: no check, no reload
+    : > "$LOG"; UNREAD=agent run "$O" attach k8s.main
+    ! grep -q NeedDaemonReload "$LOG"
+    # a failed reload stops it before the start
+    : > "$LOG"; UNREAD=agent REMOTE_RC=1 run "$O" new k8s
+    [ "$status" -ne 0 ] && [[ "$output" == *"the reload failed"* ]] && ! octl_call | grep -q '^enable' || { echo "$output"; return 1; }
 }
 
 @test "apply enables the queue workers' path and timer units globally, and says so once they are" {
@@ -1938,6 +1971,36 @@ S
     run "$P"; [ ! -e "$E/.pending" ]
 }
 
+@test "a running manager that hasn't read the changed user units: every run says to reload, --check fails, until it has" {
+    run "$P" --confirm; [ "$status" -eq 0 ]
+    [[ "$output" == *"next: agent reload (the agents' user units changed), then agent update"* ]] || { echo "$output"; return 1; }
+    # the managers run, each with a session or worker loaded; UNREAD: those holding old units
+    cat > "$T/bin/systemctl" <<'S'
+#!/bin/bash
+if [ "$1" = --user ]; then
+    case "$4" in
+        is-active) exit 0 ;;
+        list-units) echo "${3%@}-session@k8s.main.service loaded active running x" ;;
+        show) case " ${UNREAD:-} " in *" ${3%@} "*) echo yes ;; *) echo no ;; esac ;;
+        *) echo "systemctl $*" >> "$LOG" ;;
+    esac
+    exit 0
+fi
+case "$1" in is-enabled) [ -n "${NFT_LOADED:-}" ]; exit ;; is-active) case "$3" in user@*) exit 0 ;; esac; [ -n "${NFT_LOADED:-}" ]; exit ;; esac
+echo "systemctl $*" >> "$LOG"
+S
+    for i in 1 2; do
+        UNREAD="agent agent-guard" run "$P" --confirm
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        [[ "$output" == *"next: agent reload (the user managers of agent agent-guard haven't read the agents' changed user units yet)"* ]] || { echo "$output"; return 1; }
+    done
+    # --check: said even when other drift ends the run first (a converged run then fails on it alone)
+    UNREAD=agent-web run "$P" --check
+    [ "$status" -eq 1 ] && [[ "$output" == *"of agent-web haven't read"* ]] || { echo "$output"; return 1; }
+    run "$P" --check
+    [[ "$output" != *"next:"* ]] || { echo "$output"; return 1; }
+}
+
 @test "clean(): NUL or a bidi control can't split a C1 or ESC sequence past the filter" {
     eval "$(sed -n '/^clean() {/,/^}/p' "$REPO/agents/operator")"
     out="$(printf 'a\xc2\x00\x9b31mb \x1b\xe2\x80\x8e[2Jc \xc2\xe2\x81\xa6\x9d52;c;x\x07d\n' | clean)"
@@ -2060,6 +2123,7 @@ S
 #!/bin/bash
 if [ "$1" = --user ]; then
     [ "$4" = is-active ] && { [ "$3" = agent-web@ ] && [ "$6" = agent-web-worker.path ] && exit 3; exit 0; }
+    case "$4" in list-units|show) exit 0 ;; esac   # read-only queries
     echo "systemctl $*" >> "$LOG"; exit 0
 fi
 case "$1" in is-enabled) [ -n "${NFT_LOADED:-}" ]; exit ;; is-active) case "$3" in user@*) exit 0 ;; esac; [ -n "${NFT_LOADED:-}" ]; exit ;; esac

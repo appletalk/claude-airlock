@@ -91,6 +91,11 @@ To change limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see th
 `--confirm` to apply it. `--check` reports drift; `sudo /usr/local/lib/airlock-agents/host-test.sh`
 checks the whole setup live, as each user.
 
+When an apply changes the agents' user units, it ends with `next: claude-agent reload`, and says
+so on every later run (`--check` fails) until each running agent manager has read them. `new` and
+`restart` reload first by themselves when the session's own unit changed, so a session never
+starts on the old one.
+
 Limits apply at once. A changed sandbox (paths, isolation) reaches a running agent user only when
 its manager restarts; apply names those. Reboot, or `systemctl restart user@<uid>` (it ends that user's sessions).
 
@@ -125,6 +130,23 @@ By default the session's tmux doesn't pass clipboard writes on to your terminal.
 in `agents.conf` passes Claude's copy (select, then Ctrl+C) on. Either way the tmux runs as the
 agent user, which could change that setting itself, so the real control is your terminal: use
 one that asks before a program writes the clipboard (OSC 52), or turn that off there.
+
+#### Terminals
+
+- **foot**: copy works with `clipboard on`; Shift+Enter is a new line in Claude's prompt.
+- **Windows Terminal** (WSL): copy works with `clipboard on` (tmux knows `xterm*` terminals take
+  OSC 52). Clipboard reads stay off: tmux doesn't pass them on, and Windows Terminal doesn't
+  answer them. Shift+Enter arrives as a plain Enter, so Claude would submit; bind it to send
+  ESC CR, which Claude reads as a new line. In `settings.json`, recent versions:
+
+  ```json
+  "actions":     [ { "command": { "action": "sendInput", "input": "\u001b\r" }, "id": "User.claudeNewline" } ],
+  "keybindings": [ { "id": "User.claudeNewline", "keys": "shift+enter" } ]
+  ```
+
+  Older versions take `"keys": "shift+enter"` on the action itself. The binding applies to every
+  profile (in a plain shell ESC CR is harmless). Without it, Ctrl+Enter is a new line; Alt+Enter
+  is Windows Terminal's fullscreen.
 
 ### Removing a user, renaming, resizing
 
