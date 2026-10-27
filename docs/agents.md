@@ -92,9 +92,9 @@ To change limits: edit `agents.conf`, then `sudo airlock-agents-apply` to see th
 checks the whole setup live, as each user.
 
 When an apply changes the agents' user units, it ends with `next: claude-agent reload`, and says
-so on every later run (`--check` fails) until each running agent manager has read them. `new` and
-`restart` reload first by themselves when the session's own unit changed, so a session never
-starts on the old one.
+so on every later run (`--check` fails) until each running agent manager has read them. `new`,
+`restart` and the `web` commands that start a session reload first by themselves when that
+session's unit (or a drop-in of it) changed, so it doesn't start on the old one.
 
 Limits apply at once. A changed sandbox (paths, isolation) reaches a running agent user only when
 its manager restarts; apply names those. Reboot, or `systemctl restart user@<uid>` (it ends that user's sessions).

@@ -352,14 +352,17 @@ octl_call() {  # the systemctl arguments octl sent, from the log
     # agent-web's manager, never agent's
     : > "$LOG"; UNREAD=agent-web REMOTE_OUT="agent-web-session@main.service loaded active running x" run "$O" web restart
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -qE "agent-web@ .*daemon-reload" "$LOG"; ! grep -qE " agent@ .*daemon-reload" "$LOG"
+    grep -qE "agent-web@ .*daemon-reload" "$LOG"
+    ! grep -qE " agent@ .*daemon-reload" "$LOG" || { echo "reloaded agent's manager"; return 1; }
+    # and before the start
     for c in "web new research2" "web"; do
         : > "$LOG"; UNREAD=agent-web REMOTE_OUT="" run "$O" $c
-        grep -qE "agent-web@ .*daemon-reload" "$LOG" || { echo "$c: no reload"; return 1; }
+        first="$(grep -nE "agent-web@ .*(daemon-reload|start agent-web-session@)" "$LOG" | head -1)"
+        [[ "$first" == *daemon-reload* ]] || { echo "$c: no reload before the start"; cat "$LOG"; return 1; }
     done
     # attach starts nothing: no check, no reload
     : > "$LOG"; UNREAD=agent run "$O" attach k8s.main
-    ! grep -q NeedDaemonReload "$LOG"
+    ! grep -q NeedDaemonReload "$LOG" || { echo "attach checked the unit"; return 1; }
     # a failed reload stops it before the start
     : > "$LOG"; UNREAD=agent REMOTE_RC=1 run "$O" new k8s
     [ "$status" -ne 0 ] && [[ "$output" == *"the reload failed"* ]] && ! octl_call | grep -q '^enable' || { echo "$output"; return 1; }
