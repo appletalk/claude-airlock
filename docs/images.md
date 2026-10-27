@@ -31,6 +31,8 @@ provider downloads, no collection resolution, no plugin fetches. Syntax and lint
 | `ansible-lint` | playbook and role lint (`ANSIBLE_LINT_NODEPS=1` is set image-wide, see below) |
 | `vector validate --no-environment` | config parse and topology, no component or health checks |
 | `alloy fmt -t`, `alloy validate` | Alloy syntax and formatting, component references and argument schemas |
+| `envoy --mode validate -c` | Envoy config schema, references and filters, no listener opened. The binary also runs a whole proxy against local upstreams (`--disable-hot-restart`), to test a config end to end |
+| `luajit` | Lua 5.1 as Envoy's Lua filter runs it, for unit tests of filter code outside Envoy |
 | `Invoke-ScriptAnalyzer` (pwsh) | PowerShell lint. Bundles the Windows PowerShell 5.1 **compatibility profiles**, so `PSUseCompatibleSyntax` / `PSUseCompatibleCommands` can catch 7.x-only syntax that would fail on a 5.1 guest. |
 | `shellcheck` | shell lint; also what this repo's `make lint` and pre-commit hook run |
 | `bats` | shell test runner; this repo's `make test` |

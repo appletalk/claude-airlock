@@ -18,6 +18,44 @@
 ARG BASE_IMAGE=claude-airlock:base
 ARG OS_IMAGE=claude-airlock:os
 FROM ${BASE_IMAGE} AS claude
+
+# Envoy, fetched and verified in a throwaway stage so gpg and the key never reach the image
+# (only the binary is copied in, in the validators section below). Verified as airlock-envoy's
+# install-envoy.sh does it: the release's checksum list must carry a good signature from the
+# pinned Envoy maintainers key (envoy-release-key.asc, the same file as airlock-envoy's), and
+# the binary must match its line in that list. A re-signed or re-tagged release fails the
+# build. Bump: ENVOY_VERSION, and the key only if the maintainers rotate it.
+FROM ${OS_IMAGE} AS envoy
+USER root
+ARG ENVOY_VERSION=1.40.0
+ARG ENVOY_KEY_FPR=0AFCE836BA4D1D35763C8523D8CDC3750181F31F
+COPY envoy-release-key.asc /tmp/envoy-release-key.asc
+RUN set -eux; \
+    apt-get update; apt-get install -y --no-install-recommends gnupg; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) earch=x86_64 ;; \
+      arm64) earch=aarch_64 ;; \
+      *) echo "unsupported arch" >&2; exit 1 ;; \
+    esac; \
+    bin="envoy-${ENVOY_VERSION}-linux-${earch}"; \
+    url="https://github.com/envoyproxy/envoy/releases/download/v${ENVOY_VERSION}"; \
+    export GNUPGHOME="$(mktemp -d)"; \
+    gpg --batch --quiet --import /tmp/envoy-release-key.asc; \
+    gpg --batch --with-colons --fingerprint | awk -F: '$1 == "fpr" { print $10; exit }' | grep -qx "$ENVOY_KEY_FPR"; \
+    mkdir /out; cd /out; \
+    curl -fsSL -o checksums.txt.asc "$url/checksums.txt.asc"; \
+    curl -fsSL -o "$bin" "$url/$bin"; \
+    gpg --batch --status-fd 1 --verify checksums.txt.asc 2>/dev/null > status; \
+    awk -v f="$ENVOY_KEY_FPR" '$2 == "VALIDSIG" && $NF == f { ok = 1 } \
+      $2 ~ /^(REVKEYSIG|EXPKEYSIG|EXPSIG|BADSIG|ERRSIG|ERROR|FAILURE|NODATA)$/ { bad = 1 } \
+      END { exit !(ok && !bad) }' status; \
+    gpg --batch --quiet --decrypt checksums.txt.asc 2>/dev/null > list; \
+    awk -v f="$bin" '{ n = $2; sub(/.*\//, "", n) } n == f && !done { print $1 "  " f; done = 1 }' list > sum; \
+    test -s sum; \
+    sha256sum -c sum; \
+    install -m 0555 "$bin" /out/envoy; \
+    /out/envoy --version | grep -F "/${ENVOY_VERSION}/"
+
 FROM ${OS_IMAGE}
 
 USER root
@@ -53,6 +91,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #
 # unzip: terraform, tflint, alloy and the PSScriptAnalyzer .nupkg ship as zips.
 # drill (ldnsutils) sits beside dnsutils' dig for hosts whose tooling standardizes on ldns.
+# luajit runs Lua written for Envoy's Lua filter (LuaJIT, Lua 5.1) outside Envoy: unit tests.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       gh \
@@ -79,6 +118,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       postgresql-client \
       unzip \
       ldnsutils \
+      luajit \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY airlock-pg-start /usr/local/bin/airlock-pg-start
 RUN chmod 0555 /usr/local/bin/airlock-pg-start
@@ -258,6 +298,14 @@ RUN set -eux; \
     install -m 0555 "/tmp/alloy-linux-${arch}" /usr/local/bin/alloy; \
     rm -f /tmp/alloy.zip "/tmp/alloy-linux-${arch}"; \
     alloy --version
+
+# Envoy: `envoy --mode validate -c <config>` checks a config (schema, references, filters)
+# without opening a listener or an upstream connection. The binary also runs a whole proxy
+# in a box, against local upstreams only (minimal egress), to test a config end to end; give
+# it --disable-hot-restart (no shared memory segment) and a writable --base-id-path if any.
+# Fetched and verified in the envoy stage at the top of this file.
+COPY --from=envoy /out/envoy /usr/local/bin/envoy
+RUN envoy --version
 
 # PowerShell from the upstream tarball (Microsoft publishes no trixie apt repo,
 # and the tarball keeps this layer distro-agnostic like the Node one above).

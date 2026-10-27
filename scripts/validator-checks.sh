@@ -72,6 +72,14 @@ hdr "vector validate --no-environment"
 expect_ok   "accepts a valid topology"                    vector validate --no-environment vector/good.yaml
 expect_fail "rejects an unknown sink field"               vector validate --no-environment vector/bad.yaml
 
+hdr "envoy --mode validate (Envoy config schema, offline)"
+expect_ok   "accepts a valid static config"               envoy --mode validate -c envoy/good.yaml
+expect_fail "rejects an unknown route field"              envoy --mode validate -c envoy/bad.yaml
+
+hdr "luajit (Lua for Envoy's Lua filter, run outside it)"
+expect_ok   "runs a valid chunk"                          luajit lua/good.lua
+expect_fail "refuses a syntax error"                      luajit lua/bad.lua
+
 hdr "alloy fmt / validate (Alloy syntax + component schema)"
 expect_ok   "fmt -t accepts formatted config"             alloy fmt -t alloy/good.alloy
 expect_fail "fmt -t rejects misformatted config"          alloy fmt -t alloy/bad-fmt.alloy
