@@ -176,31 +176,36 @@ When something has gone wrong and every agent should stop now:
 claude-agent halt
 ```
 
-1. It lists what the agent users are running (also kept in
-   `~/.local/state/airlock-agents/halt-<time>.log`).
+1. It records what the agent users are running, in
+   `~/.local/state/airlock-agents/halt-<time>.log`. This takes at most 2 s, and goes only to the
+   log, so a flood can't hold up the kill. Box processes under subordinate uids aren't listed.
 2. At once, with no prompt, each agent user kills every process it may signal: its sessions, its
    boxes (their uids are mapped in a user namespace it owns) and its user manager. This runs
-   through the same host shell as the other commands.
-3. It then says what root will do, and asks sudo for your password. Root masks and stops each
-   agent user's manager (`user@<uid>.service`), so nothing starts them again: not a login,
-   lingering or a reboot. If airlock-envoy is installed, root also turns on its kill switch
-   (`airlock-envoy-apply --stop`, which cuts every box's egress, your own boxes' included), locks
-   its credentials and stops its mint timer.
+   through the same host shell as the other commands. It then shows the first lines of the record.
+3. It says what root will do, and asks sudo for your password. Root masks each agent user's
+   manager (`user@<uid>.service`), so nothing starts it again: not a login, lingering or a
+   reboot. Root then kills the manager and every session of the user. If airlock-envoy is
+   installed, root also turns on its kill switch (`airlock-envoy-apply --stop`, which cuts every
+   box's egress, your own boxes' included) and locks its credentials. The managers' stop comes
+   last.
 
-Every step runs even if one before it failed. Run `halt` again if a root step failed. While
-halted, the other commands refuse and point at `resume`.
+Every step runs even if one before it failed. Run `halt` again if a root step failed; the record
+of what the first run found is kept. While halted, the other commands refuse and point at
+`resume`, and tab completion offers nothing.
 
 ```
 claude-agent resume
 ```
 
-As root, `resume` lifts airlock-envoy's kill switch, unless it was already on before `halt`.
-It then unmasks and starts the agents' managers, and their sessions come back by themselves.
-Then it runs `airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a
-relaunch, because the sockets are new files.
+As root, `resume` lifts airlock-envoy's kill switch if `halt` turned it on. It leaves the switch
+alone if it was on before `halt`, or if no halt was recorded. Then it unmasks and starts the
+agents' managers, and their sessions come back by themselves. Finally it runs
+`airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a relaunch, because
+the sockets are new files.
 
-`halt` revokes the tokens of a GitHub App whose key is in pass. A file-key App's tokens stay
-valid at GitHub until they expire, within the hour. Nothing can use them while Envoy is stopped.
+Locking revokes the tokens of a GitHub App whose key is in pass. airlock-envoy's mint timer keeps
+running, so a revoke that failed is retried. A file-key App's tokens stay valid at GitHub until
+they expire, within the hour. Nothing can use them while Envoy is stopped.
 
 ## Web research
 

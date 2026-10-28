@@ -336,8 +336,9 @@ octl_call() {  # the systemctl arguments octl sent, from the log
     if grep -q "agent-guard@" "$LOG"; then echo "agent-guard isn't provisioned"; return 1; fi
 }
 
-# halt/resume: sudo runs the root script for real (as the test user), with systemctl, ps and the
-# airlock-envoy tools stubs that log; MASKED makes systemctl is-enabled answer "masked".
+# halt/resume: sudo runs the root script for real (as the test user), with systemctl, loginctl, ps
+# and airlock-envoy's tools stubs that log (its --stop/--start make and remove the stopped file);
+# MASKED makes systemctl is-enabled answer "masked" for agent's manager alone.
 halt_stubs() {
     op_stubs
     echo "agent:x:1100:1100::/home/agent:/bin/bash" >> "$PASSWD"
@@ -350,36 +351,49 @@ exec "$@"
 S
     cat > "$T/bin/systemctl" <<'S'
 #!/bin/bash
-case "$1" in is-enabled) [ -n "${MASKED:-}" ] && echo masked; exit 0 ;; esac
+case "$1" in is-enabled) [ -n "${MASKED:-}" ] && [ "$2" = user@1100.service ] && echo masked; exit 0 ;; esac
 echo "systemctl $*" >> "$LOG"
+[ "$1" != "${FAIL_SYSTEMCTL:-}" ]
 S
     printf '#!/bin/bash\necho "ps $*" >> "$LOG"\nprintf "agent 4242 01:00 claude \\033]0;evil\\007--x\\n"\n' > "$T/bin/ps"
+    export AGENTS_ENVOY_SBIN="$T/envoy" AGENTS_HALT_MARK="$T/halted" AGENTS_ENVOY_STOPPED="$T/envoy-stopped" XDG_STATE_HOME="$T/state"
     mkdir -p "$T/envoy"
-    for c in airlock-envoy-apply airlock-envoy-cred; do printf '#!/bin/bash\necho "%s $*" >> "$LOG"\n' "$c" > "$T/envoy/$c"; done
+    cat > "$T/envoy/airlock-envoy-apply" <<'S'
+#!/bin/bash
+echo "airlock-envoy-apply $*" >> "$LOG"
+case "$1" in --stop) : > "$AGENTS_ENVOY_STOPPED" ;; --start) rm -f "$AGENTS_ENVOY_STOPPED" ;; esac
+S
+    printf '#!/bin/bash\necho "airlock-envoy-cred $*" >> "$LOG"\n' > "$T/envoy/airlock-envoy-cred"
     chmod +x "$T/bin/sudo" "$T/bin/systemctl" "$T/bin/ps" "$T/envoy/"*
-    export AGENTS_HALT_MARK="$T/halted" AGENTS_ENVOY_STOPPED="$T/envoy-stopped" XDG_STATE_HOME="$T/state"
 }
 
-@test "agent halt: kills each provisioned agent user's processes first, says why before sudo, then masks and stops their managers and stops Envoy" {
+@test "agent halt: kills each provisioned agent user's processes first, says why before sudo, then masks, kills, cuts Envoy and stops" {
     halt_stubs
-    PATH="$T/envoy:$PATH" run "$O" halt
+    run "$O" halt
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     # phase 1, no sudo: each user kills what it may signal (agent-guard isn't provisioned)
     grep -qx "machinectl shell -q agent@ $T/nd/sh -c kill -KILL -1" "$LOG"
     grep -qx "machinectl shell -q agent-web@ $T/nd/sh -c kill -KILL -1" "$LOG"
+    [[ "$output" == *"agent: killed"*"agent-web: killed"* ]]
     if grep -q "agent-guard@" "$LOG"; then echo "agent-guard isn't provisioned"; return 1; fi
     [ "$(grep -n 'kill -KILL' "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^sudo' "$LOG" | cut -d: -f1)" ]
     # the reason comes before the prompt, and names what root will do
     before="${output%%SUDO-RAN*}"
-    [[ "$before" == *"next, as root"*"mask and stop"*"agent agent-web"*"airlock-envoy's egress"*"sudo asks for your password"* ]] || { echo "$before"; return 1; }
-    # one sudo; root's steps in order, Envoy included
+    [[ "$before" == *"next, as root"*"mask, kill and"*"agent agent-web"*"airlock-envoy's egress"*"sudo asks for your password"* ]] || { echo "$before"; return 1; }
+    # one sudo; root's steps in order: mask, kill (manager and sessions), Envoy, then the slow stop
     [ "$(grep -c '^sudo' "$LOG")" = 1 ]
-    grep -qx "systemctl mask user@1100.service user@1101.service" "$LOG"
-    grep -qx "systemctl kill -s KILL user@1100.service user@1101.service" "$LOG"
-    grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG"
-    grep -qx "airlock-envoy-apply --stop" "$LOG"
-    grep -qx "airlock-envoy-cred lock" "$LOG"
-    grep -qx "systemctl disable --now airlock-envoy-mint.timer" "$LOG"
+    grep -vE '^(machinectl|ps|sudo) ' "$LOG" > "$T/root-steps"
+    diff - "$T/root-steps" <<E
+systemctl mask user@1100.service user@1101.service
+systemctl kill -s KILL user@1100.service user@1101.service
+loginctl terminate-user 1100
+loginctl terminate-user 1101
+airlock-envoy-apply --stop
+airlock-envoy-cred lock
+systemctl stop user@1100.service user@1101.service
+E
+    # the mint timer keeps running: it retries the revokes the lock started
+    if grep -q 'airlock-envoy-mint' "$LOG"; then echo "touched the mint timer"; return 1; fi
     grep -q '^halted ' "$T/halted" && ! grep -q envoy-already-stopped "$T/halted"
     # the record: what ran, cleaned (an agent's command line can carry escapes), kept in a log
     [[ "$output" == *"agent 4242 01:00 claude"* && "$output" != *$'\033'* ]]
@@ -389,56 +403,79 @@ S
 
 @test "agent halt without airlock-envoy: the agents only, and the message says so" {
     halt_stubs
-    PATH="$T/bin:/usr/bin:/bin" run "$O" halt
+    AGENTS_ENVOY_SBIN="$T/none" run "$O" halt
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -qx "systemctl mask user@1100.service user@1101.service" "$LOG"
     if grep -q "airlock-envoy" "$LOG" || [[ "$output" == *"airlock-envoy's egress"* ]]; then echo "envoy steps without envoy"; return 1; fi
 }
 
-@test "agent halt: missing execute-only copies don't stop it (the root step still masks and stops); a failed root step fails it" {
+@test "agent halt: missing execute-only copies don't stop it (root still masks, kills and stops); a failed root step fails it, every step running" {
     halt_stubs
     rm -f "$STATS"/*
     run "$O" halt
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     if grep -q 'kill -KILL' "$LOG"; then echo "ran the readable originals"; return 1; fi
-    [[ "$output" == *"left to the managers' stop"* ]]
+    [[ "$output" == *"left to root's kill"* ]]
     grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG"
-    printf '#!/bin/bash\ncase "$1" in is-enabled) exit 0 ;; mask) exit 1 ;; esac\necho "systemctl $*" >> "$LOG"\n' > "$T/bin/systemctl"
-    : > "$LOG"; run "$O" halt
+    rm -f "$T/halted"; : > "$LOG"
+    FAIL_SYSTEMCTL=mask run "$O" halt
     [ "$status" -ne 0 ] && [[ "$output" == *"a root step failed"* ]]
-    grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG"   # every step runs anyway
+    grep -qx "airlock-envoy-apply --stop" "$LOG" && grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG"
 }
 
-@test "agent resume: Envoy back first, then the managers unmasked and started, then the unlock; a kill switch on before halt stays on" {
+@test "agent resume: Envoy back first, then the managers unmasked and started, then the unlock" {
     halt_stubs
-    PATH="$T/envoy:$PATH" run "$O" halt
-    : > "$LOG"
-    PATH="$T/envoy:$PATH" run "$O" resume
+    run "$O" halt; : > "$LOG"
+    run "$O" resume
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     before="${output%%SUDO-RAN*}"
-    [[ "$before" == *"unmask and start"*"agent agent-web"*"kill switch"*"sudo asks for your password"* ]] || { echo "$before"; return 1; }
+    [[ "$before" == *"unmask and start"*"agent agent-web"*"lift airlock-envoy's kill switch"*"sudo asks for your password"* ]] || { echo "$before"; return 1; }
     [ "$(grep -n 'airlock-envoy-apply --start' "$LOG" | cut -d: -f1)" -lt "$(grep -n 'systemctl start user@' "$LOG" | cut -d: -f1)" ]
     grep -qx "systemctl unmask user@1100.service user@1101.service" "$LOG"
     grep -qx "systemctl start user@1100.service user@1101.service" "$LOG"
     [ "$(tail -1 "$LOG")" = "airlock-envoy-cred unlock" ]
-    [ ! -e "$T/halted" ]
-    # the operator had the kill switch on already: halt notes it, resume leaves it on
-    : > "$T/envoy-stopped"; PATH="$T/envoy:$PATH" run "$O" halt; : > "$LOG"
-    grep -qx envoy-already-stopped "$T/halted"
-    PATH="$T/envoy:$PATH" run "$O" resume
-    if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "lifted a kill switch halt didn't set"; return 1; fi
-    [[ "$output" == *"was on before halt: left on"* ]]
+    [ ! -e "$T/halted" ] && [ ! -e "$T/envoy-stopped" ]
 }
 
-@test "while halted, the other commands refuse and point at resume; halt, resume and help still run" {
+@test "agent resume leaves on a kill switch halt didn't set: on before halt, or no halt at all; a second halt keeps the first one's record" {
     halt_stubs
-    for c in ls "new p" "attach p" update reload; do
+    # on before halt
+    : > "$T/envoy-stopped"; run "$O" halt; : > "$LOG"
+    grep -qx envoy-already-stopped "$T/halted"
+    run "$O" resume
+    if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "lifted a kill switch halt didn't set"; return 1; fi
+    [[ "${output%%SUDO-RAN*}" == *"was on before halt: left on"* && "$output" == *"left on"* ]]
+    # halt twice (as its failure message says to): the second must not record the first's switch
+    rm -f "$T/envoy-stopped" "$T/halted"
+    run "$O" halt; run "$O" halt; : > "$LOG"
+    if grep -q envoy-already-stopped "$T/halted"; then echo "second halt recorded its own switch"; return 1; fi
+    run "$O" resume
+    grep -qx "airlock-envoy-apply --start" "$LOG"
+    # no halt recorded (a kill switch set by hand): left alone
+    : > "$T/envoy-stopped"; : > "$LOG"
+    run "$O" resume
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "lifted a hand-set kill switch"; return 1; fi
+    [[ "$output" == *"no halt recorded"* ]]
+}
+
+@test "agent resume: a failed root step keeps the halt record" {
+    halt_stubs
+    run "$O" halt
+    FAIL_SYSTEMCTL=start run "$O" resume
+    [ "$status" -ne 0 ] && [ -e "$T/halted" ]
+}
+
+@test "while halted (agent's manager masked), the other commands refuse and point at resume; completion is silent; halt, resume and help still run" {
+    halt_stubs
+    for c in ls "new p" "attach p" update reload "web ls"; do
         MASKED=1 run "$O" $c
         [ "$status" -ne 0 ] && [[ "$output" == *"halted"*"agent resume first"* ]] || { echo "$c: $output"; return 1; }
     done
+    MASKED=1 run "$O" _complete sessions; [ "$status" -eq 0 ] && [ -z "$output" ]
     MASKED=1 run "$O" help; [ "$status" -eq 0 ]
-    MASKED=1 run "$O" resume; [ "$status" -eq 0 ]
     if grep -q '^machinectl' "$LOG"; then echo "a refused command reached an agent"; return 1; fi
+    MASKED=1 run "$O" resume; [ "$status" -eq 0 ]
 }
 
 @test "the root scripts refuse a uid that isn't a number" {
