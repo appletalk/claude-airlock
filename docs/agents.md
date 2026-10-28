@@ -177,7 +177,7 @@ claude-agent halt
 ```
 
 1. It records what the agent users are running, in
-   `~/.local/state/airlock-agents/halt-<time>.log`. This takes at most 2 s, and goes only to the
+   `~/.local/state/airlock-agents/halt-<time>.log`. This takes at most 3 s, and goes only to the
    log, so a flood can't hold up the kill. Box processes under subordinate uids aren't listed.
    If the directory can't be written (a full disk, say), halt goes on without the record.
 2. At once, with no prompt, each agent user kills every process it may signal: its sessions, its

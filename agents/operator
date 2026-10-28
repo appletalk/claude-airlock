@@ -492,6 +492,10 @@ ROOT_HALT='
 umask 022   # the mark is for the operator to read too
 mark=$1 stopped=$2 sbin=$3 credstate=$4; shift 4
 rc=0; units=()
+# An interrupt (Ctrl-C, the terminal closed) cuts the step running, never the ones after it. A
+# handler, not an ignore: a hung child can still be interrupted.
+trap "echo \"    (interrupted: going on with the next step)\" >&2; rc=1" INT HUP TERM QUIT
+newnonce() { local n; n=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d " \n"); [ -n "$n" ] || n=$(tr -d - < /proc/sys/kernel/random/uuid); printf "%s" "$n"; }
 for u; do case "$u" in ""|0|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; units+=("user@$u.service"); done
 mkdir -p "$(dirname "$mark")"
 [ -e "$mark" ] || echo "halted $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$mark" || rc=1
@@ -513,8 +517,8 @@ if [ -x "$sbin/airlock-envoy-apply" ] && [ -d "$(dirname "$stopped")" ]; then
     # Claimed on the switch being on, whatever --stop returned (it writes the file first).
     sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
     if [ "$ours" = 1 ] && [ -e "$stopped" ]; then
-        nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d " \n")
-        { printf "%s" "$nonce" > "$stopped" && echo "envoy-stopped-by-halt $nonce" >> "$mark"; } || rc=1
+        nonce=$(newnonce)
+        { [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && echo "envoy-stopped-by-halt $nonce" >> "$mark"; } || rc=1
     fi
     sed -i "/^envoy-claim-pending$/d" "$mark" || rc=1
 elif [ -x "$sbin/airlock-envoy-apply" ]; then
@@ -536,13 +540,14 @@ ROOT_RESUME='
 umask 022
 mark=$1 stopped=$2 sbin=$3; shift 3
 rc=0; units=()
+newnonce() { local n; n=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d " \n"); [ -n "$n" ] || n=$(tr -d - < /proc/sys/kernel/random/uuid); printf "%s" "$n"; }
 for u; do case "$u" in ""|0|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; units+=("user@$u.service"); done
 # Only the kill switch a halt left (its nonce in the file); the line goes once lifted, so a
 # retry leaves Envoy alone. A --start that undoes itself writes the switch again: claimed again.
 nonce=$(sed -n "s/^envoy-stopped-by-halt //p" "$mark" 2>/dev/null)
 # A halt cut short between its --stop and the nonce: the switch it turned on is its own.
 if [ -z "$nonce" ] && grep -qx envoy-claim-pending "$mark" 2>/dev/null && [ -e "$stopped" ]; then
-    nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d " \n")
+    nonce=$(newnonce)
     printf "%s" "$nonce" > "$stopped" && sed -i "/^envoy-claim-pending$/d" "$mark" && echo "envoy-stopped-by-halt $nonce" >> "$mark" || rc=1
 fi
 if [ -n "$nonce" ]; then
@@ -559,7 +564,7 @@ if [ -n "$nonce" ]; then
         else
             rc=1
             if [ -e "$stopped" ]; then
-                nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d " \n")
+                nonce=$(newnonce)
                 printf "%s" "$nonce" > "$stopped" && sed -i "s/^envoy-stopped-by-halt .*/envoy-stopped-by-halt $nonce/" "$mark"
             fi
         fi
@@ -605,7 +610,7 @@ halt() {
     # All at once, never on the terminal (machinectl would take it: a background job under
     # timeout stops on it, and typed-ahead keys would go to a pty the agent owns).
     echo "==> killing every process of ${users[*]}"
-    : > "$HALTING" 2>/dev/null || echo "    (no halting mark: the state directory can't be written; your other commands still work until root's mask)"
+    { : > "$HALTING"; } 2>/dev/null || echo "    (no halting mark: the state directory can't be written; your other commands still work until root's mask)"
     if nd_ok >/dev/null; then
         local pids=() i
         for u in "${users[@]}"; do
@@ -637,10 +642,10 @@ halt() {
 resume() {
     local users uids envoy="" line unlock=0
     agent_users
-    [ ${#users[@]} -gt 0 ] || die "no agent user is provisioned"
+    [ ${#users[@]} -gt 0 ] || die "no agent user is provisioned (to clear a halt left from before: rm $HALTING)"
     # The mark is readable; Envoy's config directory isn't (root decides, and says what it did).
     line=$(sed -n 's/^envoy-stopped-by-halt //p' "$HALT_MARK" 2>/dev/null || true)
-    if [ -n "$line" ]; then envoy=", and lift airlock-envoy's kill switch if it is still the one the halt turned on"
+    if [ -n "$line" ] || grep -qx envoy-claim-pending "$HALT_MARK" 2>/dev/null; then envoy=", and lift airlock-envoy's kill switch if it is still the one the halt turned on"
     elif have_apply; then envoy=" (airlock-envoy: no kill switch of a halt to lift, left as it is)"
     fi
     # Unlocked when halted: resume ends with the unlock (read before root removes the mark).

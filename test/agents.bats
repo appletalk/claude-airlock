@@ -607,6 +607,22 @@ E
     grep -q "^envoy-stopped-by-halt " "$T/halted" && ! grep -q envoy-claim-pending "$T/halted"
 }
 
+@test "a halt killed right after its --stop (root's script dies): the next halt claims the switch, resume lifts it; an interrupt goes on with the next step" {
+    halt_stubs
+    cp "$T/envoy/airlock-envoy-apply" "$T/apply.ok"
+    printf '#!/bin/bash\necho "airlock-envoy-apply $*" >> "$LOG"\n[ "$1" = --stop ] && { /usr/bin/install -m 0644 /dev/null "$AGENTS_ENVOY_STOPPED"; kill -KILL $PPID; }\nexit 0\n' > "$T/envoy/airlock-envoy-apply"
+    run "$O" halt; [ "$status" -ne 0 ]
+    grep -qx envoy-claim-pending "$T/halted" && [ -e "$T/envoy-stopped" ]
+    mv "$T/apply.ok" "$T/envoy/airlock-envoy-apply"
+    run "$O" halt; [ "$status" -eq 0 ] && grep -q "^envoy-stopped-by-halt " "$T/halted" || { echo "$output"; return 1; }
+    : > "$LOG"; run "$O" resume
+    [ "$status" -eq 0 ] && grep -qx "airlock-envoy-apply --start" "$LOG" || { echo "$output"; return 1; }
+    # an INT to root's script while a step runs: the later steps still run
+    printf '#!/bin/bash\necho "airlock-envoy-apply $*" >> "$LOG"\n[ "$1" = --stop ] && { /usr/bin/install -m 0644 /dev/null "$AGENTS_ENVOY_STOPPED"; kill -INT $PPID; sleep 0.2; }\nexit 0\n' > "$T/envoy/airlock-envoy-apply"
+    : > "$LOG"; run "$O" halt
+    [ "$status" -ne 0 ] && [[ "$output" == *"interrupted: going on"* ]] && grep -qx "airlock-envoy-cred lock" "$LOG" && grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG" || { echo "$output"; cat "$LOG"; return 1; }
+}
+
 @test "apply: a masked slice is not the halt's (it says to move it away)" {
     halt_stubs
     run "$P" --confirm
