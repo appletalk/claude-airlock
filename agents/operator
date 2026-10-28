@@ -280,15 +280,17 @@ state_class() {
         *) echo inflight ;;
     esac
 }
-# The tests set file times with touch (mtime); a real queue goes by ctime, which no user can set.
-case "${AGENTS_TEST_WHEN:-}" in mtime) WHEN_FIELD=st_mtime ;; *) WHEN_FIELD=st_ctime ;; esac
+# The tests set file times with touch (mtime): a test hook, honoured only with the tests' own
+# agents.env (AIRLOCK_AGENTS_ENV). A real queue goes by ctime, which no user can set.
+WHEN_FIELD=st_ctime
+[ -z "${AIRLOCK_AGENTS_ENV:-}" ] || [ "${AGENTS_TEST_WHEN:-}" != mtime ] || WHEN_FIELD=st_mtime
 # Every entry, newest first: "<id>US<state>US<class>US<when>" (US = \x1f; a state has spaces).
 # An entry is an id in requests/, held/, quarantine/ or answers/ (the agent can delete its
-# request and leave the rest). <when> is the epoch its request appeared (else its oldest other
-# file), by ctime: the agent picks an id's time, never a file's ctime. The stage logs are read once
+# request and leave the rest). <when> is the epoch of its newest file (an answer that came today
+# to an old question is recent), by ctime: the agent picks an id's time, never a file's ctime. The stage logs are read once
 # for all ids, whole, as last_stage reads them (no link, a regular file, 64 MB at most).
 web_rows() {
-    local id w g
+    local id w g t cl
     python3 -I -c 'import os, re, stat, sys
 root, web, guard, field = sys.argv[1:5]
 ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}")
@@ -341,17 +343,19 @@ for d, suffix in (("requests", ".json"), ("held", ".json"), ("quarantine", ""), 
             t = int(getattr(os.lstat(os.path.join(root, d, e)), field))
         except OSError:
             continue
-        if d == "requests":
-            when[n] = ("r", t)
-        elif when.get(n, ("x", 0))[0] != "r":
-            when[n] = ("o", min(t, when.get(n, ("o", t))[1]))
+        when[n] = max(t, when.get(n, 0))
 w, g = stages(web), stages(guard)
-for i in sorted(when, key=lambda i: (when[i][1], i), reverse=True):
-    print("%s\x1f%s\x1f%s\x1f%d" % (i, w.get(i, ""), g.get(i, ""), when[i][1]))' "$QUEUE" "$WEB" "$GUARD" "$WHEN_FIELD" \
+for i in sorted(when, key=lambda i: (when[i], i), reverse=True):
+    print("%s\x1f%s\x1f%s\x1f%d" % (i, w.get(i, ""), g.get(i, ""), when[i]))' "$QUEUE" "$WEB" "$GUARD" "$WHEN_FIELD" \
     | while IFS=$'\x1f' read -r id w g t; do
         [[ "$id" =~ $ID_RE && "$t" =~ ^[0-9]+$ ]] || continue
         STAGE_WEB=$w STAGE_GUARD=$g web_state_set "$id"
-        printf '%s\x1f%s\x1f%s\x1f%s\n' "$id" "$STATE" "$(state_class "$STATE")" "$t"
+        case "$STATE" in
+            answered|"released by "*|rejected) cl="done" ;;
+            held|quarantined*|failed*|changed*|"gate failed"*) cl=waiting ;;
+            *) cl=inflight ;;
+        esac
+        printf '%s\x1f%s\x1f%s\x1f%s\n' "$id" "$STATE" "$cl" "$t"
     done
 }
 # A time as epoch seconds, to compare with an entry's <when>.
@@ -626,19 +630,19 @@ rc=0 gone=0 kept=0
 # step, a regular file, never blocking, 64 MB at most (the logs are the workers, who can swap
 # them for a link or a FIFO). "<web stage>US<guard stage>".
 last() {
-    python3 -I - "$q" "$web" "$guard" "$1" <<"PY"
+    python3 -I - "$q" "$web" "$guard" "$1" "${2:-}" "${3:-}" <<"PY"
 import os, re, stat, sys
-root, web, guard, i = sys.argv[1:5]
+root, web, guard, i, wo, go = sys.argv[1:7]
 STAGE = re.compile(rb""".*"stage":"([a-z]*)","result":"([a-z0-9 ,;()\x27-]*)".*""")
 ref = ("\"id\":\"%s\"" % i).encode()
-def last(user):
+def last(user, off):
     try:
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         for p in ("log", user):
             fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         f = os.open("stages.jsonl", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         if not stat.S_ISREG(os.fstat(f).st_mode):
-            return ""
+            return "", not off.isdigit()
         data, cap = b"", 67108864
         while len(data) < cap:
             c = os.read(f, min(1048576, cap - len(data)))
@@ -646,14 +650,18 @@ def last(user):
                 break
             data += c
     except OSError:
-        return ""
+        return "", not off.isdigit()
     st = ""
     for line in data.split(b"\n"):
         if ref in line:
             m = STAGE.fullmatch(line)
             st = (m.group(1) + b": " + m.group(2)).decode() if m else ""
-    return st
-print("%s\x1f%s" % (last(web), last(guard)))
+    # logged anew for this id past where a retry saw the log end (no retry: always anew; a log
+    # that cant be read shows nothing anew, so a pending retry stays kept)
+    new = not off.isdigit() or ref in data[int(off):]
+    return st, new
+(ws, wn), (gs, gn) = last(web, wo), last(guard, go)
+print("%s\x1f%s\x1f%d" % (ws, gs, 1 if (wn or gn) else 0))
 PY
 }
 for e; do
@@ -666,14 +674,17 @@ for e; do
         held) { [ -e "$q/held/$id.json" ] && [ ! -e "$q/decisions/$id.approve" ] && [ ! -e "$q/answers/$id.md" ]; } || ok=0 ;;
         quarantined) { [ -e "$q/quarantine/$id" ] && [ ! -e "$q/answers/$id.md" ] && [ ! -e "$q/decisions/$id.release" ]; } || ok=0 ;;
         releasefailed|failed)
-            IFS=$(printf "\037") read -r ws gs < <(last "$id")
+            wo="" go=""
+            [ ! -f "$q/decisions/$id.retry" ] || read -r wo go < <(head -c 64 "$q/decisions/$id.retry"; echo)
+            [[ "$wo" =~ ^[0-9]{1,15}$ && "$go" =~ ^[0-9]{1,15}$ ]] || { wo=""; go=""; }
+            IFS=$(printf "\037") read -r ws gs new < <(last "$id" "$wo" "$go")
             case "$cl:$ws:$gs" in
                 releasefailed:*:*"release failed, gave up"*) [ ! -e "$q/answers/$id.md" ] || ok=0 ;;
                 failed:*"gave up"*:*|failed:*changed*:*|failed:*:*"gave up"*) ;;
                 *) ok=0 ;;
             esac
-            # a retry not yet picked up: its marker holds the stage lines it saw, still the last
-            if [ -e "$q/decisions/$id.retry" ] && [ "$(head -c 512 "$q/decisions/$id.retry" 2>/dev/null)" = "$ws|$gs" ]; then ok=0; fi ;;
+            # a retry not yet picked up: no worker has logged this id since
+            [ "$new" = 1 ] || ok=0 ;;
         *) ok=0 ;;
     esac
     [ "$ok" = 1 ] || { echo "    $id changed meanwhile: kept"; kept=$((kept + 1)); continue; }
@@ -727,17 +738,23 @@ web() {
                 "gate failed"*|"quarantined, release failed"*) ;;
                 *) die "$id is $(web_state "$id"): nothing to retry" ;;
             esac
-            # For purge: a retry not picked up yet (the stage lines it saw are still the last).
-            printf '%s|%s' "$(last_stage "$WEB" "$id")" "$(last_stage "$GUARD" "$id")" > "$QUEUE/decisions/$id.retry.tmp" \
-                && chmod 0640 "$QUEUE/decisions/$id.retry.tmp" && mv -f "$QUEUE/decisions/$id.retry.tmp" "$QUEUE/decisions/$id.retry"
+            # For purge: where the stage logs end now. Until a worker logs this id past there, the
+            # retry is still to be picked up (and purge keeps it).
+            pos="$(stat -c %s -- "$QUEUE/log/$WEB/stages.jsonl" 2>/dev/null || echo 0) $(stat -c %s -- "$QUEUE/log/$GUARD/stages.jsonl" 2>/dev/null || echo 0)"
             # Only an id a worker gave up on: its state goes, so the next pass starts it over.
             # shellcheck disable=SC2016  # expanded on the worker's side
-            AS=$WEB orun /bin/sh -c 'f="$HOME/.local/state/$2-worker/$1"
+            out="$( { AS=$WEB orun /bin/sh -c 'f="$HOME/.local/state/$2-worker/$1"
                 case "$(cat "$f" 2>/dev/null)" in failed|changed) rm -f -- "$f"; echo "$2: $1 will be researched again" ;; esac' sh "$id" "$WEB" || true
             # shellcheck disable=SC2016
             AS=$GUARD orun /bin/sh -c 'f="$HOME/.local/state/$2-worker/$1"
                 case "$(cat "$f" 2>/dev/null)" in failed) rm -f -- "$f"; echo "$2: $1 will be gated again" ;;
-                    release-failed) printf "quarantined\n" > "$f.tmp" && mv -f "$f.tmp" "$f"; echo "$2: the operator'"'"'s release of $1 will be tried again" ;; esac' sh "$id" "$GUARD" || true ;;
+                    release-failed) printf "quarantined\n" > "$f.tmp" && mv -f "$f.tmp" "$f"; echo "$2: the operator'"'"'s release of $1 will be tried again" ;; esac' sh "$id" "$GUARD" || true; } )"
+            [ -z "$out" ] || printf '%s\n' "$out"
+            # the marker only once a worker said it starts over (else nothing would ever log anew)
+            case "$out" in
+                *" again"*) printf '%s' "$pos" > "$QUEUE/decisions/$id.retry.tmp" && chmod 0640 "$QUEUE/decisions/$id.retry.tmp" \
+                                && mv -f "$QUEUE/decisions/$id.retry.tmp" "$QUEUE/decisions/$id.retry" ;;
+            esac ;;
         login)
             for u in research:$WEB gate:$GUARD chat:$WEB; do
                 ws=${u%%:*}

@@ -1741,6 +1741,22 @@ web_mix() {  # a queue with one of each: recent and old, done, waiting and in fl
     run "$O" web ls; [[ "$output" == "(no requests)" ]] || { echo "$output"; return 1; }
 }
 
+@test "agent web ls: a real queue goes by ctime (a backdated mtime changes nothing), the newest file of an entry counts, --since a date is local midnight" {
+    op_stubs; web_queue
+    unset AGENTS_TEST_WHEN
+    X=$(nowid "now" 0000e5); req "$X" 'backdated'; : > "$Q/answers/$X.md"; aged "$X" "20 days ago"
+    run "$O" web ls; [[ "$output" == *"$X"* ]] || { echo "ctime not used: $output"; return 1; }
+    export AGENTS_TEST_WHEN=mtime
+    # asked 3 days ago, answered now: recent
+    Y=$(nowid "3 days ago" 0000e6); req "$Y" 'late answer'; touch -d "3 days ago" "$Q/requests/$Y.json"; : > "$Q/answers/$Y.md"
+    run "$O" web ls; [[ "$output" == *"$Y"* ]] || { echo "a late answer filed as old: $output"; return 1; }
+    # far east of UTC: local midnight today is well before UTC midnight
+    Z=$(nowid "now" 0000e7); req "$Z" 'just after local midnight'
+    t="$(TZ=Pacific/Kiritimati date -d 'today 00:30' '+%F %T %z')"; touch -d "$t" "$Q/requests/$Z.json"
+    TZ=Pacific/Kiritimati run "$O" web ls --since "$(TZ=Pacific/Kiritimati date +%F)"
+    [[ "$output" == *"$Z"* ]] || { echo "since a date is not local midnight: $output"; return 1; }
+}
+
 @test "agent web show: no id shows the newest, named; an id by its last 6 characters (unique over every place an id lives)" {
     op_stubs; web_queue; web_mix
     echo "THE NEWEST ANSWER" > "$Q/answers/$NEW_DONE.md"
@@ -1853,13 +1869,25 @@ gone_all() {  # gone_all <id>: none of its files left
     # a retry not yet picked up: kept; once the worker logs a new line, purged
     F2=$(nowid "8 days ago" 0000b5); req "$F2" 'failed again'; aged "$F2" "8 days ago"
     echo '{"ts":"x","user":"agent-web","id":"'"$F2"'","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
+    # the worker's own state, which retry resets (orun runs here, as the test user)
+    export HOME="$T/ophome"; mkdir -p "$HOME/.local/state/agent-web-worker"; echo failed > "$HOME/.local/state/agent-web-worker/$F2"
     run "$O" web retry "$F2"
-    [ -e "$Q/decisions/$F2.retry" ] || { echo "no retry marker: $output"; return 1; }
+    [ -e "$Q/decisions/$F2.retry" ] && [ ! -e "$HOME/.local/state/agent-web-worker/$F2" ] || { echo "no retry marker: $output"; return 1; }
     run "$O" web purge --waiting
     { [[ "$output" == *"$F2 changed meanwhile: kept"* ]] && [ -e "$Q/requests/$F2.json" ]; } || { echo "$output"; return 1; }
-    echo '{"ts":"y","user":"agent-web","id":"'"$F2"'","stage":"research","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
+    # it fails again at the same stage, the same words: logged anew, so purged
+    echo '{"ts":"y","user":"agent-web","id":"'"$F2"'","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
     run "$O" web purge --waiting
     gone_all "$F2" || { echo "$output"; return 1; }
+    # a retry no worker took up (no state of its own to reset): no marker, nothing kept forever
+    F3=$(nowid "8 days ago" 0000b6); req "$F3" 'never reset'; aged "$F3" "8 days ago"
+    echo '{"ts":"x","user":"agent-web","id":"'"$F3"'","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
+    run "$O" web retry "$F3"; [ ! -e "$Q/decisions/$F3.retry" ] || { echo "a marker with no reset"; return 1; }
+    # quarantined, its release failed: purged as such
+    RF=$(nowid "6 days ago" 0000f2); req "$RF" 'release failed'; mkdir "$Q/quarantine/$RF"; : > "$Q/decisions/$RF.release"; aged "$RF" "6 days ago"
+    mkdir -p "$Q/log/agent-guard"; echo '{"ts":"x","user":"agent-guard","id":"'"$RF"'","stage":"release","result":"release failed, gave up","exit":2}' >> "$Q/log/agent-guard/stages.jsonl"
+    run "$O" web purge --waiting
+    gone_all "$RF" || { echo "release-failed kept: $output"; return 1; }
     run bash -c "$(sed -n "/^ROOT_PURGE='/,/^'\$/p" "$O" | sed '1d;$d')" purge "$Q" agent-web agent-guard '../../etc:done'
     { [ "$status" -ne 0 ] && [[ "$output" == *"bad id"* ]]; } || { echo "$output"; return 1; }
 }
