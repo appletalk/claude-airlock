@@ -406,7 +406,7 @@ render_queue_tmpfiles() {
     cat <<EOF
 # Rendered by airlock-agents-apply: $QUEUE, $WEB's queue. Every dir is root's, so no writer can
 # chmod it, change its ACL or swap it; access is by group (setgid, so files keep it) and ACL,
-# and the default ACLs carry each reader down to new files. Records are kept 90 days.
+# and the default ACLs carry each reader down to new files. Records are kept 30 days.
 # requests/ has two writers ($AGENT, $OPERATOR): d:g::r-- so neither can rewrite the other's
 # request through the shared group. The log dirs are sticky: their writer could otherwise rename
 # the root-owned transcripts/ inside and put a link in its place. Each a line names its mask
@@ -414,7 +414,7 @@ render_queue_tmpfiles() {
 # group's write. Writers chmod 0640 before the rename (0750 for a dir).
 EOF
     while read -r p m g acl; do
-        [ "$m" = 0755 ] || [ "$m" = 0750 ] && age=- || age=90d
+        [ "$m" = 0755 ] || [ "$m" = 0750 ] && age=- || age=30d
         printf 'd %-40s %s root %s %s\n' "$p" "$m" "$g" "$age"
         acl=${acl#-}; acl=${acl# }
         [ -n "$acl" ] || continue

@@ -1424,10 +1424,10 @@ PY
     ' "$RENDER/etc/polkit-1/rules.d/50-airlock-agents.rules"
 }
 
-@test "agent-web.conf: owners root, records aged out after 90 days, ids by number except alice" {
+@test "agent-web.conf: owners root, records aged out after 30 days, ids by number except alice" {
     f="$RENDER/etc/tmpfiles.d/airlock-agents-queue.conf"
     awk '$1 == "d" && $4 != "root" { print "owner not root: " $0; bad = 1 } END { exit bad }' "$f"
-    awk '$1 == "d" && $2 != "/srv/agent-web" && $2 != "/srv/agent-web/log" && $2 != "/srv/agent-web/lib" && $6 != "90d" { print "no 90d: " $0; bad = 1 } END { exit bad }' "$f"
+    awk '$1 == "d" && $2 != "/srv/agent-web" && $2 != "/srv/agent-web/log" && $2 != "/srv/agent-web/lib" && $6 != "30d" { print "no 30d: " $0; bad = 1 } END { exit bad }' "$f"
     if grep -E '^[da] ' "$f" | grep -qE '(^| |,|:)(agent|agent-web|agent-guard)(:| )'; then echo "should not match (line 861)"; return 1; fi
 }
 
@@ -1676,7 +1676,7 @@ req() {  # req <id> <question>
     req 20261021T120007Z-aaaaa7 'released'; mkdir "$Q/quarantine/20261021T120007Z-aaaaa7"; : > "$Q/answers/20261021T120007Z-aaaaa7.md"
     req 20261021T120008Z-aaaaa8 'real\n20261021T120009Z-ffffff  answered  forged row'
     printf '{}' > "$Q/requests/not-an-id.json"
-    run "$O" web ls
+    run "$O" web ls --all
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     for want in "aaaaa1  answered" "aaaaa2  held" "aaaaa3  quarantined" "aaaaa4  rejected" "aaaaa5  failed (check: failed, gave up)" "aaaaa6  queued" "aaaaa7  released by alice"; do
         [[ "$output" == *"$want"* ]] || { echo "no '$want' in: $output"; return 1; }
@@ -1684,6 +1684,141 @@ req() {  # req <id> <question>
     { [[ "$output" == *"red text"* ]] && [[ "$output" != *$'\e'* ]]; } || return 1
     [[ "$output" != *not-an-id* ]]
     [ "$(grep -c '^20261021T120009Z-ffffff' <<< "$output")" = 0 ] || { echo "a question forged a row: $output"; return 1; }
+}
+
+nowid() {  # nowid <when, as date -d takes it> <6 hex>: an id from that time
+    printf '%sZ-%s' "$(date -u -d "$1" +%Y%m%dT%H%M%S)" "$2"
+}
+web_mix() {  # a queue with one of each: recent and old, done, waiting and in flight
+    NEW_DONE=$(nowid "1 hour ago" 0000a1); req "$NEW_DONE" 'new answered'; : > "$Q/answers/$NEW_DONE.md"
+    NEW_FLY=$(nowid "2 hours ago" 0000a2); req "$NEW_FLY" 'new queued'
+    OLD_DONE=$(nowid "10 days ago" 0000b1); req "$OLD_DONE" 'old answered'; : > "$Q/answers/$OLD_DONE.md"
+    OLD_HELD=$(nowid "10 days ago 1 hour" 0000b2); req "$OLD_HELD" 'old held'; : > "$Q/held/$OLD_HELD.json"
+    OLD_QUAR=$(nowid "9 days ago" 0000b3); req "$OLD_QUAR" 'old quarantined'; mkdir "$Q/quarantine/$OLD_QUAR"
+    OLD_FAIL=$(nowid "8 days ago" 0000b4); req "$OLD_FAIL" 'old failed'
+    echo '{"ts":"x","user":"agent-web","id":"'"$OLD_FAIL"'","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
+    MID_DONE=$(nowid "3 days ago" 0000c1); req "$MID_DONE" 'mid answered'; : > "$Q/answers/$MID_DONE.md"
+    OLD_FLY=$(nowid "20 days ago" 0000d1); req "$OLD_FLY" 'old researching'
+    echo '{"ts":"x","user":"agent-web","id":"'"$OLD_FLY"'","stage":"research","result":"running","exit":0}' >> "$Q/log/agent-web/stages.jsonl"
+}
+
+@test "agent web ls: the last 24 hours and what waits on you by default, newest first; --waiting, --since, --all" {
+    op_stubs; web_queue; web_mix
+    run "$O" web ls
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    for i in "$NEW_DONE" "$NEW_FLY" "$OLD_HELD" "$OLD_QUAR" "$OLD_FAIL"; do [[ "$output" == *"$i"* ]] || { echo "no $i: $output"; return 1; }; done
+    for i in "$OLD_DONE" "$MID_DONE" "$OLD_FLY"; do [[ "$output" != *"$i"* ]] || { echo "$i shown: $output"; return 1; }; done
+    [[ "$output" == *"(5 shown; 3 older: agent web ls --since 7d, --all)"* ]] || { echo "$output"; return 1; }
+    # newest first
+    [ "$(grep -n "$NEW_DONE" <<< "$output" | cut -d: -f1)" -lt "$(grep -n "$OLD_FAIL" <<< "$output" | cut -d: -f1)" ]
+    run "$O" web ls --waiting
+    [ "$(grep -c '^20' <<< "$output")" = 3 ] && [[ "$output" == *"(3 waiting on you; 5 others"* ]] || { echo "$output"; return 1; }
+    run "$O" web ls --since 7d
+    [[ "$output" == *"$MID_DONE"* && "$output" != *"$OLD_DONE"* ]] || { echo "$output"; return 1; }
+    run "$O" web ls --all
+    [ "$(grep -c '^20' <<< "$output")" = 8 ] || { echo "$output"; return 1; }
+    run "$O" web ls --since yesterdayish; [ "$status" -ne 0 ] && [[ "$output" == *"bad time"* ]]
+    run "$O" web ls --bogus; [ "$status" -ne 0 ] && [[ "$output" == *"usage"* ]]
+}
+
+@test "agent web show: no id shows the newest, named; an id by its last 6 characters (unique only)" {
+    op_stubs; web_queue; web_mix
+    echo "THE NEWEST ANSWER" > "$Q/answers/$NEW_DONE.md"
+    req "$(nowid "3 hours ago" 0000a1)" 'same suffix, older'
+    run "$O" web show
+    [ "$status" -eq 0 ] && [[ "$(head -1 <<< "$output")" == "$NEW_DONE  answered"* ]] && [[ "$output" == *"THE NEWEST ANSWER"* ]] || { echo "$output"; return 1; }
+    run "$O" web show 0000b1; [ "$status" -eq 0 ]
+    run "$O" web show 0000a1; [ "$status" -ne 0 ] && [[ "$output" == *"several requests end in 0000a1"* ]]
+    run "$O" web show ffffff; [ "$status" -ne 0 ] && [[ "$output" == *"no request ends in ffffff"* ]]
+    run "$O" web show '0000*'; [ "$status" -ne 0 ] && [[ "$output" == *"not an id"* ]]
+}
+
+@test "agent web approve|release|retry with no id: the candidates, and a refusal; with a short id they act" {
+    op_stubs; web_queue; web_mix
+    run "$O" web approve
+    [ "$status" -ne 0 ] && [[ "$output" == *"$OLD_HELD"* && "$output" != *"$OLD_QUAR"* && "$output" == *"say which"* ]] || { echo "$output"; return 1; }
+    [ ! -e "$Q/decisions/$OLD_HELD.approve" ]
+    run "$O" web release
+    [ "$status" -ne 0 ] && [[ "$output" == *"$OLD_QUAR"* && "$output" != *"$OLD_HELD"* ]] || { echo "$output"; return 1; }
+    run "$O" web retry
+    [ "$status" -ne 0 ] && [[ "$output" == *"$OLD_FAIL"* ]] || { echo "$output"; return 1; }
+    echo '{"question": "q"}' > "$Q/held/$OLD_HELD.json"
+    run "$O" web approve 0000b2; [ "$status" -eq 0 ] && [ -e "$Q/decisions/$OLD_HELD.approve" ] || { echo "$output"; return 1; }
+    rm -rf "$Q/held"/* "$Q/quarantine"/*
+    run "$O" web approve; [ "$status" -ne 0 ] && [[ "$output" == *"nothing to approve"* ]]
+}
+
+@test "agent ls: a line when web research waits on you, none when nothing does" {
+    op_stubs; web_queue; web_mix
+    run "$O" ls
+    [[ "$output" == *"web: 3 waiting on you (1 held, 1 quarantined, 1 failed): agent web ls --waiting"* ]] || { echo "$output"; return 1; }
+    rm -rf "$Q/held"/* "$Q/quarantine"/*; : > "$Q/log/agent-web/stages.jsonl"
+    run "$O" ls; [[ "$output" != *"waiting on you"* ]] || { echo "$output"; return 1; }
+}
+
+@test "agent attach|stop|restart with no name: the one session running; with several, the list and a refusal" {
+    op_stubs
+    REMOTE_OUT="agent-session@infra.main.service loaded active running agent session" run "$O" stop
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    octl_call | grep -qx "disable --now agent-session@infra.main.service"
+    REMOTE_OUT=$'agent-session@a.main.service loaded active running x\r\nagent-session@b.main.service loaded active running x' run "$O" attach
+    [ "$status" -ne 0 ] && [[ "$output" == *"several sessions run (a.main b.main)"* ]] || { echo "$output"; return 1; }
+    REMOTE_OUT="" run "$O" restart
+    [ "$status" -ne 0 ] && [[ "$output" == *"no session is running"* ]] || { echo "$output"; return 1; }
+}
+
+purge_stubs() {
+    cat > "$T/bin/sudo" <<'S'
+#!/bin/bash
+[ "$1" = -- ] && shift
+echo "sudo $1 $2" >> "$LOG"; echo "SUDO-RAN"
+exec "$@"
+S
+    chmod +x "$T/bin/sudo"
+}
+
+@test "agent web purge: finished entries older than 7 days by default; never one in flight; says why before sudo" {
+    op_stubs; web_queue; web_mix; purge_stubs
+    mkdir -p "$Q/reports/$OLD_DONE" "$Q/log/agent-web/transcripts"; : > "$Q/log/agent-web/transcripts/$OLD_DONE.jsonl"
+    run "$O" web purge
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    before="${output%%SUDO-RAN*}"
+    [[ "$before" == *"$OLD_DONE"*"delete these 1 entries"*"sudo asks for your password"* ]] || { echo "$before"; return 1; }
+    [ ! -e "$Q/requests/$OLD_DONE.json" ] && [ ! -e "$Q/answers/$OLD_DONE.md" ] && [ ! -e "$Q/reports/$OLD_DONE" ] && [ ! -e "$Q/log/agent-web/transcripts/$OLD_DONE.jsonl" ]
+    for i in "$NEW_DONE" "$MID_DONE" "$OLD_HELD" "$OLD_QUAR" "$OLD_FAIL" "$OLD_FLY" "$NEW_FLY"; do [ -e "$Q/requests/$i.json" ] || { echo "$i purged"; return 1; }; done
+    run "$O" web purge --older-than 2d
+    [ ! -e "$Q/requests/$MID_DONE.json" ] && [ -e "$Q/requests/$NEW_DONE.json" ]
+    : > "$LOG"; run "$O" web purge --older-than 2d
+    [[ "$output" == "nothing to purge" ]] && ! grep -q '^sudo' "$LOG" || { echo "$output"; return 1; }
+    run "$O" web purge --older-than 2x; [ "$status" -ne 0 ] && [[ "$output" == *"bad age"* ]]
+}
+
+@test "agent web purge --waiting: what waits on you, leaving answers; --all: every finished one; in flight never" {
+    op_stubs; web_queue; web_mix; purge_stubs
+    run "$O" web purge --waiting
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    for i in "$OLD_HELD" "$OLD_QUAR" "$OLD_FAIL"; do [ ! -e "$Q/requests/$i.json" ] || { echo "$i kept"; return 1; }; done
+    [ ! -e "$Q/held/$OLD_HELD.json" ] && [ ! -e "$Q/quarantine/$OLD_QUAR" ]
+    for i in "$NEW_DONE" "$OLD_DONE" "$MID_DONE" "$NEW_FLY" "$OLD_FLY"; do [ -e "$Q/requests/$i.json" ] || { echo "$i purged"; return 1; }; done
+    run "$O" web purge --all
+    for i in "$NEW_DONE" "$OLD_DONE" "$MID_DONE"; do [ ! -e "$Q/requests/$i.json" ] || { echo "$i kept"; return 1; }; done
+    [ -e "$Q/requests/$NEW_FLY.json" ] && [ -e "$Q/requests/$OLD_FLY.json" ]
+}
+
+@test "agent web purge: root checks each entry again (one approved meanwhile stays), and refuses a bad id" {
+    op_stubs; web_queue; web_mix; purge_stubs
+    # the approval lands between the listing and root's step
+    cat > "$T/bin/sudo" <<S
+#!/bin/bash
+[ "\$1" = -- ] && shift
+: > "$Q/decisions/$OLD_HELD.approve"
+exec "\$@"
+S
+    chmod +x "$T/bin/sudo"
+    run "$O" web purge --waiting
+    [[ "$output" == *"$OLD_HELD changed meanwhile: kept"* ]] && [ -e "$Q/requests/$OLD_HELD.json" ] && [ ! -e "$Q/requests/$OLD_QUAR.json" ] || { echo "$output"; return 1; }
+    run bash -c "$(sed -n "/^ROOT_PURGE='/,/^'\$/p" "$O" | sed '1d;$d')" purge "$Q" agent-web agent-guard '../../etc:done'
+    [ "$status" -ne 0 ] && [[ "$output" == *"bad id"* ]]
 }
 
 @test "agent web approve|reject|release: only in the matching state; the marker readable by the workers" {
@@ -2009,7 +2144,7 @@ S
     I2=20261021T120001Z-bbbbbb; mkfifo "$Q/requests/$I2.json"
     echo "alice's secret" > "$T/alicefile"
     ln -s "$T/alicefile" "$Q/answers/$ID.md"
-    run timeout 10 "$O" web ls
+    run timeout 10 "$O" web ls --all
     [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
     [[ "$output" == *"$I2"*"(unreadable request)"* ]]
     run timeout 10 "$O" web show "$ID"
@@ -2026,10 +2161,10 @@ S
     echo "{\"ts\":\"x\",\"user\":\"agent-web\",\"id\":\"$ID\",\"stage\":\"publish\",\"result\":\"published\",\"exit\":0}" >> "$Q/log/agent-web/stages.jsonl"
     mkdir -p "$Q/log/agent-guard"
     echo "{\"ts\":\"x\",\"user\":\"agent-guard\",\"id\":\"$ID\",\"stage\":\"scan\",\"result\":\"failed, gave up\",\"exit\":2}" >> "$Q/log/agent-guard/stages.jsonl"
-    run "$O" web ls; [[ "$output" == *"gate failed (scan: failed, gave up)"* ]] || { echo "$output"; return 1; }
+    run "$O" web ls --all; [[ "$output" == *"gate failed (scan: failed, gave up)"* ]] || { echo "$output"; return 1; }
     mkdir "$Q/quarantine/$ID"
     echo "{\"ts\":\"x\",\"user\":\"agent-guard\",\"id\":\"$ID\",\"stage\":\"release\",\"result\":\"alice's release failed, gave up\",\"exit\":2}" >> "$Q/log/agent-guard/stages.jsonl"
-    run "$O" web ls; [[ "$output" == *"quarantined, release failed"* ]] || { echo "$output"; return 1; }
+    run "$O" web ls --all; [[ "$output" == *"quarantined, release failed"* ]] || { echo "$output"; return 1; }
 }
 
 @test "agent web <name> attaches only to a running session; agent web new starts one; bad names and agent attach web refused" {
@@ -2236,7 +2371,7 @@ EOF
     op_stubs; web_queue
     req 20261021T120001Z-aaaaa1 "a question"
     mkdir -p "$Q/log/agent-web"; mkfifo "$Q/log/agent-web/stages.jsonl"
-    run timeout 10 "$O" web ls
+    run timeout 10 "$O" web ls --all
     [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
     [[ "$output" == *"20261021T120001Z-aaaaa1  queued"* ]]
 }
@@ -2592,7 +2727,7 @@ S
     run "$O" _complete ids retry
     # (aaaaa4 no longer; aaaaa3, whose release failed above, is retryable now)
     [ "$output" = "$(printf '20261021T120003Z-aaaaa3\tquarantined, release failed (release: release failed, gave u')" ] || { echo "retry after an odd line: $output"; return 1; }
-    [[ "$("$O" web ls)" == *"20261021T120004Z-aaaaa4  queued"* ]]
+    [[ "$("$O" web ls --all)" == *"20261021T120004Z-aaaaa4  queued"* ]]
 }
 
 @test "agent _complete ids: a worker's own floods (a big stage log, junk in held/) neither bury the real ids nor stall a Tab" {
@@ -2622,7 +2757,7 @@ P
     done
     [ "$out_approve" = "$(printf '20261021T120001Z-aaaaa1\theld')" ] || { echo "approve: $out_approve"; return 1; }
     [ "$out_retry" = "$(printf '20261021T120004Z-aaaaa4\tfailed (check: failed, gave up)')" ] || { echo "retry: $out_retry"; return 1; }
-    [[ "$("$O" web ls)" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]]
+    [[ "$("$O" web ls --all)" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]]
     for v in release; do SECONDS=0; "$O" _complete ids "$v" >/dev/null; [ "$SECONDS" -le 2 ] || { echo "$v took ${SECONDS}s"; return 1; }; done
 }
 
@@ -2631,7 +2766,7 @@ P
     req 20261021T120005Z-aaaaa5 q
     printf 'x gave up \xff{"id":"20261021T120005Z-aaaaa5","stage":"check","result":"ok"}\n' >> "$Q/log/agent-web/stages.jsonl"
     for l in C C.UTF-8; do
-        out="$(LANG=$l LC_ALL=$l "$O" web ls)"
+        out="$(LANG=$l LC_ALL=$l "$O" web ls --all)"
         [[ "$out" == *"20261021T120005Z-aaaaa5  researching (check: ok)"* ]] || { echo "$l: $out"; return 1; }
     done
     run "$O" _complete ids retry
@@ -2827,7 +2962,7 @@ Z
     # B's last line is the shared-quote one: grep -F sees B there, and so must completion
     printf '{"id":"%s","stage":"check","result":"failed, gave up"}\n{"id":"%s"id":"%s","stage":"research","result":"running"}\n' "$B" "$A" "$B" \
         >> "$Q/log/agent-web/stages.jsonl"
-    [[ "$("$O" web ls)" == *"$B  researching (research: running)"* ]]
+    [[ "$("$O" web ls --all)" == *"$B  researching (research: running)"* ]]
     run "$O" _complete ids retry; [ -z "$output" ] || { echo "retry: $output"; return 1; }
     run "$O" _complete ids show
     [[ "$output" == *"$B"$'\t'"researching (research: running)"* ]] || { echo "show: $output"; return 1; }
@@ -2843,7 +2978,7 @@ Z
     op_stubs; web_queue
     req 20261021T120004Z-aaaaa4 q
     echo '{"ts":"x","user":"agent-web","id":"20261021T120004Z-aaaaa4","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
-    out="$(STAGE_WEB='publish: published' STATE=held "$O" web ls)"
+    out="$(STAGE_WEB='publish: published' STATE=held "$O" web ls --all)"
     [[ "$out" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]] || { echo "$out"; return 1; }
     out="$(OCTL_RAW=1 REMOTE_OUT=$'a\e]0;x\ab' "$O" ls)"
     [[ "$out" != *$'\e'* ]]
@@ -2882,7 +3017,7 @@ Z
     R=20261021T120005Z-ccccc5; req "$R" real
     echo "{\"id\":\"$R\",\"stage\":\"publish\",\"result\":\"published\"}" >> "$Q/log/agent-web/stages.jsonl"
     echo "{\"id\":\"$R\",\"stage\":\"gate\",\"result\":\"failed, gave up\"}" >> "$Q/log/agent-guard/stages.jsonl"
-    [[ "$("$O" web ls)" == *"$R  gate failed"* ]]
+    [[ "$("$O" web ls --all)" == *"$R  gate failed"* ]]
     # stale flags: newer ids once flagged, ok now (they must not fill retry's list)
     for i in $(seq 10 59); do printf '{"id":"20261021T1200%sZ-aaaa%s","note":"changed"}\n{"id":"20261021T1200%sZ-aaaa%s","stage":"check","result":"ok"}\n' $i $i $i $i; done >> "$Q/log/agent-web/stages.jsonl"
     run "$O" _complete ids retry

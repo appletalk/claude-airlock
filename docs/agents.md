@@ -70,10 +70,10 @@ claude-agent attach myproject
 
 | Command | What it does |
 |---|---|
-| `claude-agent` | list sessions |
+| `claude-agent` | list sessions (and a line when web research waits on you) |
 | `claude-agent new <project>` | start a session (kept across reboots) |
-| `claude-agent attach <project>` | join it; Ctrl-b d to leave it running |
-| `claude-agent stop` / `restart <project>` | stop or restart it |
+| `claude-agent attach <project>` | join it; Ctrl-b d to leave it running (no name: the one running) |
+| `claude-agent stop` / `restart <project>` | stop or restart it (no name: the one running) |
 | `claude-agent paste` | hand the agent the image on your clipboard |
 | `claude-agent update` | give the agents your current claude-airlock |
 | `claude-agent web ...` | web research (below) |
@@ -234,7 +234,21 @@ Each question goes through three steps:
 3. **Gate.** A scanner and a second Claude with no tools read the report. Anything suspicious is
    held for you: `claude-agent web show` and `release`.
 
-`claude-agent web` alone opens a research chat for you. `claude-agent web ls` shows every question.
+`claude-agent web` alone opens a research chat for you. Keeping up with the queue:
+
+| Command | What it does |
+|---|---|
+| `claude-agent web ls` | the last 24 hours, plus whatever waits on you (held, quarantined, failed), newest first |
+| `claude-agent web ls --waiting` | only what waits on you; `--since 7d` or `--since 2026-10-25`, `--all` for more |
+| `claude-agent web show [id]` | an answer, quarantine findings or a held question; no id: the newest |
+| `claude-agent web approve`, `reject`, `release`, `retry <id>` | act on one; with no id they list the candidates and stop |
+| `claude-agent web purge` | delete finished entries older than 7 days (`--older-than 3d` for another age) |
+| `claude-agent web purge --waiting` | delete what waits on you instead of deciding it, leaving the answers |
+| `claude-agent web purge --all` | delete every finished entry, waiting ones included |
+
+An id can be given by its last 6 characters (`c2dfbe`). `purge` never touches a question still
+being worked on, lists what it will delete, and asks sudo once (the files are the web and guard
+users'); the stage logs keep their lines. The queue keeps entries 30 days anyway.
 
 The agent's boxes are told this themselves. When a box has the queue mounted (requests/
 read-write, answers/ and lib/ read-only, as the agent's default config sets up), the launcher

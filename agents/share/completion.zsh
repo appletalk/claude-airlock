@@ -66,10 +66,10 @@ _airlock_agents() {
     )
     webcmds=(
         'new:start another interactive session' 'stop:end an interactive session'
-        'restart:a fresh interactive session' 'ask:queue a question' 'ls:every question and its state'
+        'restart:a fresh interactive session' 'ask:queue a question' 'ls:recent questions and what waits on you'
         'show:an answer, quarantine findings or a held question' 'approve:a held question'
         'reject:a held question' 'release:a quarantined answer' 'retry:an id a worker gave up on'
-        'login:/login in the web boxes'
+        'purge:delete old or waiting entries' 'login:/login in the web boxes'
     )
     if (( CURRENT == 2 )); then _describe -t commands command cmds; return; fi
     case ${words[2]} in

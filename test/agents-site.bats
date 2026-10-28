@@ -103,10 +103,10 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     site "${OK}web claude-web uid 1101 subuid 1200000 home 1G\nguard claude-guard uid 1102 subuid 1300000 home 1G\n"
     "$A" --render "$T/r" "$T/site" >/dev/null
     f="$T/r/etc/tmpfiles.d/airlock-agents-queue.conf"
-    grep -qE '^d /srv/claude-web/requests +3770 root 1100 90d$' "$f"
+    grep -qE '^d /srv/claude-web/requests +3770 root 1100 30d$' "$f"
     grep -qE '^a /srv/claude-web/requests .* m::rwx,u:1101:r-x,u:1102:r-x,u:alice:rwx,d:g::r--,d:u:1101:r--,d:u:1102:r--,d:u:alice:r--$' "$f"
     grep -qE '^a /srv/claude-web/log .* m::r-x,u:1101:r-x,u:1102:r-x,u:alice:r-x$' "$f"
-    grep -qE '^d /srv/claude-web/log/claude-guard +3770 root 1102 90d$' "$f"
+    grep -qE '^d /srv/claude-web/log/claude-guard +3770 root 1102 30d$' "$f"
     # every a line names its mask
     [ "$(grep -c '^a ' "$f")" = "$(grep -c '^a .* m::' "$f")" ]
 }

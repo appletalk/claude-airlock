@@ -48,7 +48,7 @@ _airlock_agents() {
             web)
                 if [ "$COMP_CWORD" = 2 ]; then
                     mapfile -t words < <(_airlock_agents_names web-sessions)
-                    words+=(new stop restart ask ls show approve reject release retry login)
+                    words+=(new stop restart ask ls show approve reject release retry purge login)
                 elif [ "$COMP_CWORD" = 3 ]; then
                     case "${COMP_WORDS[2]}" in
                         show|approve|reject|release|retry) mapfile -t words < <(_airlock_agents_names ids "${COMP_WORDS[2]}") ;;
