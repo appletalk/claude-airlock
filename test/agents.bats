@@ -653,6 +653,18 @@ E
     grep -qx envoy-claim-pending "$T/halted"
 }
 
+@test "resume: a failed --start whose re-claim can't write the switch keeps the claim, and the next resume lifts it" {
+    halt_stubs
+    run "$O" halt
+    cp "$T/envoy/airlock-envoy-apply" "$T/apply.ok"
+    printf '#!/bin/bash\necho "airlock-envoy-apply $*" >> "$LOG"\n[ "$1" = --start ] && { rm -f "$AGENTS_ENVOY_STOPPED"; /usr/bin/install -m 0444 /dev/null "$AGENTS_ENVOY_STOPPED"; exit 1; }\nexit 0\n' > "$T/envoy/airlock-envoy-apply"
+    run "$O" resume
+    [ "$status" -ne 0 ] && grep -qx envoy-claim-pending "$T/halted" || { echo "$output"; cat "$T/halted"; return 1; }
+    mv "$T/apply.ok" "$T/envoy/airlock-envoy-apply"; chmod 644 "$T/envoy-stopped"; : > "$LOG"
+    run "$O" resume
+    [ "$status" -eq 0 ] && grep -qx "airlock-envoy-apply --start" "$LOG" && [ ! -e "$T/envoy-stopped" ] && [ ! -e "$T/halted" ] || { echo "$output"; return 1; }
+}
+
 @test "apply: a masked slice is not the halt's (it says to move it away)" {
     halt_stubs
     run "$P" --confirm
