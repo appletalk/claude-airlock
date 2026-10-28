@@ -26,7 +26,7 @@
 #                                       if airlock-envoy is installed, cut its egress (kill
 #                                       switch) and lock its credentials
 #   <command> resume                    undo halt (sudo; a kill switch halt didn't set stays on),
-#                                       then unlock Envoy's credentials if halt locked them
+#                                       then unlock Envoy's credentials if they were unlocked when halted
 #
 # Web research (when agents.conf has web and guard users):
 #   <command> web [name]                attach to the interactive session (main, started if needed;
@@ -500,7 +500,7 @@ systemctl mask "${units[@]}" || rc=1
 systemctl kill -s KILL "${units[@]}" 2>/dev/null || true
 for u; do loginctl terminate-user "$u" 2>/dev/null || true; done
 nonce=$(sed -n "s/^envoy-stopped-by-halt //p" "$mark")
-if [ -x "$sbin/airlock-envoy-apply" ]; then
+if [ -x "$sbin/airlock-envoy-apply" ] && [ -d "$(dirname "$stopped")" ]; then
     echo "==> airlock-envoy: kill switch on"
     # Ours: none was on, or the one on holds our nonce.
     ours=0
@@ -516,9 +516,11 @@ if [ -x "$sbin/airlock-envoy-apply" ]; then
 fi
 if [ -x "$sbin/airlock-envoy-cred" ]; then
     echo "==> airlock-envoy: credentials locked"
-    was=locked; ! head -n 1 "$credstate" 2>/dev/null | grep -q "^unlocked" || was=unlocked
+    # Unlocked until when (the state says; nothing secret): resume gives back only what is left.
+    dl=""
+    if head -n 1 "$credstate" 2>/dev/null | grep -q "^unlocked"; then dl=$(sed -n "s/^deadline \([0-9][0-9]*\)$/\1/p" "$credstate"); fi
     if "$sbin/airlock-envoy-cred" lock; then
-        [ "$was" != unlocked ] || grep -qx envoy-locked-by-halt "$mark" || echo envoy-locked-by-halt >> "$mark" || rc=1
+        if [ -n "$dl" ] && ! grep -q "^envoy-locked-by-halt " "$mark"; then echo "envoy-locked-by-halt $dl" >> "$mark" || rc=1; fi
     else rc=1; fi
 fi
 echo "==> stopping ${units[*]}"
@@ -538,7 +540,7 @@ if [ -n "$nonce" ]; then
     if [ ! -e "$stopped" ]; then
         echo "==> airlock-envoy: its kill switch is off already"; sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
     elif [ "$(head -c 64 "$stopped")" != "$nonce" ]; then
-        echo "==> airlock-envoy: its kill switch was set again since the halt (yours): left on ($sbin/airlock-envoy-apply --start lifts it)"
+        echo "==> airlock-envoy: its kill switch was rewritten since the halt (a --stop, or a --start that failed, by hand): left on ($sbin/airlock-envoy-apply --start lifts it)"
         sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
     elif [ ! -x "$sbin/airlock-envoy-apply" ]; then
         echo "==> airlock-envoy: the halt turned its kill switch on, and $sbin/airlock-envoy-apply is gone: reinstall airlock-envoy and resume again, or give the switch up (sudo rm $stopped)" >&2; rc=1
@@ -555,6 +557,11 @@ if [ -n "$nonce" ]; then
     fi
 elif [ -x "$sbin/airlock-envoy-apply" ]; then
     echo "==> airlock-envoy: no kill switch of a halt to lift: left as it is ($sbin/airlock-envoy-apply --start lifts one)"
+fi
+# The agents come back only with what they had: an Envoy step that failed keeps them halted.
+if [ "$rc" != 0 ]; then
+    echo "==> the agents stay halted until that is fixed: resume again" >&2
+    exit "$rc"
 fi
 echo "==> unmasking and starting ${units[*]}"
 systemctl unmask "${units[@]}" || rc=1
@@ -615,7 +622,7 @@ halt() {
     fi
 }
 resume() {
-    local users uids envoy="" line unlock=0
+    local users uids envoy="" line unlock left
     agent_users
     [ ${#users[@]} -gt 0 ] || die "no agent user is provisioned"
     # The mark is readable; Envoy's config directory isn't (root decides, and says what it did).
@@ -623,17 +630,21 @@ resume() {
     if [ -n "$line" ]; then envoy=", and lift airlock-envoy's kill switch if it is still the one the halt turned on"
     elif have_apply; then envoy=" (airlock-envoy: no kill switch of a halt to lift, left as it is)"
     fi
-    ! grep -qx envoy-locked-by-halt "$HALT_MARK" 2>/dev/null || unlock=1
+    # The unlock the halt cut short, for what is left of it (read before root removes the mark).
+    unlock=$(sed -n 's/^envoy-locked-by-halt \([0-9][0-9]*\)$/\1/p' "$HALT_MARK" 2>/dev/null || true)
     echo "$CMD resume: as root, unmask and start the user managers of ${users[*]} (their sessions come"
     echo "back by themselves)$envoy."
     echo "sudo asks for your password for that."
     sudo -- /bin/bash -c "$ROOT_RESUME" resume "$HALT_MARK" "$ENVOY_STOPPED" "$ENVOY_SBIN" "${uids[@]}" || die "resume: a root step failed (above); run $CMD resume again"
     rm -f "$HALTING"
-    if [ "$unlock" = 1 ] && have_cred; then
-        echo "==> unlocking airlock-envoy's pass credentials (airlock-envoy-cred unlock), as they were before the halt"
-        "$ENVOY_SBIN/airlock-envoy-cred" unlock || echo "    not unlocked (above): $ENVOY_SBIN/airlock-envoy-cred unlock when you're ready"
-    elif [ "$unlock" = 1 ]; then
-        echo "    airlock-envoy's credentials were unlocked before the halt, and $ENVOY_SBIN/airlock-envoy-cred is gone: not unlocked"
+    if [ -n "$unlock" ]; then
+        left=$(( (unlock - $(date +%s)) / 60 ))
+        if [ "$left" -lt 1 ]; then echo "    airlock-envoy's unlock from before the halt has expired: not unlocked ($ENVOY_SBIN/airlock-envoy-cred unlock)"
+        elif ! have_cred; then echo "    airlock-envoy's credentials were unlocked before the halt, and $ENVOY_SBIN/airlock-envoy-cred is gone: not unlocked"
+        else
+            echo "==> unlocking airlock-envoy's pass credentials for what was left of the unlock ($left minutes)"
+            "$ENVOY_SBIN/airlock-envoy-cred" unlock --for "${left}m" || echo "    not unlocked (above): $ENVOY_SBIN/airlock-envoy-cred unlock when you're ready"
+        fi
     fi
     echo "$CMD resume: done."
 }

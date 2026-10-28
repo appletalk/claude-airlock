@@ -358,7 +358,7 @@ S
     printf '#!/bin/bash\necho "ps $*" >> "$LOG"\nprintf "agent 4242 01:00 claude \\033]0;evil\\007--x\\n"\n' > "$T/bin/ps"
     export AGENTS_ENVOY_SBIN="$T/envoy" AGENTS_HALT_MARK="$T/halted" AGENTS_ENVOY_STOPPED="$T/envoy-stopped" XDG_STATE_HOME="$T/state" \
         AGENTS_ENVOY_CRED_STATE="$T/credstate"
-    echo "unlocked until x" > "$T/credstate"
+    printf 'unlocked until x\ndeadline %s\n' "$(( $(date +%s) + 7200 ))" > "$T/credstate"
     mkdir -p "$T/envoy"
     cat > "$T/envoy/airlock-envoy-apply" <<'S'
 #!/bin/bash
@@ -447,7 +447,7 @@ E
     [ "$(grep -n 'airlock-envoy-apply --start' "$LOG" | cut -d: -f1)" -lt "$(grep -n 'systemctl start user@' "$LOG" | cut -d: -f1)" ]
     grep -qx "systemctl unmask user@1100.service user@1101.service" "$LOG"
     grep -qx "systemctl start user@1100.service user@1101.service" "$LOG"
-    [ "$(tail -1 "$LOG")" = "airlock-envoy-cred unlock" ]
+    [[ "$(tail -1 "$LOG")" =~ ^airlock-envoy-cred\ unlock\ --for\ (119|120)m$ ]]
     [ ! -e "$T/halted" ] && [ ! -e "$T/envoy-stopped" ]
 }
 
@@ -496,7 +496,7 @@ E
     run "$O" halt
     grep -qx "airlock-envoy-cred lock" "$LOG" && ! grep -q "airlock-envoy-apply" "$LOG"
     [[ "${output%%SUDO-RAN*}" == *"lock airlock-envoy's credentials"* && "${output%%SUDO-RAN*}" != *"egress"* ]]
-    : > "$LOG"; run "$O" resume; grep -qx "airlock-envoy-cred unlock" "$LOG"
+    : > "$LOG"; run "$O" resume; grep -qE "^airlock-envoy-cred unlock --for (119|120)m$" "$LOG"
     mv "$T/apply.away" "$T/envoy/airlock-envoy-apply"; rm -f "$T/halted" "$T/envoy-stopped"; : > "$LOG"
     rm "$T/envoy/airlock-envoy-cred"
     run "$O" halt
@@ -515,7 +515,7 @@ E
     run "$O" resume
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "lifted the operator's switch"; return 1; fi
-    [[ "$output" == *"set again since the halt (yours)"* ]]
+    [[ "$output" == *"rewritten since the halt"* ]]
     # --stop that writes the switch and then fails: halt fails, but the switch is recorded as its own
     rm -f "$T/envoy-stopped" "$T/halted"
     cp "$T/envoy/airlock-envoy-apply" "$T/apply.ok"
@@ -537,20 +537,26 @@ E
     run "$O" resume
     if grep -q 'airlock-envoy-cred unlock' "$LOG"; then echo "unlocked with no halt"; return 1; fi
     run "$O" halt; : > "$LOG"; run "$O" resume
-    grep -qx 'airlock-envoy-cred unlock' "$LOG"
+    grep -qE '^airlock-envoy-cred unlock --for (119|120)m$' "$LOG"
+    # unlocked before, expired during the halt: not unlocked again
+    printf 'unlocked until x\ndeadline %s\n' "$(( $(date +%s) + 30 ))" > "$T/credstate"; run "$O" halt; : > "$LOG"; run "$O" resume
+    if grep -q 'airlock-envoy-cred unlock' "$LOG"; then echo "unlocked again with under a minute left"; return 1; fi
+    [[ "$output" == *"has expired: not unlocked"* ]]
     # locked before the halt (by the operator, or expired): stays locked
     echo locked > "$T/credstate"; run "$O" halt; : > "$LOG"; run "$O" resume
     if grep -q 'airlock-envoy-cred unlock' "$LOG"; then echo "unlocked what the operator had locked"; return 1; fi
     # the cred tool gone at resume: said
-    echo "unlocked until x" > "$T/credstate"; run "$O" halt; mv "$T/envoy/airlock-envoy-cred" "$T/cred.away"
+    printf 'unlocked until x\ndeadline %s\n' "$(( $(date +%s) + 7200 ))" > "$T/credstate"; run "$O" halt; mv "$T/envoy/airlock-envoy-cred" "$T/cred.away"
     run "$O" resume; [[ "$output" == *"airlock-envoy-cred is gone: not unlocked"* ]]
 }
 
 @test "resume: a --start that undoes itself writes the switch again: claimed again, the retry lifts it; a halt's switch gone with its tool lets resume go on" {
     halt_stubs
     run "$O" halt
-    START_UNDO=1 run "$O" resume
+    : > "$LOG"; START_UNDO=1 run "$O" resume
     [ "$status" -ne 0 ] && [ -e "$T/envoy-stopped" ] && grep -q "^envoy-stopped-by-halt " "$T/halted"
+    if grep -q 'systemctl unmask' "$LOG"; then echo "agents back while Envoy's step failed"; return 1; fi
+    [[ "$output" == *"stay halted"* ]]
     : > "$LOG"; run "$O" resume
     [ "$status" -eq 0 ] && grep -qx "airlock-envoy-apply --start" "$LOG" && [ ! -e "$T/envoy-stopped" ] || { echo "$output"; return 1; }
     # the tool and the switch both gone (uninstalled): nothing left to lift, resume goes on
@@ -566,6 +572,14 @@ E
     run "$O" resume
     chmod 644 "$T/envoy-stopped" 2>/dev/null || true
     [[ "${output%%SUDO-RAN*}" == *"lift airlock-envoy's kill switch if it is still the one the halt turned on"* ]] || { echo "$output"; return 1; }
+}
+
+@test "halt with airlock-envoy installed but not set up (no config directory): its switch step is skipped, halt succeeds" {
+    halt_stubs
+    export AGENTS_ENVOY_STOPPED="$T/no-envoy-etc/stopped"
+    run "$O" halt
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    if grep -q 'airlock-envoy-apply --stop' "$LOG"; then echo "ran --stop with no config"; return 1; fi
 }
 
 @test "apply: a masked slice is not the halt's (it says to move it away)" {

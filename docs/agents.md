@@ -187,8 +187,7 @@ claude-agent halt
    reboot. Root then kills the manager and every session of the user. If airlock-envoy is
    installed, root also turns on its kill switch (`airlock-envoy-apply --stop`, which cuts every
    box's egress, your own boxes' included) and locks its credentials, each step if its tool is
-   there. The managers' stop comes
-   last.
+   there. The managers' stop comes last.
 
 Every step runs even if one before it failed. Run `halt` again if a root step failed; the record
 of what the first run found is kept. From the kill on, even if sudo is refused, the other
@@ -199,15 +198,18 @@ the managers are masked, and says to resume.
 claude-agent resume
 ```
 
-As root, `resume` lifts airlock-envoy's kill switch only if a `halt` turned it on and nobody
-has set it again since. halt writes a random value into the switch file, and resume checks it
-is still there. A switch that was already on stays on, and so does one you turned off and on
-again by hand during the halt: it is yours. If `airlock-envoy-apply` is gone at resume while the
-halt's switch is on, resume says so and fails. Reinstall airlock-envoy and resume again, or give
-the switch up. Then it unmasks and starts the
-agents' managers, and their sessions come back by themselves. Finally, if the credentials
-were unlocked before the halt, it runs `airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a relaunch, because
-the sockets are new files.
+As root, `resume` first lifts airlock-envoy's kill switch, but only if a `halt` turned it on and
+it hasn't been rewritten since. halt writes a random value into the switch file, and resume checks
+it is still there. A switch that was already on stays on. So does one rewritten by hand during
+the halt (a `--stop`, or a `--start` that failed); resume says so and names `--start`. If
+`airlock-envoy-apply` is gone while the halt's switch is on, or lifting it fails, the agents stay
+halted and resume fails. Reinstall airlock-envoy (or fix what failed) and resume again, or give
+the switch up.
+
+Then root unmasks and starts the agents' managers, and their sessions come back by themselves.
+Finally, if the credentials were unlocked when you halted, resume runs `airlock-envoy-cred unlock`
+as you, for what was left of that unlock. An unlock that expired during the halt stays expired.
+Your own boxes on Envoy's sockets need a relaunch, because the sockets are new files.
 
 Locking revokes the tokens of a GitHub App whose key is in pass. airlock-envoy's mint timer keeps
 running, so a revoke that failed is retried. A file-key App's tokens stay valid at GitHub until
