@@ -77,6 +77,7 @@ claude-agent attach myproject
 | `claude-agent paste` | hand the agent the image on your clipboard |
 | `claude-agent update` | give the agents your current claude-airlock |
 | `claude-agent web ...` | web research (below) |
+| `claude-agent halt` / `resume` | emergency stop of everything (below) / back to normal |
 
 Tab completion (sessions, web commands, the queue's ids by state): add to your `~/.zshrc`, after
 `compinit`, or to `~/.bashrc` with `completion.bash`:
@@ -166,6 +167,40 @@ Then edit `agents.conf` and run `sudo airlock-agents-apply --confirm`; it withdr
 files. Renaming is removing and adding. A home image only grows by hand: `truncate -s 50G
 /var/lib/<user>/home.img`, `losetup -c /dev/loopN`, `xfs_growfs /home/<user>`, then update
 `agents.conf` to match. XFS can't shrink.
+
+### Emergency stop: halt and resume
+
+When something has gone wrong and every agent should stop now:
+
+```
+claude-agent halt
+```
+
+1. It lists what the agent users are running (also kept in
+   `~/.local/state/airlock-agents/halt-<time>.log`).
+2. At once, with no prompt, each agent user kills every process it may signal: its sessions, its
+   boxes (their uids are mapped in a user namespace it owns) and its user manager. This runs
+   through the same host shell as the other commands.
+3. It then says what root will do, and asks sudo for your password. Root masks and stops each
+   agent user's manager (`user@<uid>.service`), so nothing starts them again: not a login,
+   lingering or a reboot. If airlock-envoy is installed, root also turns on its kill switch
+   (`airlock-envoy-apply --stop`, which cuts every box's egress, your own boxes' included), locks
+   its credentials and stops its mint timer.
+
+Every step runs even if one before it failed. Run `halt` again if a root step failed. While
+halted, the other commands refuse and point at `resume`.
+
+```
+claude-agent resume
+```
+
+As root, `resume` lifts airlock-envoy's kill switch, unless it was already on before `halt`.
+It then unmasks and starts the agents' managers, and their sessions come back by themselves.
+Then it runs `airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a
+relaunch, because the sockets are new files.
+
+`halt` revokes the tokens of a GitHub App whose key is in pass. A file-key App's tokens stay
+valid at GitHub until they expire, within the hour. Nothing can use them while Envoy is stopped.
 
 ## Web research
 

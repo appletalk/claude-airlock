@@ -41,7 +41,7 @@ _airlock_agents() {
     local -a words=()
     COMPREPLY=()
     if [ "$COMP_CWORD" = 1 ]; then
-        words=(ls list new attach stop restart paste update shell reload web help)
+        words=(ls list new attach stop restart paste update shell reload web help halt resume)
     else
         case "${COMP_WORDS[1]}" in
             attach|stop|restart) [ "$COMP_CWORD" = 2 ] && mapfile -t words < <(_airlock_agents_names sessions) ;;

@@ -62,6 +62,7 @@ _airlock_agents() {
         'stop:stop a session' 'restart:restart a session' 'paste:the clipboard image into the inbox'
         'update:give the agent users your claude-airlock' 'shell:a shell as the agent'
         'reload:reload the agents'"'"' user units' 'web:web research' 'help:usage'
+        'halt:emergency stop of every agent user (and Envoy)' 'resume:undo halt'
     )
     webcmds=(
         'new:start another interactive session' 'stop:end an interactive session'

@@ -19,6 +19,14 @@
 #   <command> reload                    reload the agents' user units (after an apply changes them)
 #                                       and start the web research queue workers
 #
+# Emergency stop (something has gone wrong):
+#   <command> halt                      kill every process of the agent users at once (no
+#                                       prompt), then, with sudo: mask and stop their user
+#                                       managers (nothing restarts them, a reboot included) and,
+#                                       if airlock-envoy is installed, cut its egress (kill
+#                                       switch) and lock its credentials
+#   <command> resume                    undo halt (sudo), then unlock Envoy's credentials
+#
 # Web research (when agents.conf has web and guard users):
 #   <command> web [name]                attach to the interactive session (main, started if needed;
 #                                       a named one only while it runs); a fresh box, ends after 1 h idle
@@ -51,12 +59,13 @@ die() { echo "$CMD: $*" >&2; exit 1; }
 # through /proc/<pid>/root into the host's unsandboxed tree (R1, docs/agents.md). Never the
 # readable originals.
 ND="${AGENTS_NODUMP_DIR:-$AGENTS_LIB/bin}"   # test knob: the tests point it at stubs
+nd_ok() {
+    local b
+    for b in sh systemd-run systemctl; do [ "$(stat -c %u:%g:%a "$ND/$b" 2>/dev/null)" = 0:0:711 ] || { echo "$b"; return 1; }; done
+}
 nd_check() {
     local b
-    for b in sh systemd-run systemctl; do
-        [ "$(stat -c %u:%g:%a "$ND/$b" 2>/dev/null)" = 0:0:711 ] \
-            || die "$ND/$b missing or not root's 0711: sudo airlock-agents-apply --confirm (the execute-only copies)"
-    done
+    b="$(nd_ok)" || die "$ND/$b missing or not root's 0711: sudo airlock-agents-apply --confirm (the execute-only copies)"
 }
 # Every agent-side process goes through a host shell as the agent user (the one polkit action
 # the operator has) and from there into its user manager, so it gets the manager's sandbox.
@@ -455,8 +464,109 @@ web() {
     esac
 }
 
+# ---- halt / resume ----------------------------------------------------------------------------
+# What halt did, for resume (root's: written and read under sudo). Test knobs, like AGENTS_NODUMP_DIR.
+HALT_MARK="${AGENTS_HALT_MARK:-/var/lib/airlock-agents/halted}"
+ENVOY_STOPPED="${AGENTS_ENVOY_STOPPED:-/etc/airlock-envoy/stopped}"
+halted() { [ "$(systemctl is-enabled "user@$AGENTS_AGENT_UID.service" 2>/dev/null)" = masked ]; }
+# As root (one sudo for each verb). Each step runs even if one before it failed: in an
+# emergency a half-done stop is worse than a noisy one. The uids are checked to be numbers.
+# shellcheck disable=SC2016  # expanded by the root shell, on purpose
+ROOT_HALT='
+mark=$1 stopped=$2; shift 2
+rc=0; units=()
+for u; do case "$u" in ""|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; units+=("user@$u.service"); done
+mkdir -p "$(dirname "$mark")"
+{ echo "halted $(date -u +%Y-%m-%dT%H:%M:%SZ)"; [ ! -e "$stopped" ] || echo envoy-already-stopped; } > "$mark" || rc=1
+echo "==> masking and stopping ${units[*]}"
+systemctl mask "${units[@]}" || rc=1
+systemctl kill -s KILL "${units[@]}" 2>/dev/null || true
+systemctl stop "${units[@]}" || rc=1
+if command -v airlock-envoy-apply >/dev/null; then
+    echo "==> airlock-envoy: kill switch on, credentials locked, the mint timer stopped"
+    airlock-envoy-apply --stop || rc=1
+    airlock-envoy-cred lock || rc=1
+    systemctl disable --now airlock-envoy-mint.timer 2>/dev/null || true
+fi
+exit "$rc"
+'
+# shellcheck disable=SC2016  # expanded by the root shell, on purpose
+ROOT_RESUME='
+mark=$1; shift
+rc=0; units=()
+for u; do case "$u" in ""|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; units+=("user@$u.service"); done
+envoy=1; ! grep -qx envoy-already-stopped "$mark" 2>/dev/null || envoy=0
+if command -v airlock-envoy-apply >/dev/null; then
+    if [ "$envoy" = 1 ]; then echo "==> airlock-envoy: kill switch off (applies, starts everything)"; airlock-envoy-apply --start || rc=1
+    else echo "==> airlock-envoy: its kill switch was on before halt: left on (airlock-envoy-apply --start)"; fi
+fi
+echo "==> unmasking and starting ${units[*]}"
+systemctl unmask "${units[@]}" || rc=1
+systemctl start "${units[@]}" || rc=1
+[ "$rc" != 0 ] || rm -f "$mark"
+exit "$rc"
+'
+halt() {
+    local u uid users=() uids=() log
+    for u in "$AGENT" $WEB $GUARD; do
+        uid="$(getent passwd "$u" | cut -d: -f3)" || continue
+        [ -n "$uid" ] || continue
+        users+=("$u"); uids+=("$uid")
+    done
+    [ ${#users[@]} -gt 0 ] || die "no agent user is provisioned"
+    log="${XDG_STATE_HOME:-$HOME/.local/state}/airlock-agents/halt-$(date -u +%Y%m%dT%H%M%SZ).log"
+    mkdir -p "$(dirname "$log")"
+    echo "$CMD halt: what was running (also in $log):"
+    # The agents' command lines are theirs to write: cleaned before the terminal.
+    { echo "halt $(date -u +%Y-%m-%dT%H:%M:%SZ) by $(id -un): ${users[*]}"
+      timeout 5 ps -o user=,pid=,etime=,args= -u "$(IFS=,; echo "${uids[*]}")" 2>/dev/null || true
+    } | clean | cut -c1-200 | tee "$log"
+    # 1. Now, as the operator (no prompt): each agent user kills every process it may signal,
+    # its boxes too (their uids are mapped in a user namespace it owns), and its own manager.
+    echo "==> killing every process of ${users[*]}"
+    if nd_ok >/dev/null; then
+        for u in "${users[@]}"; do timeout 10 machinectl shell -q "$u@" "$ND/sh" -c 'kill -KILL -1' >/dev/null 2>&1 || true; done
+    else
+        echo "    (the execute-only copies are missing: left to the managers' stop, next)"
+    fi
+    # 2. As root: nothing restarts them.
+    echo
+    echo "$CMD halt: next, as root, so nothing starts them again (a reboot included): mask and stop"
+    echo "the user managers of ${users[*]}$(command -v airlock-envoy-apply >/dev/null && echo ", cut airlock-envoy's egress and lock its credentials")."
+    echo "sudo asks for your password for that."
+    if sudo -- /bin/bash -c "$ROOT_HALT" halt "$HALT_MARK" "$ENVOY_STOPPED" "${uids[@]}"; then
+        echo "$CMD halt: done. Everything stays stopped until: $CMD resume"
+    else
+        die "halt: a root step failed (above); the agents' processes were killed first. Run $CMD halt again"
+    fi
+}
+resume() {
+    local u uid users=() uids=()
+    for u in "$AGENT" $WEB $GUARD; do
+        uid="$(getent passwd "$u" | cut -d: -f3)" || continue
+        [ -n "$uid" ] || continue
+        users+=("$u"); uids+=("$uid")
+    done
+    echo "$CMD resume: as root, unmask and start the user managers of ${users[*]} (their sessions come"
+    echo "back by themselves)$(command -v airlock-envoy-apply >/dev/null && echo ", and lift airlock-envoy's kill switch")."
+    echo "sudo asks for your password for that."
+    sudo -- /bin/bash -c "$ROOT_RESUME" resume "$HALT_MARK" "${uids[@]}" || die "resume: a root step failed (above)"
+    if command -v airlock-envoy-cred >/dev/null; then
+        echo "==> unlocking airlock-envoy's pass credentials (airlock-envoy-cred unlock)"
+        airlock-envoy-cred unlock || echo "    not unlocked (above): airlock-envoy-cred unlock when you're ready"
+    fi
+    command -v airlock-envoy-apply >/dev/null && echo "$CMD resume: done. Your own boxes on Envoy's sockets need a relaunch (new socket files)." \
+        || echo "$CMD resume: done."
+}
+
 cmd="${1:-ls}"; shift || true
 case "$cmd" in
+    halt|resume|-h|--help|help|_complete) ;;
+    *) ! halted || die "halted ($CMD halt): $CMD resume first" ;;
+esac
+case "$cmd" in
+    halt) [ $# = 0 ] || die "usage: $CMD halt"; halt ;;
+    resume) [ $# = 0 ] || die "usage: $CMD resume"; resume ;;
     ls|list)
         octl list-units --all --full --no-legend --plain "$UNIT*.service" 2>/dev/null \
             | awk -v pre="$UNIT" '{ u=$1; if (index(u, pre) == 1) u = substr(u, length(pre) + 1); sub(/\.service$/,"",u); printf "%-40s %s/%s\n", u, $3, $4 }' ;;
