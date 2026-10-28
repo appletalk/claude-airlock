@@ -434,6 +434,9 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   [[ "$md" == "$(seed_md)"* ]]
   [ "$(grep -c '^## Hosts behind the egress proxy' <<< "$md")" = 1 ]
   grep -qF "plain \`http://<host>/\` URLs" <<< "$md"
+  # A locked credential (airlock-envoy's 423): stop and ask the human, never retry or unlock.
+  grep -qF "A **423 Locked**" <<< "$md"
+  grep -qF "ask the human to unlock it on the host. Never retry, and never try to unlock from the box" <<< "$md"
   grep -qF -- "- **\`metrics.example.org\`** (rules \`victoria-metrics\`, no credential): Prometheus-style" <<< "$md"
   grep -qF "curl 'http://metrics.example.org/api/v1/query?query=up'" <<< "$md"
   grep -qF -- "- **\`git.example.org\`** (rules \`forgejo\`, the proxy adds the credential): Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`tea\` logged in. API" <<< "$md"

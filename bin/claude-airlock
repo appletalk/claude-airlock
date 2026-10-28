@@ -383,7 +383,11 @@ Reach these with **plain `http://<host>/` URLs**: the proxy on the host does the
 each request against the host's rules and adds any credential itself. `https://` to them gets
 403 "use http://". Never put a token for them in the box, and never ask for one: there is
 nothing for it to do. A 403 from `airlock-envoy: refused by the ... rules` is the rule working,
-not an outage: say what was refused instead of retrying another way.
+not an outage: say what was refused instead of retrying another way. A **423 Locked**
+(`airlock-envoy: credential <name> is locked on this host`) means the host's operator has to
+unlock that credential: stop at that step, say which steps completed and where to resume, and
+ask the human to unlock it on the host. Never retry, and never try to unlock from the box:
+there is no way to.
 
 EOF
   # The proxy may scope a host to some repos (airlock-envoy's repos); the manifest doesn't
