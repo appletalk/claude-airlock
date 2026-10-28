@@ -186,7 +186,8 @@ claude-agent halt
    manager (`user@<uid>.service`), so nothing starts it again: not a login, lingering or a
    reboot. Root then kills the manager and every session of the user. If airlock-envoy is
    installed, root also turns on its kill switch (`airlock-envoy-apply --stop`, which cuts every
-   box's egress, your own boxes' included) and locks its credentials. The managers' stop comes
+   box's egress, your own boxes' included) and locks its credentials, each step if its tool is
+   there. The managers' stop comes
    last.
 
 Every step runs even if one before it failed. Run `halt` again if a root step failed; the record
@@ -198,10 +199,12 @@ the managers are masked, and says to resume.
 claude-agent resume
 ```
 
-As root, `resume` lifts airlock-envoy's kill switch only if a `halt` turned it on. A switch that
-was already on (yours) stays on. Then it unmasks and starts the
-agents' managers, and their sessions come back by themselves. Finally it runs
-`airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a relaunch, because
+As root, `resume` lifts airlock-envoy's kill switch only if a `halt` turned it on and nobody
+has set it again since. A switch that was already on stays on, and so does one you turned off
+and on again by hand during the halt: it is yours. If airlock-envoy's tools are gone at resume,
+the halt's switch stays on and resume says so and fails. Then it unmasks and starts the
+agents' managers, and their sessions come back by themselves. Finally, if the halt locked
+airlock-envoy's credentials, it runs `airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a relaunch, because
 the sockets are new files.
 
 Locking revokes the tokens of a GitHub App whose key is in pass. airlock-envoy's mint timer keeps
