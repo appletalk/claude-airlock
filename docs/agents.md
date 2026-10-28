@@ -191,15 +191,15 @@ claude-agent halt
 
 Every step runs even if one before it failed. Run `halt` again if a root step failed; the record
 of what the first run found is kept. From the kill on, even if sudo is refused, the other
-commands refuse and point at `resume`, and tab completion offers no sessions. Apply refuses too,
-and says to resume.
+commands refuse and point at `resume`, and tab completion offers no sessions. Apply refuses while
+the managers are masked, and says to resume.
 
 ```
 claude-agent resume
 ```
 
-As root, `resume` lifts airlock-envoy's kill switch if `halt` turned it on. It leaves the switch
-alone if it was on before `halt`, or if no halt was recorded. Then it unmasks and starts the
+As root, `resume` lifts airlock-envoy's kill switch only if a `halt` turned it on. A switch that
+was already on (yours) stays on. Then it unmasks and starts the
 agents' managers, and their sessions come back by themselves. Finally it runs
 `airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a relaunch, because
 the sockets are new files.

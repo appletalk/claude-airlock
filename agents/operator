@@ -467,7 +467,7 @@ web() {
 
 # ---- halt / resume ----------------------------------------------------------------------------
 # What halt did, for resume (root's: written under sudo, readable). Test knobs, like AGENTS_NODUMP_DIR.
-HALT_MARK="${AGENTS_HALT_MARK:-/var/lib/airlock-agents/halted}"
+HALT_MARK="${AGENTS_HALT_MARK:-/var/lib/airlock-agents-halt/halted}"
 ENVOY_STOPPED="${AGENTS_ENVOY_STOPPED:-/etc/airlock-envoy/stopped}"
 ENVOY_SBIN="${AGENTS_ENVOY_SBIN:-/usr/local/sbin}"   # where airlock-envoy installs its tools
 have_envoy() { [ -x "$ENVOY_SBIN/airlock-envoy-apply" ] && [ -x "$ENVOY_SBIN/airlock-envoy-cred" ]; }
@@ -479,7 +479,8 @@ halted() { [ -e "$HALTING" ] || [ "$(systemctl is-enabled "user@$AGENTS_AGENT_UI
 # emergency a half-done stop is worse than a noisy one. The uids are checked to be numbers.
 # Order: nothing may start them again (mask), they die (their manager's cgroup and every
 # session scope), egress is cut, and only then the managers' stop, which can be slow.
-# The mark keeps what the first halt found: a second halt must not record its own kill switch.
+# The mark says "envoy-stopped-by-halt" only when a halt turned Envoy's kill switch on itself
+# (never one it found on: the operator's); resume lifts only that, and drops the line once done.
 # shellcheck disable=SC2016  # expanded by the root shell, on purpose
 ROOT_HALT='
 umask 022   # the mark is for the operator to read too
@@ -487,14 +488,16 @@ mark=$1 stopped=$2 sbin=$3; shift 3
 rc=0; units=()
 for u; do case "$u" in ""|0|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; units+=("user@$u.service"); done
 mkdir -p "$(dirname "$mark")"
-[ -e "$mark" ] || { echo "halted $(date -u +%Y-%m-%dT%H:%M:%SZ)"; [ ! -e "$stopped" ] || echo envoy-already-stopped; } > "$mark" || rc=1
+[ -e "$mark" ] || echo "halted $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$mark" || rc=1
 echo "==> masking and killing ${units[*]}"
 systemctl mask "${units[@]}" || rc=1
 systemctl kill -s KILL "${units[@]}" 2>/dev/null || true
 for u; do loginctl terminate-user "$u" 2>/dev/null || true; done
 if [ -x "$sbin/airlock-envoy-apply" ] && [ -x "$sbin/airlock-envoy-cred" ]; then
     echo "==> airlock-envoy: kill switch on, credentials locked"
-    "$sbin/airlock-envoy-apply" --stop || rc=1
+    if [ -e "$stopped" ]; then "$sbin/airlock-envoy-apply" --stop || rc=1
+    elif "$sbin/airlock-envoy-apply" --stop; then grep -qx envoy-stopped-by-halt "$mark" || echo envoy-stopped-by-halt >> "$mark" || rc=1
+    else rc=1; fi
     "$sbin/airlock-envoy-cred" lock || rc=1
 fi
 echo "==> stopping ${units[*]}"
@@ -507,15 +510,12 @@ umask 022
 mark=$1 sbin=$2; shift 2
 rc=0; units=()
 for u; do case "$u" in ""|0|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; units+=("user@$u.service"); done
-# A resume that got Envoy back but failed later says so in the mark: a retry leaves Envoy alone.
-if [ -x "$sbin/airlock-envoy-apply" ]; then
-    if [ ! -e "$mark" ]; then echo "==> airlock-envoy: no halt recorded: left as it is"
-    elif grep -qx envoy-already-stopped "$mark"; then echo "==> airlock-envoy: its kill switch was on before halt: left on ($sbin/airlock-envoy-apply --start)"
-    elif grep -qx envoy-resumed "$mark"; then echo "==> airlock-envoy: already back (an earlier resume)"
-    else
+# Only a kill switch a halt turned on; the line goes once lifted, so a retry leaves Envoy alone.
+if [ -x "$sbin/airlock-envoy-apply" ] && [ -x "$sbin/airlock-envoy-cred" ]; then
+    if grep -qx envoy-stopped-by-halt "$mark" 2>/dev/null; then
         echo "==> airlock-envoy: kill switch off (applies, starts everything); your own boxes on its sockets need a relaunch (new socket files)"
-        if "$sbin/airlock-envoy-apply" --start; then echo envoy-resumed >> "$mark"; else rc=1; fi
-    fi
+        if "$sbin/airlock-envoy-apply" --start; then sed -i "/^envoy-stopped-by-halt\$/d" "$mark" || rc=1; else rc=1; fi
+    else echo "==> airlock-envoy: no kill switch of a halt to lift: left as it is ($sbin/airlock-envoy-apply --start lifts one)"; fi
 fi
 echo "==> unmasking and starting ${units[*]}"
 systemctl unmask "${units[@]}" || rc=1
@@ -552,7 +552,7 @@ halt() {
     if nd_ok >/dev/null; then
         local pids=() i
         for u in "${users[@]}"; do
-            timeout 10 machinectl shell -q "$u@" "$ND/sh" -c 'kill -KILL -1' </dev/null >/dev/null 2>&1 & pids+=($!)
+            timeout -k 2 10 machinectl shell -q "$u@" "$ND/sh" -c 'kill -KILL -1' </dev/null >/dev/null 2>&1 & pids+=($!)
         done
         for i in "${!users[@]}"; do
             # machinectl shell doesn't return the remote status: this says only that it ran
@@ -580,10 +580,8 @@ resume() {
     agent_users
     [ ${#users[@]} -gt 0 ] || die "no agent user is provisioned"
     if have_envoy; then
-        if [ ! -e "$HALT_MARK" ]; then envoy=" (airlock-envoy: no halt recorded, left as it is)"
-        elif grep -qx envoy-already-stopped "$HALT_MARK" 2>/dev/null; then envoy=" (airlock-envoy's kill switch was on before halt: left on)"
-        elif grep -qx envoy-resumed "$HALT_MARK" 2>/dev/null; then envoy=" (airlock-envoy is back already, from an earlier resume)"
-        else envoy=", and lift airlock-envoy's kill switch"; fi
+        if grep -qx envoy-stopped-by-halt "$HALT_MARK" 2>/dev/null; then envoy=", and lift airlock-envoy's kill switch"
+        else envoy=" (airlock-envoy: no kill switch of a halt to lift, left as it is)"; fi
     fi
     echo "$CMD resume: as root, unmask and start the user managers of ${users[*]} (their sessions come"
     echo "back by themselves)$envoy."

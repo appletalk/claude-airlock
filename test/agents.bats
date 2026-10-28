@@ -394,7 +394,7 @@ systemctl stop user@1100.service user@1101.service
 E
     # the mint timer keeps running: it retries the revokes the lock started
     if grep -q 'airlock-envoy-mint' "$LOG"; then echo "touched the mint timer"; return 1; fi
-    grep -q '^halted ' "$T/halted" && ! grep -q envoy-already-stopped "$T/halted"
+    grep -q '^halted ' "$T/halted" && grep -qx envoy-stopped-by-halt "$T/halted"
     # the record: what ran, cleaned (an agent's command line can carry escapes), kept in a log
     [[ "$output" == *"agent 4242 01:00 claude"* && "$output" != *$'\033'* ]]
     grep -q 'agent 4242' "$T"/state/airlock-agents/halt-*.log
@@ -445,18 +445,18 @@ E
     [ ! -e "$T/halted" ] && [ ! -e "$T/envoy-stopped" ]
 }
 
-@test "agent resume leaves on a kill switch halt didn't set: on before halt, or no halt at all; a second halt keeps the first one's record" {
+@test "agent resume lifts only a kill switch a halt turned on: not one on before, not with no halt, not twice" {
     halt_stubs
-    # on before halt
+    # on before halt (the operator's): halt doesn't claim it, resume leaves it on
     : > "$T/envoy-stopped"; run "$O" halt; : > "$LOG"
-    grep -qx envoy-already-stopped "$T/halted"
+    if grep -q envoy-stopped-by-halt "$T/halted"; then echo "claimed the operator's switch"; return 1; fi
     run "$O" resume
     if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "lifted a kill switch halt didn't set"; return 1; fi
-    [[ "${output%%SUDO-RAN*}" == *"was on before halt: left on"* && "$output" == *"left on"* ]]
-    # halt twice (as its failure message says to): the second must not record the first's switch
+    [[ "${output%%SUDO-RAN*}" == *"no kill switch of a halt to lift"* ]]
+    # halt twice: one record, lifted once
     rm -f "$T/envoy-stopped" "$T/halted"
     run "$O" halt; run "$O" halt; : > "$LOG"
-    if grep -q envoy-already-stopped "$T/halted"; then echo "second halt recorded its own switch"; return 1; fi
+    [ "$(grep -c envoy-stopped-by-halt "$T/halted")" = 1 ]
     run "$O" resume
     grep -qx "airlock-envoy-apply --start" "$LOG"
     # no halt recorded (a kill switch set by hand): left alone
@@ -464,20 +464,45 @@ E
     run "$O" resume
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "lifted a hand-set kill switch"; return 1; fi
-    [[ "$output" == *"no halt recorded"* ]]
 }
 
-@test "agent resume: a failed root step keeps the halt record, and a retry doesn't redo Envoy (or lift a switch set since)" {
+@test "agent resume: a failed root step keeps the halt record; a retry doesn't redo Envoy; a halt after a partial resume stops it again, and the next resume lifts it" {
     halt_stubs
     run "$O" halt
     FAIL_SYSTEMCTL=start run "$O" resume
-    [ "$status" -ne 0 ] && [ -e "$T/halted" ] && grep -qx envoy-resumed "$T/halted"
+    [ "$status" -ne 0 ] && [ -e "$T/halted" ] && ! grep -q envoy-stopped-by-halt "$T/halted" && [ ! -e "$T/envoy-stopped" ]
     : > "$T/envoy-stopped"; : > "$LOG"   # the operator turned it on by hand meanwhile
     run "$O" resume
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "a retry lifted the switch again"; return 1; fi
-    [[ "$output" == *"back already"* ]]
+    # partial resume, then halt again, then resume: Envoy back
+    rm -f "$T/envoy-stopped" "$T/halted"
+    run "$O" halt; FAIL_SYSTEMCTL=start run "$O" resume
+    run "$O" halt; [ -e "$T/envoy-stopped" ] && grep -qx envoy-stopped-by-halt "$T/halted"
+    : > "$LOG"; run "$O" resume
+    [ "$status" -eq 0 ] && grep -qx "airlock-envoy-apply --start" "$LOG" && [ ! -e "$T/envoy-stopped" ] || { echo "$output"; return 1; }
     FAIL_SYSTEMCTL=unmask run "$O" resume; [ "$status" -ne 0 ]
+}
+
+@test "halt and resume with only one of airlock-envoy's tools: no Envoy step either way" {
+    halt_stubs
+    rm "$T/envoy/airlock-envoy-cred"
+    run "$O" halt
+    : > "$T/envoy-stopped"; : > "$LOG"
+    run "$O" resume
+    if grep -q 'airlock-envoy' "$LOG"; then echo "an Envoy step: $(cat "$LOG")"; return 1; fi
+}
+
+@test "halt: the kill never has the terminal (stdin from /dev/null); the mark is readable whatever the umask; uid 0 refused" {
+    halt_stubs
+    sed -i 's|^echo "machinectl \$\*" >> "\$LOG"$|echo "machinectl $* stdin:$(readlink /proc/$$/fd/0)" >> "$LOG"|' "$T/bin/machinectl"
+    (umask 077; run "$O" halt; exit "$status")
+    grep -q "kill -KILL -1 stdin:/dev/null" "$LOG" || { grep machinectl "$LOG"; return 1; }
+    [ "$(stat -c %a "$T/halted")" = 644 ]
+    : > "$LOG"; rm -f "$T/halted"
+    echo "agent-guard:x:0:0::/home/agent-guard:/bin/bash" >> "$PASSWD"
+    run "$O" halt
+    [ "$status" -ne 0 ] && ! grep -q '^systemctl mask' "$LOG"
 }
 
 @test "halting: from the kill until root's mask (a refused sudo included) the operator's commands refuse; resume clears it" {
