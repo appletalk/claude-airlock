@@ -208,7 +208,8 @@ the switch up.
 
 Then root unmasks and starts the agents' managers, and their sessions come back by themselves.
 Finally, if the credentials were unlocked when you halted, resume runs `airlock-envoy-cred unlock`
-as you, for what was left of that unlock. An unlock that expired during the halt stays expired.
+as you: your pass prompt, for the usual lifetime (`unlock.conf`). Credentials that were locked when
+you halted stay locked.
 Your own boxes on Envoy's sockets need a relaunch, because the sockets are new files.
 
 Locking revokes the tokens of a GitHub App whose key is in pass. airlock-envoy's mint timer keeps

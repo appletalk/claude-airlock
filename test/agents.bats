@@ -447,7 +447,7 @@ E
     [ "$(grep -n 'airlock-envoy-apply --start' "$LOG" | cut -d: -f1)" -lt "$(grep -n 'systemctl start user@' "$LOG" | cut -d: -f1)" ]
     grep -qx "systemctl unmask user@1100.service user@1101.service" "$LOG"
     grep -qx "systemctl start user@1100.service user@1101.service" "$LOG"
-    [[ "$(tail -1 "$LOG")" =~ ^airlock-envoy-cred\ unlock\ --for\ (119|120)m$ ]]
+    [ "$(tail -1 "$LOG")" = "airlock-envoy-cred unlock" ]
     [ ! -e "$T/halted" ] && [ ! -e "$T/envoy-stopped" ]
 }
 
@@ -496,7 +496,7 @@ E
     run "$O" halt
     grep -qx "airlock-envoy-cred lock" "$LOG" && ! grep -q "airlock-envoy-apply" "$LOG"
     [[ "${output%%SUDO-RAN*}" == *"lock airlock-envoy's credentials"* && "${output%%SUDO-RAN*}" != *"egress"* ]]
-    : > "$LOG"; run "$O" resume; grep -qE "^airlock-envoy-cred unlock --for (119|120)m$" "$LOG"
+    : > "$LOG"; run "$O" resume; grep -qx "airlock-envoy-cred unlock" "$LOG"
     mv "$T/apply.away" "$T/envoy/airlock-envoy-apply"; rm -f "$T/halted" "$T/envoy-stopped"; : > "$LOG"
     rm "$T/envoy/airlock-envoy-cred"
     run "$O" halt
@@ -537,13 +537,10 @@ E
     run "$O" resume
     if grep -q 'airlock-envoy-cred unlock' "$LOG"; then echo "unlocked with no halt"; return 1; fi
     run "$O" halt; : > "$LOG"; run "$O" resume
-    grep -qE '^airlock-envoy-cred unlock --for (119|120)m$' "$LOG"
-    # unlocked before, expired during the halt: not unlocked again
-    printf 'unlocked until x\ndeadline %s\n' "$(( $(date +%s) + 30 ))" > "$T/credstate"; run "$O" halt; : > "$LOG"; run "$O" resume
-    if grep -q 'airlock-envoy-cred unlock' "$LOG"; then echo "unlocked again with under a minute left"; return 1; fi
-    [[ "$output" == *"has expired: not unlocked"* ]]
-    # locked before the halt (by the operator, or expired): stays locked
-    echo locked > "$T/credstate"; run "$O" halt; : > "$LOG"; run "$O" resume
+    grep -qx 'airlock-envoy-cred unlock' "$LOG"
+    # locked before the halt (by the operator, or expired), in the real format (a deadline line
+    # may linger): stays locked
+    printf 'locked\ndeadline %s\n' "$(( $(date +%s) + 7200 ))" > "$T/credstate"; run "$O" halt; : > "$LOG"; run "$O" resume
     if grep -q 'airlock-envoy-cred unlock' "$LOG"; then echo "unlocked what the operator had locked"; return 1; fi
     # the cred tool gone at resume: said
     printf 'unlocked until x\ndeadline %s\n' "$(( $(date +%s) + 7200 ))" > "$T/credstate"; run "$O" halt; mv "$T/envoy/airlock-envoy-cred" "$T/cred.away"
@@ -580,6 +577,7 @@ E
     run "$O" halt
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     if grep -q 'airlock-envoy-apply --stop' "$LOG"; then echo "ran --stop with no config"; return 1; fi
+    [[ "$output" == *"no config directory"* ]]
 }
 
 @test "apply: a masked slice is not the halt's (it says to move it away)" {
