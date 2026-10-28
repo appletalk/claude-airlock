@@ -580,6 +580,33 @@ E
     [[ "$output" == *"no config directory"* ]]
 }
 
+@test "halt with the state directory unwritable (a full disk): no record, no mark, but the kill and root's steps all run" {
+    halt_stubs
+    mkdir -p "$T/ro"; chmod 555 "$T/ro"; export XDG_STATE_HOME="$T/ro/state"
+    run "$O" halt
+    chmod 755 "$T/ro"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'kill -KILL -1' "$LOG" && grep -qx "systemctl mask user@1100.service user@1101.service" "$LOG" && grep -qx "airlock-envoy-apply --stop" "$LOG"
+    [[ "$output" == *"no record"* ]]
+}
+
+@test "root's steps say what failed: a lock that fails is not reported as locked" {
+    halt_stubs
+    printf '#!/bin/bash\necho "airlock-envoy-cred $*" >> "$LOG"; [ "$1" != lock ]\n' > "$T/envoy/airlock-envoy-cred"
+    run "$O" halt
+    [ "$status" -ne 0 ] && [[ "$output" == *"FAILED: $T/envoy/airlock-envoy-cred lock"* && "$output" != *"credentials locked"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a halt cut short between its --stop and the nonce: the switch is still the halt's (halt again claims it, resume lifts it)" {
+    halt_stubs
+    printf 'halted x\nenvoy-claim-pending\n' > "$T/halted"; /usr/bin/install -m 0644 /dev/null "$T/envoy-stopped"
+    run "$O" resume
+    [ "$status" -eq 0 ] && grep -qx "airlock-envoy-apply --start" "$LOG" || { echo "$output"; return 1; }
+    printf 'halted x\nenvoy-claim-pending\n' > "$T/halted"; /usr/bin/install -m 0644 /dev/null "$T/envoy-stopped"
+    run "$O" halt
+    grep -q "^envoy-stopped-by-halt " "$T/halted" && ! grep -q envoy-claim-pending "$T/halted"
+}
+
 @test "apply: a masked slice is not the halt's (it says to move it away)" {
     halt_stubs
     run "$P" --confirm

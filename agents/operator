@@ -501,27 +501,31 @@ systemctl kill -s KILL "${units[@]}" 2>/dev/null || true
 for u; do loginctl terminate-user "$u" 2>/dev/null || true; done
 nonce=$(sed -n "s/^envoy-stopped-by-halt //p" "$mark")
 if [ -x "$sbin/airlock-envoy-apply" ] && [ -d "$(dirname "$stopped")" ]; then
-    echo "==> airlock-envoy: kill switch on"
-    # Ours: none was on, or the one on holds our nonce.
+    echo "==> airlock-envoy: turning its kill switch on"
+    # Ours: none was on, the one on holds our nonce, or a halt cut short claimed it.
     ours=0
     if [ ! -e "$stopped" ]; then ours=1
-    elif [ -n "$nonce" ] && [ "$(head -c 64 "$stopped")" = "$nonce" ]; then ours=1; fi
-    "$sbin/airlock-envoy-apply" --stop || rc=1
+    elif [ -n "$nonce" ] && [ "$(head -c 64 "$stopped")" = "$nonce" ]; then ours=1
+    elif grep -qx envoy-claim-pending "$mark"; then ours=1; fi
+    # Decided before the file is touched: a halt cut short after --stop keeps the claim.
+    if [ "$ours" = 1 ]; then grep -qx envoy-claim-pending "$mark" || echo envoy-claim-pending >> "$mark" || rc=1; fi
+    "$sbin/airlock-envoy-apply" --stop || { rc=1; echo "    FAILED: $sbin/airlock-envoy-apply --stop (above)" >&2; }
     # Claimed on the switch being on, whatever --stop returned (it writes the file first).
     sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
     if [ "$ours" = 1 ] && [ -e "$stopped" ]; then
         nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d " \n")
         { printf "%s" "$nonce" > "$stopped" && echo "envoy-stopped-by-halt $nonce" >> "$mark"; } || rc=1
     fi
+    sed -i "/^envoy-claim-pending$/d" "$mark" || rc=1
 elif [ -x "$sbin/airlock-envoy-apply" ]; then
     echo "==> airlock-envoy: no config directory ($(dirname "$stopped")): no kill switch to turn on"
 fi
 if [ -x "$sbin/airlock-envoy-cred" ]; then
-    echo "==> airlock-envoy: credentials locked"
+    echo "==> airlock-envoy: locking its credentials"
     was=locked; ! head -n 1 "$credstate" 2>/dev/null | grep -q "^unlocked" || was=unlocked
     if "$sbin/airlock-envoy-cred" lock; then
         [ "$was" != unlocked ] || grep -qx envoy-locked-by-halt "$mark" || echo envoy-locked-by-halt >> "$mark" || rc=1
-    else rc=1; fi
+    else rc=1; echo "    FAILED: $sbin/airlock-envoy-cred lock (above): the credentials may still be unlocked" >&2; fi
 fi
 echo "==> stopping ${units[*]}"
 systemctl stop "${units[@]}" || rc=1
@@ -536,6 +540,11 @@ for u; do case "$u" in ""|0|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; uni
 # Only the kill switch a halt left (its nonce in the file); the line goes once lifted, so a
 # retry leaves Envoy alone. A --start that undoes itself writes the switch again: claimed again.
 nonce=$(sed -n "s/^envoy-stopped-by-halt //p" "$mark" 2>/dev/null)
+# A halt cut short between its --stop and the nonce: the switch it turned on is its own.
+if [ -z "$nonce" ] && grep -qx envoy-claim-pending "$mark" 2>/dev/null && [ -e "$stopped" ]; then
+    nonce=$(od -An -N16 -tx1 /dev/urandom | tr -d " \n")
+    printf "%s" "$nonce" > "$stopped" && sed -i "/^envoy-claim-pending$/d" "$mark" && echo "envoy-stopped-by-halt $nonce" >> "$mark" || rc=1
+fi
 if [ -n "$nonce" ]; then
     if [ ! -e "$stopped" ]; then
         echo "==> airlock-envoy: its kill switch is off already (if Envoy is not up, $sbin/airlock-envoy-apply --status)"; sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
@@ -583,18 +592,20 @@ halt() {
     agent_users
     [ ${#users[@]} -gt 0 ] || die "no agent user is provisioned"
     log="${XDG_STATE_HOME:-$HOME/.local/state}/airlock-agents/halt-$(date -u +%Y%m%dT%H%M%SZ).log"
-    mkdir -p "$(dirname "$log")"
+    # Nothing before the root steps may stop them: a full disk (a runaway agent's) or an
+    # unwritable state dir costs the record and the mark, never the kill.
+    mkdir -p "$(dirname "$log")" 2>/dev/null || true
     # The record, first (bounded: 2 s, 256 KiB), to the log only: an agent's flood can't hold
     # up the kill or the terminal. Their command lines are theirs to write: cleaned.
-    { echo "halt $(date -u +%Y-%m-%dT%H:%M:%SZ) by $(id -un): ${users[*]}"
-      timeout 2 ps -o user=,pid=,etime=,args= -u "$(IFS=,; echo "${uids[*]}")" 2>/dev/null | head -c 262144 || true
-    } | clean | cut -c1-200 > "$log"
+    { { echo "halt $(date -u +%Y-%m-%dT%H:%M:%SZ) by $(id -un): ${users[*]}"
+        timeout -k 1 2 ps -o user=,pid=,etime=,args= -u "$(IFS=,; echo "${uids[*]}")" 2>/dev/null | head -c 262144 || true
+      } | clean | cut -c1-200 > "$log"; } 2>/dev/null || { log=""; echo "    (no record: the state directory can't be written)"; }
     # 1. Now, as the operator (no prompt): each agent user kills every process it may signal,
     # its boxes too (their uids are mapped in a user namespace it owns), and its own manager.
     # All at once, never on the terminal (machinectl would take it: a background job under
     # timeout stops on it, and typed-ahead keys would go to a pty the agent owns).
     echo "==> killing every process of ${users[*]}"
-    : > "$HALTING"
+    : > "$HALTING" 2>/dev/null || echo "    (no halting mark: the state directory can't be written; your other commands still work until root's mask)"
     if nd_ok >/dev/null; then
         local pids=() i
         for u in "${users[@]}"; do
@@ -608,8 +619,10 @@ halt() {
     else
         echo "    (the execute-only copies are missing: left to root's kill, next)"
     fi
-    echo "What was running (all in $log):"
-    sed -n '2,21p' "$log" | sed 's/^/    /'
+    if [ -n "$log" ]; then
+        echo "What was running (all in $log):"
+        sed -n '2,21p' "$log" | sed 's/^/    /'
+    fi
     # 2. As root: nothing restarts them.
     echo
     echo "$CMD halt: next, as root, so nothing starts them again (a reboot included): mask, kill and"
