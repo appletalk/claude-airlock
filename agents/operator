@@ -284,7 +284,7 @@ WHEN_FIELD=st_ctime
 # to an old question is recent), by ctime: the agent picks an id's time, not a file's ctime. The stage logs are read once
 # for all ids, whole, as last_stage reads them (no link, a regular file, 64 MB at most).
 web_rows() {
-    local id w g t cl qn
+    local id w g t cl qn end
     python3 -I -c 'import json, os, re, stat, sys
 root, web, guard, field = sys.argv[1:5]
 ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}")
@@ -338,14 +338,21 @@ for d, suffix in (("requests", ".json"), ("held", ".json"), ("quarantine", ""), 
         except OSError:
             continue
         when[n] = max(t, when.get(n, 0))
+# requests/ opened once (no link at either step): one descriptor for every question
+try:
+    rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    qfd = os.open("requests", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rfd)
+except OSError:
+    qfd = None
 def question(i):
-    # as question_of reads it: the request (no link at any step, a regular file, never
-    # blocking, 16 KiB at most), its question on one line, 100 characters (clean() runs on
-    # what is shown)
+    # as question_of reads it: the request (no link, a regular file, never blocking, 16 KiB
+    # at most), its question on one line, 100 characters, and something UTF-8 can carry (a
+    # lone surrogate would stop the print below, and hide every older row); clean() runs on
+    # what is shown
+    if qfd is None:
+        return "(no request)"
     try:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-        fd = os.open("requests", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        f = os.open(i + ".json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        f = os.open(i + ".json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=qfd)
     except OSError:
         return "(no request)"
     try:
@@ -353,15 +360,21 @@ def question(i):
             return "(unreadable request)"
         q = json.loads(os.read(f, 16384)).get("question", "")
         # split() takes newlines and the \x1f the rows are split on as whitespace too
-        return " ".join(str(q).split())[:100]
+        q = " ".join(str(q).split())[:100]
+        return q.encode("utf-8", "replace").decode("utf-8")
     except Exception:
         return "(unreadable request)"
     finally:
         os.close(f)
 w, g = stages(web), stages(guard)
+out = sys.stdout.buffer
 for i in sorted(when, key=lambda i: (when[i], i), reverse=True):
-    print("%s\x1f%s\x1f%s\x1f%d\x1f%s" % (i, w.get(i, ""), g.get(i, ""), when[i], question(i)))' "$QUEUE" "$WEB" "$GUARD" "$WHEN_FIELD" \
-    | while IFS=$'\x1f' read -r id w g t qn; do
+    out.write(("%s\x1f%s\x1f%s\x1f%d\x1f%s\n" % (i, w.get(i, ""), g.get(i, ""), when[i], question(i))).encode("utf-8", "replace"))
+out.write(b"END\n")   # read whole: web_rows says so if this line never comes
+out.flush()' "$QUEUE" "$WEB" "$GUARD" "$WHEN_FIELD" \
+    | { end=0
+      while IFS=$'\x1f' read -r id w g t qn; do
+        [ "$id" != END ] || { end=1; continue; }
         [[ "$id" =~ $ID_RE && "$t" =~ ^[0-9]+$ ]] || continue
         STAGE_WEB=$w STAGE_GUARD=$g web_state_set "$id"
         case "$STATE" in
@@ -370,7 +383,10 @@ for i in sorted(when, key=lambda i: (when[i], i), reverse=True):
             *) cl=inflight ;;
         esac
         printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$id" "$STATE" "$cl" "$t" "$qn"
-    done
+      done
+      # a reader that stopped part way: what follows is not the whole queue, and says so
+      [ "$end" = 1 ] || echo "$CMD: the web queue could not be read whole: this list is not complete" >&2
+    }
 }
 # A time as epoch seconds, to compare with an entry's <when>.
 since_epoch() {  # since_epoch <n>d | <n>h | YYYY-MM-DD (local midnight)
@@ -392,8 +408,8 @@ set_cols() {
     [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 40 ] && W=$c
     return 0
 }
-row() {  # row <id> <state> <width> [question]: one cleaned line (web_rows gives the question)
-    printf '%s  %-28s  %s\n' "$1" "$2" "${4-$(question_of "$1")}" | clean | cut -c1-"$3"
+row() {  # row <id> <state> <width>: one cleaned line
+    printf '%s  %-28s  %s\n' "$1" "$2" "$(question_of "$1")" | clean | cut -c1-"$3"
 }
 # For many rows: each formatted as it comes, then all of them cleaned and cut in one pass (a
 # process per row is minutes for a queue a worker flooded).
@@ -576,7 +592,7 @@ except Exception:
 # web ls: the last 24 hours and whatever waits on the operator, newest first, cut to the
 # terminal; a closing line says what it left out.
 web_ls() {
-    local mode=recent cutoff="" id st cl t qn W shown=0 left=0
+    local mode=recent cutoff="" id st cl t qn W shown=0 left=0 list
     while [ $# -gt 0 ]; do
         case "$1" in
             --waiting) mode=waiting ;;
@@ -588,21 +604,21 @@ web_ls() {
     done
     [ "$mode" != recent ] || cutoff="$(since_epoch 24h)"
     set_cols
-    {
-        while IFS=$'\x1f' read -r id st cl t qn; do
-            case "$mode" in
-                waiting) [ "$cl" = waiting ] || { left=$((left + 1)); continue; } ;;
-                recent|since) [ "$cl" = waiting ] || [ "$t" -ge "$cutoff" ] || { left=$((left + 1)); continue; } ;;
-            esac
-            rawrow "$id" "$st" "$qn"; shown=$((shown + 1))
-        done < <(web_rows)
-        if [ $((shown + left)) = 0 ]; then echo "(no requests)"; exit 0; fi
+    list="$(mktemp)"
+    while IFS=$'\x1f' read -r id st cl t qn; do
         case "$mode" in
-            all) ;;
-            waiting) echo "($shown waiting on you; $left others: $CMD web ls --all)" ;;
-            *) [ "$left" = 0 ] || echo "($shown shown; $left older: $CMD web ls --since 7d, --all)" ;;
+            waiting) [ "$cl" = waiting ] || { left=$((left + 1)); continue; } ;;
+            recent|since) [ "$cl" = waiting ] || [ "$t" -ge "$cutoff" ] || { left=$((left + 1)); continue; } ;;
         esac
-    } | rows_out "$W"
+        rawrow "$id" "$st" "$qn" >> "$list"; shown=$((shown + 1))
+    done < <(web_rows)
+    rows_out "$W" < "$list"; rm -f -- "$list"
+    if [ $((shown + left)) = 0 ]; then echo "(no requests)"; return 0; fi
+    case "$mode" in
+        all) ;;
+        waiting) echo "($shown waiting on you; $left others: $CMD web ls --all)" ;;
+        *) [ "$left" = 0 ] || echo "($shown shown; $left older: $CMD web ls --since 7d, --all)" ;;
+    esac
 }
 # web purge: delete finished entries from the queue, as root (the answers, logs and quarantine
 # are the workers', in root's dirs). Never one in flight. Each id goes to root with the class it

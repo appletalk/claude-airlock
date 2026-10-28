@@ -1757,6 +1757,23 @@ web_mix() {  # a queue with one of each: recent and old, done, waiting and in fl
     [[ "$output" == *"$Z"* ]] || { echo "since a date is not local midnight: $output"; return 1; }
 }
 
+@test "agent web ls: a question no UTF-8 can carry, a link, a flood of requests: every row still listed, questions read safely" {
+    op_stubs; web_queue; export AGENTS_TEST_WHEN=mtime
+    HELD=$(nowid "2 days ago" 0000f7); req "$HELD" 'old held'; : > "$Q/held/$HELD.json"; aged "$HELD" "2 days ago"
+    BAD=$(nowid "1 hour ago" 0000f8); printf '{"question": "bad \\ud800 x"}' > "$Q/requests/$BAD.json"
+    run "$O" web ls --all
+    { [[ "$output" == *"$BAD"* && "$output" == *"$HELD  held"* ]] && [[ "$output" != *"not complete"* ]]; } || { echo "a lone surrogate hid a row: $output"; return 1; }
+    run "$O" web approve; [[ "$output" == *"$HELD"* ]] || { echo "approve candidates: $output"; return 1; }
+    # a request that is a link to JSON outside the queue: its question never shown
+    echo '{"question": "OUTSIDE SECRET"}' > "$T/outside.json"; LNK=$(nowid "now" 0000f9); ln -s "$T/outside.json" "$Q/requests/$LNK.json"
+    run "$O" web ls --all; [[ "$output" != *"OUTSIDE SECRET"* ]] || { echo "followed a link: $output"; return 1; }
+    rm -f "$Q/requests/$LNK.json"
+    # many requests under a low descriptor limit: every question read (no descriptor per row kept)
+    for n in $(seq 1 300); do req "$(nowid "$n minutes ago" "$(printf '%06x' "$n")")" "q$n"; done
+    out="$(ulimit -n 64; "$O" web ls --all 2>&1)"
+    [[ "$out" == *"  q300"* && "$out" != *"(no request)"* ]] || { echo "${out:0:600}"; return 1; }
+}
+
 @test "agent web show: no id shows the newest, named; an id by its last 6 characters (unique over every place an id lives)" {
     op_stubs; web_queue; web_mix
     echo "THE NEWEST ANSWER" > "$Q/answers/$NEW_DONE.md"
