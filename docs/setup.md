@@ -49,7 +49,7 @@ update. Details are in the README.
 Follow airlock-envoy's README. In short:
 
 ```
-sudo install/install-envoy.sh 1.40.0
+sudo install/install-envoy.sh 1.40.2
 sudo install/install-service.sh
 ```
 
