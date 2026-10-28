@@ -353,8 +353,10 @@ def question(i):
         return "(no request)"
     try:
         f = os.open(i + ".json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=qfd)
-    except OSError:
+    except FileNotFoundError:
         return "(no request)"
+    except OSError:
+        return "(unreadable request)"   # a link, a socket, no descriptor left
     try:
         if not stat.S_ISREG(os.fstat(f).st_mode):
             return "(unreadable request)"
@@ -412,7 +414,10 @@ row() {  # row <id> <state> <width>: one cleaned line
     printf '%s  %-28s  %s\n' "$1" "$2" "$(question_of "$1")" | clean | cut -c1-"$3"
 }
 # For many rows: each formatted as it comes, then all of them cleaned and cut in one pass (a
-# process per row is minutes for a queue a worker flooded).
+# process per row is minutes for a queue a worker flooded). The rows wait in a temp file of
+# uncleaned queue text: gone at exit, whatever stops the listing (Ctrl+C, a closed pipe).
+TMPLIST=""
+trap '[ -z "$TMPLIST" ] || rm -f -- "$TMPLIST"' EXIT
 rawrow() { printf '%s  %-28s  %s\n' "$1" "$2" "$3"; }
 rows_out() { clean | cut -c1-"$1"; }
 # An id as given, or its last 6 hex digits when only one request ends in them.
@@ -439,7 +444,7 @@ resolve_id() {  # resolve_id <id | 6 hex>
 candidates() {  # candidates <verb>
     local id st n=0 ok W qn list
     set_cols
-    list="$(mktemp)"
+    list="$(mktemp)"; TMPLIST=$list
     while IFS=$'\x1f' read -r id st _ _ qn; do
         ok=0
         # exactly what each verb accepts
@@ -604,7 +609,7 @@ web_ls() {
     done
     [ "$mode" != recent ] || cutoff="$(since_epoch 24h)"
     set_cols
-    list="$(mktemp)"
+    list="$(mktemp)"; TMPLIST=$list
     while IFS=$'\x1f' read -r id st cl t qn; do
         case "$mode" in
             waiting) [ "$cl" = waiting ] || { left=$((left + 1)); continue; } ;;
@@ -639,7 +644,7 @@ web_purge() {
     [[ "$age" =~ ^[1-9][0-9]{0,3}[dh]$ ]] || die "bad age '$age' (<n>d or <n>h)"
     cutoff="$(since_epoch "$age")"
     set_cols
-    list="$(mktemp)"
+    list="$(mktemp)"; TMPLIST=$list
     while IFS=$'\x1f' read -r id st cl t qn; do
         case "$mode:$cl" in
             old:done) [ "$t" -lt "$cutoff" ] || continue ;;

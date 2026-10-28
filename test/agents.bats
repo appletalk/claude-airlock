@@ -1774,6 +1774,25 @@ web_mix() {  # a queue with one of each: recent and old, done, waiting and in fl
     [[ "$out" == *"  q300"* && "$out" != *"(no request)"* ]] || { echo "${out:0:600}"; return 1; }
 }
 
+@test "agent web ls: a reader stopped part way says the list is not complete; a link reads unreadable; no temp file left" {
+    op_stubs; web_queue
+    req 20261021T120001Z-aaaaa1 first
+    # python3 that stops before the end of web_rows' pass (the END line), as a crash would
+    mkdir -p "$T/py"; printf '#!/bin/bash\nfor a; do case "$a" in *"END"*) "$(command -v -p python3 || echo /usr/bin/python3)" "$@" | head -n -1; exit 0 ;; esac; done\nexec /usr/bin/python3 "$@"\n' > "$T/py/python3"; chmod +x "$T/py/python3"
+    out="$(PATH="$T/py:$PATH" "$O" web ls --all 2>&1)"
+    [[ "$out" == *"could not be read whole: this list is not complete"* && "$out" == *"aaaaa1"* ]] || { echo "$out"; return 1; }
+    ln -s /nonexistent "$Q/requests/20261021T120002Z-aaaaa2.json"
+    run "$O" web ls --all; [[ "$output" == *"aaaaa2  queued"*"(unreadable request)"* ]] || { echo "$output"; return 1; }
+    # enough rows that head closes the pipe while the listing still writes
+    python3 - "$Q" <<'P'
+import sys
+for i in range(3000):
+    open(sys.argv[1] + "/requests/20261021T13%04dZ-%06x.json" % (i, i), "w").write('{"question": "%s"}' % ("q" * 90))
+P
+    mkdir -p "$T/tmp"; TMPDIR="$T/tmp" bash -c '"$1" web ls --all | head -n 1 >/dev/null' _ "$O"
+    [ -z "$(ls -A "$T/tmp")" ] || { echo "temp left: $(ls -A "$T/tmp")"; return 1; }
+}
+
 @test "agent web show: no id shows the newest, named; an id by its last 6 characters (unique over every place an id lives)" {
     op_stubs; web_queue; web_mix
     echo "THE NEWEST ANSWER" > "$Q/answers/$NEW_DONE.md"
