@@ -356,7 +356,8 @@ echo "systemctl $*" >> "$LOG"
 [ "$1" != "${FAIL_SYSTEMCTL:-}" ]
 S
     printf '#!/bin/bash\necho "ps $*" >> "$LOG"\nprintf "agent 4242 01:00 claude \\033]0;evil\\007--x\\n"\n' > "$T/bin/ps"
-    export AGENTS_ENVOY_SBIN="$T/envoy" AGENTS_HALT_MARK="$T/halted" AGENTS_ENVOY_STOPPED="$T/envoy-stopped" XDG_STATE_HOME="$T/state" \
+    mkdir -p "$T/ophome"
+    export HOME="$T/ophome" AGENTS_ENVOY_SBIN="$T/envoy" AGENTS_HALT_MARK="$T/halted" AGENTS_ENVOY_STOPPED="$T/envoy-stopped" XDG_STATE_HOME="$T/state" \
         AGENTS_ENVOY_CRED_STATE="$T/credstate"
     printf 'unlocked until x\ndeadline %s\n' "$(( $(date +%s) + 7200 ))" > "$T/credstate"
     mkdir -p "$T/envoy"
@@ -582,7 +583,7 @@ E
 
 @test "halt with the state directory unwritable (a full disk): no record, no mark, but the kill and root's steps all run" {
     halt_stubs
-    mkdir -p "$T/ro"; chmod 555 "$T/ro"; export XDG_STATE_HOME="$T/ro/state"
+    mkdir -p "$T/ro"; chmod 555 "$T/ro"; export XDG_STATE_HOME="$T/ro/state" HOME="$T/ro/home"
     run "$O" halt
     chmod 755 "$T/ro"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -671,6 +672,10 @@ E
         [ "$status" -ne 0 ] && [[ "$output" == *"halted"*"agent resume first"* ]] || { echo "$c: $output"; return 1; }
     done
     MASKED=1 run "$O" _complete sessions; [ "$status" -eq 0 ] && [ -z "$output" ]
+    # the halting mark (before root's mask) is seen by completion's bare environment too
+    run "$O" halt; : > "$LOG"
+    env -i PATH="$PATH" HOME="$HOME" AIRLOCK_AGENTS_ENV="$AIRLOCK_AGENTS_ENV" AGENTS_NODUMP_DIR="$AGENTS_NODUMP_DIR" LOG="$LOG" "$O" _complete sessions
+    if grep -q '^machinectl' "$LOG"; then echo "completion reached an agent while halting"; return 1; fi
     MASKED=1 run "$O" help; [ "$status" -eq 0 ]
     if grep -q '^machinectl' "$LOG"; then echo "a refused command reached an agent"; return 1; fi
     MASKED=1 run "$O" resume; [ "$status" -eq 0 ]

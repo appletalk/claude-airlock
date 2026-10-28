@@ -475,7 +475,8 @@ have_apply() { [ -x "$ENVOY_SBIN/airlock-envoy-apply" ]; }
 have_cred() { [ -x "$ENVOY_SBIN/airlock-envoy-cred" ]; }
 # Halting (the operator's own mark, made before the kill: until root's mask, nothing of the
 # operator's may start a manager again, a tab completion included) or halted (masked).
-HALTING="${XDG_STATE_HOME:-$HOME/.local/state}/airlock-agents/halting"
+# A fixed path under $HOME: the completions run this with a bare environment (HOME, no XDG_*).
+HALTING="$HOME/.local/state/airlock-agents/halting"
 halted() { [ -e "$HALTING" ] || [ "$(systemctl is-enabled "user@$AGENTS_AGENT_UID.service" 2>/dev/null)" = masked ]; }
 # As root (one sudo for each verb). Each step runs even if one before it failed: in an
 # emergency a half-done stop is worse than a noisy one. The uids are checked to be numbers.
@@ -494,7 +495,8 @@ mark=$1 stopped=$2 sbin=$3 credstate=$4; shift 4
 rc=0; units=()
 # An interrupt (Ctrl-C, the terminal closed) cuts the step running, never the ones after it. A
 # handler, not an ignore: a hung child can still be interrupted.
-trap "echo \"    (interrupted: going on with the next step)\" >&2; rc=1" INT HUP TERM QUIT
+trap "echo \"    (interrupted: going on with the next step)\" >&2; rc=1" INT TERM QUIT
+trap "" HUP   # the terminal gone: no step is cut (the steps inherit the ignore)
 newnonce() { local n; n=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d " \n"); [ -n "$n" ] || n=$(tr -d - < /proc/sys/kernel/random/uuid); printf "%s" "$n"; }
 for u; do case "$u" in ""|0|*[!0-9]*) echo "bad uid $u" >&2; exit 2 ;; esac; units+=("user@$u.service"); done
 mkdir -p "$(dirname "$mark")"
@@ -518,9 +520,12 @@ if [ -x "$sbin/airlock-envoy-apply" ] && [ -d "$(dirname "$stopped")" ]; then
     sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
     if [ "$ours" = 1 ] && [ -e "$stopped" ]; then
         nonce=$(newnonce)
-        { [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && echo "envoy-stopped-by-halt $nonce" >> "$mark"; } || rc=1
+        if [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && echo "envoy-stopped-by-halt $nonce" >> "$mark"; then
+            sed -i "/^envoy-claim-pending$/d" "$mark" || rc=1
+        else rc=1; fi   # the pending claim stays: the next halt claims the switch
+    else
+        sed -i "/^envoy-claim-pending$/d" "$mark" || rc=1
     fi
-    sed -i "/^envoy-claim-pending$/d" "$mark" || rc=1
 elif [ -x "$sbin/airlock-envoy-apply" ]; then
     echo "==> airlock-envoy: no config directory ($(dirname "$stopped")): no kill switch to turn on"
 fi
@@ -548,7 +553,8 @@ nonce=$(sed -n "s/^envoy-stopped-by-halt //p" "$mark" 2>/dev/null)
 # A halt cut short between its --stop and the nonce: the switch it turned on is its own.
 if [ -z "$nonce" ] && grep -qx envoy-claim-pending "$mark" 2>/dev/null && [ -e "$stopped" ]; then
     nonce=$(newnonce)
-    printf "%s" "$nonce" > "$stopped" && sed -i "/^envoy-claim-pending$/d" "$mark" && echo "envoy-stopped-by-halt $nonce" >> "$mark" || rc=1
+    { [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && sed -i "/^envoy-claim-pending$/d" "$mark" && echo "envoy-stopped-by-halt $nonce" >> "$mark"; } \
+        || { rc=1; nonce=""; echo "==> airlock-envoy: could not record the switch of a halt cut short: the agents stay halted, resume again" >&2; }
 fi
 if [ -n "$nonce" ]; then
     if [ ! -e "$stopped" ]; then
@@ -565,7 +571,7 @@ if [ -n "$nonce" ]; then
             rc=1
             if [ -e "$stopped" ]; then
                 nonce=$(newnonce)
-                printf "%s" "$nonce" > "$stopped" && sed -i "s/^envoy-stopped-by-halt .*/envoy-stopped-by-halt $nonce/" "$mark"
+                [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && sed -i "s/^envoy-stopped-by-halt .*/envoy-stopped-by-halt $nonce/" "$mark"
             fi
         fi
     fi
@@ -610,7 +616,7 @@ halt() {
     # All at once, never on the terminal (machinectl would take it: a background job under
     # timeout stops on it, and typed-ahead keys would go to a pty the agent owns).
     echo "==> killing every process of ${users[*]}"
-    { : > "$HALTING"; } 2>/dev/null || echo "    (no halting mark: the state directory can't be written; your other commands still work until root's mask)"
+    { mkdir -p "${HALTING%/*}" && : > "$HALTING"; } 2>/dev/null || echo "    (no halting mark: the state directory can't be written; your other commands still work until root's mask)"
     if nd_ok >/dev/null; then
         local pids=() i
         for u in "${users[@]}"; do
