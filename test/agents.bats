@@ -1890,7 +1890,29 @@ gone_all() {  # gone_all <id>: none of its files left
     run "$O" web retry "$H"
     run "$O" web purge --waiting
     { [[ "$output" == *"$H changed meanwhile: kept"* ]] && [ -e "$Q/requests/$H.json" ]; } || { echo "a retried approval purged as held: $output"; return 1; }
-        # a retry no worker took up (no state of its own to reset): no marker, nothing kept forever
+    # once the web checks it again (held again): purged as held
+    echo '{"ts":"h2","user":"agent-web","id":"'"$H"'","stage":"check","result":"held","exit":0}' >> "$Q/log/agent-web/stages.jsonl"
+    run "$O" web purge --waiting
+    gone_all "$H" || { echo "held after its new check, kept: $output"; return 1; }
+        # each class waits for its own worker: "changed" for the web, "gate failed" and "release failed"
+    # for the guard (a line from the other worker frees neither)
+    retried() {  # retried <id> <worker> <state>: as web retry leaves it
+        mkdir -p "$HOME/.local/state/$2-worker"; echo "$3" > "$HOME/.local/state/$2-worker/$1"; run "$O" web retry "$1"
+        [ -e "$Q/decisions/$1.retry" ] || { echo "no marker for $1: $output"; return 1; }
+    }
+    logline() { echo '{"ts":"'"$RANDOM"'","user":"'"$1"'","id":"'"$2"'","stage":"'"$3"'","result":"'"$4"'","exit":0}' >> "$Q/log/$1/stages.jsonl"; }
+    CH=$(nowid "8 days ago" 0000c7); req "$CH" changed; aged "$CH" "8 days ago"; logline agent-web "$CH" check "changed after its check"
+    GF=$(nowid "8 days ago" 0000c8); req "$GF" 'gate failed'; aged "$GF" "8 days ago"; logline agent-web "$GF" publish published; logline agent-guard "$GF" scan "failed, gave up"
+    RF2=$(nowid "8 days ago" 0000c9); req "$RF2" 'release failed'; mkdir "$Q/quarantine/$RF2"; : > "$Q/decisions/$RF2.release"; aged "$RF2" "8 days ago"
+    logline agent-guard "$RF2" release "release failed, gave up"
+    retried "$CH" agent-web changed; retried "$GF" agent-guard failed; retried "$RF2" agent-guard release-failed
+    logline agent-guard "$CH" scan skipped; logline agent-web "$GF" publish published; logline agent-web "$RF2" publish published
+    run "$O" web purge --waiting
+    for i in "$CH" "$GF" "$RF2"; do [[ "$output" == *"$i changed meanwhile: kept"* ]] || { echo "the other worker freed $i: $output"; return 1; }; done
+    logline agent-web "$CH" check "changed after its check"; logline agent-guard "$GF" scan "failed, gave up"; logline agent-guard "$RF2" release "release failed, gave up"
+    run "$O" web purge --waiting
+    for i in "$CH" "$GF" "$RF2"; do gone_all "$i" || { echo "$output"; return 1; }; done
+    # a retry no worker took up (no state of its own to reset): no marker, nothing kept forever
     F3=$(nowid "8 days ago" 0000b6); req "$F3" 'never reset'; aged "$F3" "8 days ago"
     echo '{"ts":"x","user":"agent-web","id":"'"$F3"'","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
     run "$O" web retry "$F3"; [ ! -e "$Q/decisions/$F3.retry" ] || { echo "a marker with no reset"; return 1; }

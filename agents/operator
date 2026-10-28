@@ -622,7 +622,7 @@ q=$1 web=$2 guard=$3; shift 3
 rc=0 gone=0 kept=0
 # The last stage line of an id in each worker log, read as the operator reads them: no link at any
 # step, a regular file, never blocking, 64 MB at most (the logs are the workers, who can swap
-# them for a link or a FIFO). "<web stage>US<guard stage>".
+# them for a link or a FIFO). "<web stage>US<guard stage>US<web anew>US<guard anew>".
 last() {
     python3 -I - "$q" "$web" "$guard" "$1" "${2:-}" "${3:-}" <<"PY"
 import os, re, stat, sys
