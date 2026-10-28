@@ -2871,7 +2871,11 @@ P
     done
     [ "$out_approve" = "$(printf '20261021T120001Z-aaaaa1\theld')" ] || { echo "approve: $out_approve"; return 1; }
     [ "$out_retry" = "$(printf '20261021T120004Z-aaaaa4\tfailed (check: failed, gave up)')" ] || { echo "retry: $out_retry"; return 1; }
-    [[ "$("$O" web ls --all)" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]]
+    # web ls, its rows (20000 of them here) formatted in one pass: seconds, not a process per row
+    SECONDS=0; out="$("$O" web ls --all)"
+    [ "$SECONDS" -le 20 ] || { echo "web ls --all took ${SECONDS}s"; return 1; }
+    [[ "$out" == *"20261021T120004Z-aaaaa4  failed (check: failed, gave up)"* ]] || { echo "${out:0:500}"; return 1; }
+    SECONDS=0; out="$("$O" ls)"; [ "$SECONDS" -le 20 ] || { echo "ls took ${SECONDS}s"; return 1; }
     for v in release; do SECONDS=0; "$O" _complete ids "$v" >/dev/null; [ "$SECONDS" -le 2 ] || { echo "$v took ${SECONDS}s"; return 1; }; done
 }
 
