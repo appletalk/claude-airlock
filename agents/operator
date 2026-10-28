@@ -43,7 +43,7 @@
 #                                       (no id: the newest request)
 #   <command> web approve|reject <id>   a held question (no id: the candidates)
 #   <command> web release <id>          a quarantined answer, after a look (no id: the candidates)
-#   <command> web retry <id>            an id a worker gave up on, from the start
+#   <command> web retry <id>            an id a worker gave up on, from the start (no id: the candidates)
 #   <command> web purge [--older-than <n>d|<n>h] | --waiting | --all
 #                                       delete finished entries older than 7 days (sudo);
 #                                       --waiting: what waits on you; --all: both. Never one in flight
@@ -271,23 +271,17 @@ web_state_set() {  # web_state_set <id>
         esac
     fi
 }
-# Where a state leaves the operator: done (answered, released, rejected), waiting (on the
-# operator: held, quarantined, failed), or in flight (queued, researching, gating).
-state_class() {
-    case "$1" in
-        answered|"released by "*|rejected) echo "done" ;;
-        held|quarantined*|failed*|changed*|"gate failed"*) echo waiting ;;
-        *) echo inflight ;;
-    esac
-}
+# Where a state leaves the operator (web_rows): done (answered, released, rejected), waiting (on
+# the operator: held, quarantined, failed), or in flight (queued, researching, gating).
 # The tests set file times with touch (mtime): a test hook, honoured only with the tests' own
-# agents.env (AIRLOCK_AGENTS_ENV). A real queue goes by ctime, which no user can set.
+# agents.env (AIRLOCK_AGENTS_ENV). A real queue goes by ctime, which an owner can move to now
+# (chmod, rename) but never back: an entry can be made to look new, never old.
 WHEN_FIELD=st_ctime
 [ -z "${AIRLOCK_AGENTS_ENV:-}" ] || [ "${AGENTS_TEST_WHEN:-}" != mtime ] || WHEN_FIELD=st_mtime
 # Every entry, newest first: "<id>US<state>US<class>US<when>" (US = \x1f; a state has spaces).
 # An entry is an id in requests/, held/, quarantine/ or answers/ (the agent can delete its
 # request and leave the rest). <when> is the epoch of its newest file (an answer that came today
-# to an old question is recent), by ctime: the agent picks an id's time, never a file's ctime. The stage logs are read once
+# to an old question is recent), by ctime: the agent picks an id's time, not a file's ctime. The stage logs are read once
 # for all ids, whole, as last_stage reads them (no link, a regular file, 64 MB at most).
 web_rows() {
     local id w g t cl
@@ -661,7 +655,7 @@ def last(user, off):
     new = not off.isdigit() or ref in data[int(off):]
     return st, new
 (ws, wn), (gs, gn) = last(web, wo), last(guard, go)
-print("%s\x1f%s\x1f%d" % (ws, gs, 1 if (wn or gn) else 0))
+print("%s\x1f%s\x1f%d\x1f%d" % (ws, gs, 1 if wn else 0, 1 if gn else 0))
 PY
 }
 for e; do
@@ -669,22 +663,29 @@ for e; do
     [[ "$id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$ ]] || { echo "bad id $id" >&2; rc=1; continue; }
     # Still what it was picked as: an approval, a release or a retry meanwhile puts it back in flight.
     ok=1
+    # A retry marker: where each log ended at the retry; until the worker it went to logs past
+    # there, the entry is still to be taken up, whatever it reads as (a retried approval reads held).
+    wo="" go=""
+    [ ! -f "$q/decisions/$id.retry" ] || read -r wo go < <(head -c 64 "$q/decisions/$id.retry"; echo)
+    [[ "$wo" =~ ^[0-9]{1,15}$ && "$go" =~ ^[0-9]{1,15}$ ]] || { wo=""; go=""; }
+    IFS=$(printf "\037") read -r ws gs wn gn < <(last "$id" "$wo" "$go")
     case "$cl" in
         done) [ -e "$q/answers/$id.md" ] || [ -e "$q/decisions/$id.reject" ] || ok=0 ;;
-        held) { [ -e "$q/held/$id.json" ] && [ ! -e "$q/decisions/$id.approve" ] && [ ! -e "$q/answers/$id.md" ]; } || ok=0 ;;
+        held) { [ -e "$q/held/$id.json" ] && [ ! -e "$q/decisions/$id.approve" ] && [ ! -e "$q/answers/$id.md" ]; } || ok=0
+            [ -z "$wo" ] || [ "$wn" = 1 ] || ok=0 ;;
         quarantined) { [ -e "$q/quarantine/$id" ] && [ ! -e "$q/answers/$id.md" ] && [ ! -e "$q/decisions/$id.release" ]; } || ok=0 ;;
         releasefailed|failed)
-            wo="" go=""
-            [ ! -f "$q/decisions/$id.retry" ] || read -r wo go < <(head -c 64 "$q/decisions/$id.retry"; echo)
-            [[ "$wo" =~ ^[0-9]{1,15}$ && "$go" =~ ^[0-9]{1,15}$ ]] || { wo=""; go=""; }
-            IFS=$(printf "\037") read -r ws gs new < <(last "$id" "$wo" "$go")
             case "$cl:$ws:$gs" in
                 releasefailed:*:*"release failed, gave up"*) [ ! -e "$q/answers/$id.md" ] || ok=0 ;;
                 failed:*"gave up"*:*|failed:*changed*:*|failed:*:*"gave up"*) ;;
                 *) ok=0 ;;
             esac
-            # a retry not yet picked up: no worker has logged this id since
-            [ "$new" = 1 ] || ok=0 ;;
+            # a retry not yet picked up: the worker whose stage made it fail has not logged it since
+            # (a line in the other log is not that worker taking it up)
+            case "$cl:$ws" in
+                failed:*"gave up"*|failed:*changed*) [ "$wn" = 1 ] || ok=0 ;;
+                *) [ "$gn" = 1 ] || ok=0 ;;
+            esac ;;
         *) ok=0 ;;
     esac
     [ "$ok" = 1 ] || { echo "    $id changed meanwhile: kept"; kept=$((kept + 1)); continue; }
@@ -700,7 +701,7 @@ exit "$rc"
 '
 
 web() {
-    local sub="${1:-}" n id u ws
+    local sub="${1:-}" n id u ws out pos
     case "$sub" in ask|ls|show|approve|reject|release|purge) ;; *) nd_check ;; esac   # loud, not "nothing running"
     case "$sub" in
         ask)

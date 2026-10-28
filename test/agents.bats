@@ -1875,11 +1875,22 @@ gone_all() {  # gone_all <id>: none of its files left
     [ -e "$Q/decisions/$F2.retry" ] && [ ! -e "$HOME/.local/state/agent-web-worker/$F2" ] || { echo "no retry marker: $output"; return 1; }
     run "$O" web purge --waiting
     { [[ "$output" == *"$F2 changed meanwhile: kept"* ]] && [ -e "$Q/requests/$F2.json" ]; } || { echo "$output"; return 1; }
-    # it fails again at the same stage, the same words: logged anew, so purged
+    # a line from the other worker (the guard) is not the web taking the retry up: still kept
+    mkdir -p "$Q/log/agent-guard"; echo '{"ts":"z","user":"agent-guard","id":"'"$F2"'","stage":"scan","result":"skipped"}' >> "$Q/log/agent-guard/stages.jsonl"
+    run "$O" web purge --waiting
+    { [[ "$output" == *"$F2 changed meanwhile: kept"* ]] && [ -e "$Q/requests/$F2.json" ]; } || { echo "a guard line freed the web's retry: $output"; return 1; }
+        # it fails again at the same stage, the same words: logged anew, so purged
     echo '{"ts":"y","user":"agent-web","id":"'"$F2"'","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
     run "$O" web purge --waiting
     gone_all "$F2" || { echo "$output"; return 1; }
-    # a retry no worker took up (no state of its own to reset): no marker, nothing kept forever
+    # a retried approval reads held again until the worker checks it anew: kept meanwhile
+    H=$(nowid "8 days ago" 0000b7); req "$H" 'approved, then failed'; echo '{"question":"x"}' > "$Q/held/$H.json"; : > "$Q/decisions/$H.approve"; aged "$H" "8 days ago"
+    echo '{"ts":"x","user":"agent-web","id":"'"$H"'","stage":"research","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
+    echo failed > "$HOME/.local/state/agent-web-worker/$H"
+    run "$O" web retry "$H"
+    run "$O" web purge --waiting
+    { [[ "$output" == *"$H changed meanwhile: kept"* ]] && [ -e "$Q/requests/$H.json" ]; } || { echo "a retried approval purged as held: $output"; return 1; }
+        # a retry no worker took up (no state of its own to reset): no marker, nothing kept forever
     F3=$(nowid "8 days ago" 0000b6); req "$F3" 'never reset'; aged "$F3" "8 days ago"
     echo '{"ts":"x","user":"agent-web","id":"'"$F3"'","stage":"check","result":"failed, gave up","exit":2}' >> "$Q/log/agent-web/stages.jsonl"
     run "$O" web retry "$F3"; [ ! -e "$Q/decisions/$F3.retry" ] || { echo "a marker with no reset"; return 1; }
