@@ -326,6 +326,18 @@ b"
     [ "$status" -ne 0 ]
 }
 
+@test "agent's client: --wait is minutes, 0 to 60; a seconds-sized wait is refused with the hint, not capped" {
+    id=20261021T120002Z-cccccc
+    for w in 61 280 900 -1; do
+        run python3 -I "$AGENTS_WEB_LIB/web.py" answer "$id" --wait "$w"
+        [ "$status" -eq 2 ]; [[ "$output" == *"--wait is in minutes, 0 to 60 (got $w)"* ]]
+    done
+    run python3 -I "$AGENTS_WEB_LIB/web.py" answer "$id" --wait 0
+    [ "$status" -eq 3 ]; [[ "$output" == *"no answer for $id yet"* ]]
+    run python3 -I "$AGENTS_WEB_LIB/web.py" answer --help
+    [[ "$output" == *"minutes to wait for the answer, 0 to 60"* ]]
+}
+
 @test "the box's memory dir for the workspace is emptied before each run" {
     ask
     mem="$T/web/.config/claude-airlock/state/$(printf '%s' "$T/web/research" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')/box-memory"

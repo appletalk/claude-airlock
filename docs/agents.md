@@ -223,8 +223,12 @@ The agent asks a question from its box:
 
 ```
 python3 /srv/claude-web/lib/web.py ask "question" --why "reason"
-python3 /srv/claude-web/lib/web.py answer <id> --wait 15
+python3 /srv/claude-web/lib/web.py answer <id> --wait 30   # in the background
 ```
+
+The agent's box instructions tell it to fetch the answer as a background command and carry on,
+so a wait never blocks the session. `--wait` is in minutes, 0 to 60; a larger value is refused
+(an agent once passed seconds).
 
 Each question goes through three steps:
 
