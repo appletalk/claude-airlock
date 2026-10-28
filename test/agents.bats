@@ -624,6 +624,35 @@ E
     [ "$status" -ne 0 ] && [[ "$output" == *"interrupted: going on"* ]] && grep -qx "airlock-envoy-cred lock" "$LOG" && grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG" || { echo "$output"; cat "$LOG"; return 1; }
 }
 
+@test "a HUP to root's halt script cuts no step; a nonce that can't be written keeps the claim for the next halt; HOME unset still halts" {
+    halt_stubs
+    cp "$T/envoy/airlock-envoy-apply" "$T/apply.ok"
+    printf '#!/bin/bash\necho "airlock-envoy-apply $*" >> "$LOG"\n[ "$1" = --stop ] && { /usr/bin/install -m 0644 /dev/null "$AGENTS_ENVOY_STOPPED"; kill -HUP $PPID; sleep 0.2; }\nexit 0\n' > "$T/envoy/airlock-envoy-apply"
+    run "$O" halt
+    [ "$status" -eq 0 ] && grep -qx "airlock-envoy-cred lock" "$LOG" && grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG" && grep -q "^envoy-stopped-by-halt " "$T/halted" || { echo "$output"; return 1; }
+    # the nonce write fails (the switch file read-only to the stub's root): the claim stays
+    rm -f "$T/halted" "$T/envoy-stopped"
+    printf '#!/bin/bash\necho "airlock-envoy-apply $*" >> "$LOG"\n[ "$1" = --stop ] && /usr/bin/install -m 0444 /dev/null "$AGENTS_ENVOY_STOPPED"\nexit 0\n' > "$T/envoy/airlock-envoy-apply"
+    run "$O" halt
+    [ "$status" -ne 0 ] && grep -qx envoy-claim-pending "$T/halted" && ! grep -q "^envoy-stopped-by-halt " "$T/halted" || { echo "$output"; cat "$T/halted"; return 1; }
+    mv "$T/apply.ok" "$T/envoy/airlock-envoy-apply"; chmod 644 "$T/envoy-stopped"
+    run "$O" halt; grep -q "^envoy-stopped-by-halt " "$T/halted"
+    : > "$LOG"; run "$O" resume; grep -qx "airlock-envoy-apply --start" "$LOG" || { echo "$output"; return 1; }
+    # HOME unset: the kill and root's steps still run
+    : > "$LOG"; env -u HOME "$O" halt >/dev/null 2>&1 || true
+    grep -q 'kill -KILL -1' "$LOG" && grep -qx "systemctl mask user@1100.service user@1101.service" "$LOG"
+}
+
+@test "resume: an empty nonce for a halt cut short is a failure, and the agents stay halted" {
+    halt_stubs
+    printf 'halted x\nenvoy-claim-pending\n' > "$T/halted"; /usr/bin/install -m 0644 /dev/null "$T/envoy-stopped"
+    mkdir -p "$T/notr"; printf '#!/bin/sh\ncat >/dev/null\n' > "$T/notr/tr"; printf '#!/bin/sh\nexit 1\n' > "$T/notr/od"; chmod +x "$T/notr/"*
+    PATH="$T/notr:$PATH" run "$O" resume
+    [ "$status" -ne 0 ] && [[ "$output" == *"could not record the switch"* ]] || { echo "$output"; return 1; }
+    if grep -q 'systemctl unmask' "$LOG"; then echo "agents back with no record"; return 1; fi
+    grep -qx envoy-claim-pending "$T/halted"
+}
+
 @test "apply: a masked slice is not the halt's (it says to move it away)" {
     halt_stubs
     run "$P" --confirm
@@ -673,8 +702,9 @@ E
     done
     MASKED=1 run "$O" _complete sessions; [ "$status" -eq 0 ] && [ -z "$output" ]
     # the halting mark (before root's mask) is seen by completion's bare environment too
-    run "$O" halt; : > "$LOG"
-    env -i PATH="$PATH" HOME="$HOME" AIRLOCK_AGENTS_ENV="$AIRLOCK_AGENTS_ENV" AGENTS_NODUMP_DIR="$AGENTS_NODUMP_DIR" LOG="$LOG" "$O" _complete sessions
+    bare() { env -i PATH="$PATH" HOME="$HOME" AIRLOCK_AGENTS_ENV="$AIRLOCK_AGENTS_ENV" AGENTS_NODUMP_DIR="$AGENTS_NODUMP_DIR" LOG="$LOG" STATS="$STATS" PASSWD="$PASSWD" GROUP="$GROUP" "$O" _complete sessions >/dev/null 2>&1 || true; }
+    : > "$LOG"; bare; grep -q '^machinectl' "$LOG" || { echo "control: the bare environment never reached machinectl"; return 1; }
+    run "$O" halt; : > "$LOG"; bare
     if grep -q '^machinectl' "$LOG"; then echo "completion reached an agent while halting"; return 1; fi
     MASKED=1 run "$O" help; [ "$status" -eq 0 ]
     if grep -q '^machinectl' "$LOG"; then echo "a refused command reached an agent"; return 1; fi

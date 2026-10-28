@@ -476,7 +476,9 @@ have_cred() { [ -x "$ENVOY_SBIN/airlock-envoy-cred" ]; }
 # Halting (the operator's own mark, made before the kill: until root's mask, nothing of the
 # operator's may start a manager again, a tab completion included) or halted (masked).
 # A fixed path under $HOME: the completions run this with a bare environment (HOME, no XDG_*).
-HALTING="$HOME/.local/state/airlock-agents/halting"
+# HOME unset (rare) must not stop halt before its kill: the account's home instead.
+OPHOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6 || true)}"
+HALTING="$OPHOME/.local/state/airlock-agents/halting"
 halted() { [ -e "$HALTING" ] || [ "$(systemctl is-enabled "user@$AGENTS_AGENT_UID.service" 2>/dev/null)" = masked ]; }
 # As root (one sudo for each verb). Each step runs even if one before it failed: in an
 # emergency a half-done stop is worse than a noisy one. The uids are checked to be numbers.
@@ -553,13 +555,13 @@ nonce=$(sed -n "s/^envoy-stopped-by-halt //p" "$mark" 2>/dev/null)
 # A halt cut short between its --stop and the nonce: the switch it turned on is its own.
 if [ -z "$nonce" ] && grep -qx envoy-claim-pending "$mark" 2>/dev/null && [ -e "$stopped" ]; then
     nonce=$(newnonce)
-    { [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && sed -i "/^envoy-claim-pending$/d" "$mark" && echo "envoy-stopped-by-halt $nonce" >> "$mark"; } \
+    { [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && echo "envoy-stopped-by-halt $nonce" >> "$mark" && sed -i "/^envoy-claim-pending$/d" "$mark"; } \
         || { rc=1; nonce=""; echo "==> airlock-envoy: could not record the switch of a halt cut short: the agents stay halted, resume again" >&2; }
 fi
 if [ -n "$nonce" ]; then
     if [ ! -e "$stopped" ]; then
         echo "==> airlock-envoy: its kill switch is off already (if Envoy is not up, $sbin/airlock-envoy-apply --status)"; sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
-    elif [ "$(head -c 64 "$stopped")" != "$nonce" ]; then
+    elif [ "$(head -c 64 "$stopped")" != "$nonce" ] && ! grep -qx envoy-claim-pending "$mark"; then
         echo "==> airlock-envoy: its kill switch was rewritten since the halt (a --stop, or a --start that failed, by hand): left on ($sbin/airlock-envoy-apply --start lifts it)"
         sed -i "/^envoy-stopped-by-halt /d" "$mark" || rc=1
     elif [ ! -x "$sbin/airlock-envoy-apply" ]; then
@@ -571,7 +573,8 @@ if [ -n "$nonce" ]; then
             rc=1
             if [ -e "$stopped" ]; then
                 nonce=$(newnonce)
-                [ -n "$nonce" ] && printf "%s" "$nonce" > "$stopped" && sed -i "s/^envoy-stopped-by-halt .*/envoy-stopped-by-halt $nonce/" "$mark"
+                # The record first: a write cut between leaves a claim the next resume re-claims.
+                [ -n "$nonce" ] && sed -i "s/^envoy-stopped-by-halt .*/envoy-stopped-by-halt $nonce/; \$a envoy-claim-pending" "$mark" && printf "%s" "$nonce" > "$stopped" && sed -i "/^envoy-claim-pending$/d" "$mark"
             fi
         fi
     fi
@@ -602,7 +605,7 @@ halt() {
     local u log users uids
     agent_users
     [ ${#users[@]} -gt 0 ] || die "no agent user is provisioned"
-    log="${XDG_STATE_HOME:-$HOME/.local/state}/airlock-agents/halt-$(date -u +%Y%m%dT%H%M%SZ).log"
+    log="${XDG_STATE_HOME:-$OPHOME/.local/state}/airlock-agents/halt-$(date -u +%Y%m%dT%H%M%SZ).log"
     # Nothing before the root steps may stop them: a full disk (a runaway agent's) or an
     # unwritable state dir costs the record and the mark, never the kill.
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
