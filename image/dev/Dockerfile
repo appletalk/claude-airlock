@@ -92,6 +92,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # unzip: terraform, tflint, alloy and the PSScriptAnalyzer .nupkg ship as zips.
 # drill (ldnsutils) sits beside dnsutils' dig for hosts whose tooling standardizes on ldns.
 # luajit runs Lua written for Envoy's Lua filter (LuaJIT, Lua 5.1) outside Envoy: unit tests.
+# acl (setfacl, getfacl): tools that render or check socket ACLs (airlock-envoy's parser suite)
+# need it on PATH. It grants nothing chmod can't: only a file's owner may change its ACL.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       gh \
@@ -119,6 +121,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       unzip \
       ldnsutils \
       luajit \
+      acl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY airlock-pg-start /usr/local/bin/airlock-pg-start
 RUN chmod 0555 /usr/local/bin/airlock-pg-start

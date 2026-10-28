@@ -6,7 +6,7 @@
 | --- | --- |
 | `claude-airlock:base` | Debian + Claude Code + the egress firewall and proxy bridge, and little else: curl, jq and a bare `python3` (no pip or venv). No git, gh or editor; those are in `:dev`. |
 | `claude-airlock:os` | The base without Claude Code (its `os` build stage). Not a box image: `:dev` builds on it and copies Claude Code from `:base` as its last layer. |
-| `claude-airlock:dev` *(default)* | Base + git, gh, make, less, vim, zsh, ripgrep, Python (pip, venv), Node, PowerShell, build tools, PostgreSQL, YAML tooling, infra clients (kubectl, helm, sops, tea, drill; no credentials baked in), and the [offline config validators](#config-validators). |
+| `claude-airlock:dev` *(default)* | Base + git, gh, make, less, vim, zsh, ripgrep, Python (pip, venv), Node, PowerShell, build tools, PostgreSQL, YAML tooling, ACL tools (`setfacl`, `getfacl`), infra clients (kubectl, helm, sops, tea, drill; no credentials baked in), and the [offline config validators](#config-validators). |
 | `claude-airlock:playwright` | Dev + headless Chromium + the Playwright MCP. Not built by the install. |
 
 - **Choose an image** with `AIRLOCK_IMAGE` in the host config, or per project with

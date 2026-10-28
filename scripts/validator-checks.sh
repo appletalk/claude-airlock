@@ -80,6 +80,10 @@ hdr "luajit (Lua for Envoy's Lua filter, run outside it)"
 expect_ok   "runs a valid chunk"                          luajit lua/good.lua
 expect_fail "refuses a syntax error"                      luajit lua/bad.lua
 
+hdr "acl (setfacl, getfacl on PATH)"
+expect_ok   "setfacl runs"                                setfacl --version
+expect_ok   "getfacl runs"                                getfacl --version
+
 hdr "alloy fmt / validate (Alloy syntax + component schema)"
 expect_ok   "fmt -t accepts formatted config"             alloy fmt -t alloy/good.alloy
 expect_fail "fmt -t rejects misformatted config"          alloy fmt -t alloy/bad-fmt.alloy
