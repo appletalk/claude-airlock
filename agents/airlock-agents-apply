@@ -909,6 +909,8 @@ done
 # included; generic drop-ins for every user's manager are named (they apply to the agents too).
 for r in "${ROLES[@]}"; do
     for f in "/etc/systemd/system/user@${UID_OF[$r]}.service" "/etc/systemd/system/user-${UID_OF[$r]}.slice"; do
+        # Masked (a link to /dev/null): the operator's halt. Not something to move away.
+        [ "$(readlink "$ROOT$f" 2>/dev/null)" != /dev/null ] || die "${NAME[$r]}'s manager is masked by $COMMAND halt: $COMMAND resume first"
         [ ! -e "$ROOT$f" ] || die "$f replaces the system's unit for ${NAME[$r]} (the sandbox drop-in would not apply as written): move it away"
     done
 done

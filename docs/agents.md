@@ -190,8 +190,9 @@ claude-agent halt
    last.
 
 Every step runs even if one before it failed. Run `halt` again if a root step failed; the record
-of what the first run found is kept. While halted, the other commands refuse and point at
-`resume`, and tab completion offers nothing.
+of what the first run found is kept. From the kill on, even if sudo is refused, the other
+commands refuse and point at `resume`, and tab completion offers no sessions. Apply refuses too,
+and says to resume.
 
 ```
 claude-agent resume

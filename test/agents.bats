@@ -374,7 +374,7 @@ S
     # phase 1, no sudo: each user kills what it may signal (agent-guard isn't provisioned)
     grep -qx "machinectl shell -q agent@ $T/nd/sh -c kill -KILL -1" "$LOG"
     grep -qx "machinectl shell -q agent-web@ $T/nd/sh -c kill -KILL -1" "$LOG"
-    [[ "$output" == *"agent: killed"*"agent-web: killed"* ]]
+    [[ "$output" == *"agent: kill sent"*"agent-web: kill sent"* ]]
     if grep -q "agent-guard@" "$LOG"; then echo "agent-guard isn't provisioned"; return 1; fi
     [ "$(grep -n 'kill -KILL' "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^sudo' "$LOG" | cut -d: -f1)" ]
     # the reason comes before the prompt, and names what root will do
@@ -421,6 +421,14 @@ E
     FAIL_SYSTEMCTL=mask run "$O" halt
     [ "$status" -ne 0 ] && [[ "$output" == *"a root step failed"* ]]
     grep -qx "airlock-envoy-apply --stop" "$LOG" && grep -qx "systemctl stop user@1100.service user@1101.service" "$LOG"
+    # Envoy's steps failing fail halt too
+    for c in airlock-envoy-apply airlock-envoy-cred; do
+        cp "$T/envoy/$c" "$T/$c.ok"; printf '#!/bin/bash\necho "%s $*" >> "$LOG"; exit 1\n' "$c" > "$T/envoy/$c"
+        rm -f "$T/halted"; run "$O" halt
+        [ "$status" -ne 0 ] || { echo "$c failing didn't fail halt"; return 1; }
+        mv "$T/$c.ok" "$T/envoy/$c"
+    done
+    run "$O" halt now; [ "$status" -ne 0 ] && [[ "$output" == *"usage"* ]]
 }
 
 @test "agent resume: Envoy back first, then the managers unmasked and started, then the unlock" {
@@ -459,11 +467,40 @@ E
     [[ "$output" == *"no halt recorded"* ]]
 }
 
-@test "agent resume: a failed root step keeps the halt record" {
+@test "agent resume: a failed root step keeps the halt record, and a retry doesn't redo Envoy (or lift a switch set since)" {
     halt_stubs
     run "$O" halt
     FAIL_SYSTEMCTL=start run "$O" resume
-    [ "$status" -ne 0 ] && [ -e "$T/halted" ]
+    [ "$status" -ne 0 ] && [ -e "$T/halted" ] && grep -qx envoy-resumed "$T/halted"
+    : > "$T/envoy-stopped"; : > "$LOG"   # the operator turned it on by hand meanwhile
+    run "$O" resume
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    if grep -q 'airlock-envoy-apply --start' "$LOG"; then echo "a retry lifted the switch again"; return 1; fi
+    [[ "$output" == *"back already"* ]]
+    FAIL_SYSTEMCTL=unmask run "$O" resume; [ "$status" -ne 0 ]
+}
+
+@test "halting: from the kill until root's mask (a refused sudo included) the operator's commands refuse; resume clears it" {
+    halt_stubs
+    printf '#!/bin/bash\n[ "$1" = -- ] && shift\necho "sudo $1 $2" >> "$LOG"; exit 1\n' > "$T/bin/sudo"
+    run "$O" halt
+    [ "$status" -ne 0 ] && [[ "$output" == *"sudo was refused"* ]]
+    : > "$LOG"
+    run "$O" ls; [ "$status" -ne 0 ] && [[ "$output" == *"halted"* ]]
+    run "$O" _complete sessions; [ -z "$output" ]
+    if grep -q '^machinectl' "$LOG"; then echo "reached an agent while halting"; return 1; fi
+    printf '#!/bin/bash\n[ "$1" = -- ] && shift\necho "sudo $1 $2" >> "$LOG"; echo SUDO-RAN\nexec "$@"\n' > "$T/bin/sudo"
+    run "$O" halt; run "$O" resume
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run "$O" ls; [ "$status" -eq 0 ]
+}
+
+@test "apply while halted: says to resume, rather than to move the mask away" {
+    halt_stubs
+    run "$P" --confirm
+    ln -s /dev/null "$R/etc/systemd/system/user@1100.service"
+    run "$P" --confirm
+    [ "$status" -ne 0 ] && [[ "$output" == *"masked by agent halt: agent resume first"* ]] || { echo "$output"; return 1; }
 }
 
 @test "while halted (agent's manager masked), the other commands refuse and point at resume; completion is silent; halt, resume and help still run" {
