@@ -200,11 +200,13 @@ claude-agent resume
 ```
 
 As root, `resume` lifts airlock-envoy's kill switch only if a `halt` turned it on and nobody
-has set it again since. A switch that was already on stays on, and so does one you turned off
-and on again by hand during the halt: it is yours. If airlock-envoy's tools are gone at resume,
-the halt's switch stays on and resume says so and fails. Then it unmasks and starts the
-agents' managers, and their sessions come back by themselves. Finally, if the halt locked
-airlock-envoy's credentials, it runs `airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a relaunch, because
+has set it again since. halt writes a random value into the switch file, and resume checks it
+is still there. A switch that was already on stays on, and so does one you turned off and on
+again by hand during the halt: it is yours. If `airlock-envoy-apply` is gone at resume while the
+halt's switch is on, resume says so and fails. Reinstall airlock-envoy and resume again, or give
+the switch up. Then it unmasks and starts the
+agents' managers, and their sessions come back by themselves. Finally, if the credentials
+were unlocked before the halt, it runs `airlock-envoy-cred unlock` as you. Your own boxes on Envoy's sockets need a relaunch, because
 the sockets are new files.
 
 Locking revokes the tokens of a GitHub App whose key is in pass. airlock-envoy's mint timer keeps
