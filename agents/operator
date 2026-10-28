@@ -44,9 +44,9 @@
 #   <command> web approve|reject <id>   a held question (no id: the candidates)
 #   <command> web release <id>          a quarantined answer, after a look (no id: the candidates)
 #   <command> web retry <id>            an id a worker gave up on, from the start
-#   <command> web purge [--older-than <n>d] | --waiting | --all
+#   <command> web purge [--older-than <n>d|<n>h] | --waiting | --all
 #                                       delete finished entries older than 7 days (sudo);
-#                                       --waiting: what waits on you; --all: every finished one
+#                                       --waiting: what waits on you; --all: both. Never one in flight
 #   An id can be given by its last 6 characters.
 #   <command> web login [research|gate|chat]   /login in each workspace's box (all three if none given)
 set -euo pipefail
@@ -280,13 +280,17 @@ state_class() {
         *) echo inflight ;;
     esac
 }
-# Every request, newest first: "<id>US<state>US<class>" (US = \x1f; a state has spaces). The
-# stage logs are read once for all ids, whole, as last_stage reads them (no link, a regular
-# file, 64 MB at most), so a long queue costs one pass, not one per id.
+# The tests set file times with touch (mtime); a real queue goes by ctime, which no user can set.
+case "${AGENTS_TEST_WHEN:-}" in mtime) WHEN_FIELD=st_mtime ;; *) WHEN_FIELD=st_ctime ;; esac
+# Every entry, newest first: "<id>US<state>US<class>US<when>" (US = \x1f; a state has spaces).
+# An entry is an id in requests/, held/, quarantine/ or answers/ (the agent can delete its
+# request and leave the rest). <when> is the epoch its request appeared (else its oldest other
+# file), by ctime: the agent picks an id's time, never a file's ctime. The stage logs are read once
+# for all ids, whole, as last_stage reads them (no link, a regular file, 64 MB at most).
 web_rows() {
     local id w g
     python3 -I -c 'import os, re, stat, sys
-root, web, guard = sys.argv[1:4]
+root, web, guard, field = sys.argv[1:5]
 ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}")
 def read_log(user):
     try:
@@ -321,33 +325,54 @@ def stages(user):
         for i in ids:
             last[i.decode()] = st
     return last
-try:
-    ents = os.listdir(os.path.join(root, "requests"))
-except OSError:
-    ents = []
-ids = sorted({e[:-5] for e in ents if e.endswith(".json") and ID.fullmatch(e[:-5])}, reverse=True)
+when = {}
+for d, suffix in (("requests", ".json"), ("held", ".json"), ("quarantine", ""), ("answers", ".md")):
+    try:
+        ents = os.listdir(os.path.join(root, d))
+    except OSError:
+        continue
+    for e in ents:
+        if suffix and not e.endswith(suffix):
+            continue
+        n = e[: -len(suffix)] if suffix else e
+        if not ID.fullmatch(n):
+            continue
+        try:
+            t = int(getattr(os.lstat(os.path.join(root, d, e)), field))
+        except OSError:
+            continue
+        if d == "requests":
+            when[n] = ("r", t)
+        elif when.get(n, ("x", 0))[0] != "r":
+            when[n] = ("o", min(t, when.get(n, ("o", t))[1]))
 w, g = stages(web), stages(guard)
-for i in ids:
-    print("%s\x1f%s\x1f%s" % (i, w.get(i, ""), g.get(i, "")))' "$QUEUE" "$WEB" "$GUARD" \
-    | while IFS=$'\x1f' read -r id w g; do
-        [[ "$id" =~ $ID_RE ]] || continue
+for i in sorted(when, key=lambda i: (when[i][1], i), reverse=True):
+    print("%s\x1f%s\x1f%s\x1f%d" % (i, w.get(i, ""), g.get(i, ""), when[i][1]))' "$QUEUE" "$WEB" "$GUARD" "$WHEN_FIELD" \
+    | while IFS=$'\x1f' read -r id w g t; do
+        [[ "$id" =~ $ID_RE && "$t" =~ ^[0-9]+$ ]] || continue
         STAGE_WEB=$w STAGE_GUARD=$g web_state_set "$id"
-        printf '%s\x1f%s\x1f%s\n' "$id" "$STATE" "$(state_class "$STATE")"
+        printf '%s\x1f%s\x1f%s\x1f%s\n' "$id" "$STATE" "$(state_class "$STATE")" "$t"
     done
 }
-# A time as an id's prefix (ids start with their UTC time, so the two compare as strings).
-id_time() {  # id_time <n>d | <n>h | YYYY-MM-DD (local midnight)
+# A time as epoch seconds, to compare with an entry's <when>.
+since_epoch() {  # since_epoch <n>d | <n>h | YYYY-MM-DD (local midnight)
     local t
     if [[ "$1" =~ ^([1-9][0-9]{0,3})([dh])$ ]]; then
         t="${BASH_REMATCH[1]} $([ "${BASH_REMATCH[2]}" = d ] && echo days || echo hours) ago"
     elif [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then t="$1 00:00"
     else die "bad time '$1' (<n>d, <n>h or YYYY-MM-DD)"; fi
-    date -u -d "$t" +%Y%m%dT%H%M%SZ 2>/dev/null || die "bad time '$1' (<n>d, <n>h or YYYY-MM-DD)"
+    date -d "$t" +%s 2>/dev/null || die "bad time '$1' (<n>d, <n>h or YYYY-MM-DD)"
 }
-# The width to cut rows to: the terminal's, else 200.
-cols() {
-    local c
-    if [ -t 1 ] && c="$(tput cols 2>/dev/null)" && [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 40 ]; then echo "$c"; else echo 200; fi
+# The width to cut rows to, into W: the terminal's, else 200. Set in the caller (a command
+# substitution has no terminal on stdout).
+set_cols() {
+    local c=""
+    W=200
+    [ -t 1 ] || return 0
+    c="$(stty size </dev/tty 2>/dev/null)" || return 0
+    c=${c#* }
+    [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 40 ] && W=$c
+    return 0
 }
 row() {  # row <id> <state> <width>: one cleaned line
     printf '%s  %-28s  %s\n' "$1" "$2" "$(question_of "$1")" | clean | cut -c1-"$3"
@@ -357,9 +382,13 @@ resolve_id() {  # resolve_id <id | 6 hex>
     local f m=() id
     if [[ "$1" =~ $ID_RE ]]; then printf '%s' "$1"; return; fi
     [[ "$1" =~ ^[0-9a-f]{6}$ ]] || die "not an id: '$1' ($CMD web ls)"
-    for f in "$QUEUE"/requests/*-"$1".json; do
-        id="${f##*/}"; id="${id%.json}"
-        [[ "$id" =~ $ID_RE ]] && m+=("$id")
+    # Every place an id lives, not only requests/: the agent owns its requests and can delete
+    # one, leaving its held copy; a short id must never land on another request then.
+    for f in "$QUEUE"/requests/*-"$1".json "$QUEUE"/held/*-"$1".json "$QUEUE"/quarantine/*-"$1" "$QUEUE"/answers/*-"$1".md; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        id="${f##*/}"; id="${id%.json}"; id="${id%.md}"
+        [[ "$id" =~ $ID_RE ]] || continue
+        [[ " ${m[*]} " == *" $id "* ]] || m+=("$id")
     done
     case ${#m[@]} in
         0) die "no request ends in $1 ($CMD web ls)" ;;
@@ -370,13 +399,14 @@ resolve_id() {  # resolve_id <id | 6 hex>
 # The ids a verb could act on, listed, and a refusal: an approval or release is the operator's
 # decision about one request, never "the latest".
 candidates() {  # candidates <verb>
-    local id st n=0 w ok
-    w="$(cols)"
-    while IFS=$'\x1f' read -r id st _; do
+    local id st n=0 ok W
+    set_cols
+    while IFS=$'\x1f' read -r id st _ _; do
         ok=0
-        case "$1:$st" in approve:held|reject:held|release:quarantined*|retry:failed*|retry:changed*|"retry:gate failed"*) ok=1 ;; esac
+        # exactly what each verb accepts
+        case "$1:$st" in approve:held|reject:held|release:quarantined|retry:failed*|retry:changed*|"retry:gate failed"*|"retry:quarantined, release failed"*) ok=1 ;; esac
         [ "$ok" = 1 ] || continue
-        row "$id" "$st" "$w"; n=$((n + 1))
+        row "$id" "$st" "$W"; n=$((n + 1))
     done < <(web_rows)
     [ "$n" -gt 0 ] || die "nothing to $1"
     die "say which: $CMD web $1 <id> (or its last 6 characters)"
@@ -385,7 +415,7 @@ candidates() {  # candidates <verb>
 web_waiting_line() {
     local id st h=0 q=0 f=0
     [ -n "$WEB" ] && [ -d "$QUEUE/requests" ] || return 0
-    while IFS=$'\x1f' read -r id st _; do
+    while IFS=$'\x1f' read -r id st _ _; do
         case "$st" in held) h=$((h + 1)) ;; quarantined*) q=$((q + 1)) ;; failed*|changed*|"gate failed"*) f=$((f + 1)) ;; esac
     done < <(web_rows)
     [ $((h + q + f)) -gt 0 ] || return 0
@@ -522,36 +552,37 @@ except Exception:
 # web ls: the last 24 hours and whatever waits on the operator, newest first, cut to the
 # terminal; a closing line says what it left out.
 web_ls() {
-    local mode=recent cutoff="" id st cl w shown=0 left=0
+    local mode=recent cutoff="" id st cl t W shown=0 left=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --waiting) mode=waiting ;;
             --all) mode=all ;;
-            --since) [ $# -ge 2 ] || die "--since needs <n>d, <n>h or YYYY-MM-DD"; cutoff="$(id_time "$2")"; mode=since; shift ;;
+            --since) [ $# -ge 2 ] || die "--since needs <n>d, <n>h or YYYY-MM-DD"; cutoff="$(since_epoch "$2")"; mode=since; shift ;;
             *) die "usage: $CMD web ls [--waiting | --since <n>d|<n>h|YYYY-MM-DD | --all]" ;;
         esac
         shift
     done
-    [ "$mode" != recent ] || cutoff="$(id_time 24h)"
-    w="$(cols)"
-    while IFS=$'\x1f' read -r id st cl; do
+    [ "$mode" != recent ] || cutoff="$(since_epoch 24h)"
+    set_cols
+    while IFS=$'\x1f' read -r id st cl t; do
         case "$mode" in
             waiting) [ "$cl" = waiting ] || { left=$((left + 1)); continue; } ;;
-            recent|since) [ "$cl" = waiting ] || [[ ! "$id" < "$cutoff" ]] || { left=$((left + 1)); continue; } ;;
+            recent|since) [ "$cl" = waiting ] || [ "$t" -ge "$cutoff" ] || { left=$((left + 1)); continue; } ;;
         esac
-        row "$id" "$st" "$w"; shown=$((shown + 1))
+        row "$id" "$st" "$W"; shown=$((shown + 1))
     done < <(web_rows)
+    if [ $((shown + left)) = 0 ]; then echo "(no requests)"; return 0; fi
     case "$mode" in
-        all) [ "$shown" -gt 0 ] || echo "(no requests)" ;;
+        all) ;;
         waiting) echo "($shown waiting on you; $left others: $CMD web ls --all)" ;;
-        *) [ "$left" = 0 ] && [ "$shown" -gt 0 ] || echo "($shown shown; $left older: $CMD web ls --since 7d, --all)" ;;
+        *) [ "$left" = 0 ] || echo "($shown shown; $left older: $CMD web ls --since 7d, --all)" ;;
     esac
 }
 # web purge: delete finished entries from the queue, as root (the answers, logs and quarantine
 # are the workers', in root's dirs). Never one in flight. Each id goes to root with the class it
 # was picked for, and root checks it again: one that changed meanwhile stays.
 web_purge() {
-    local mode=old age=7d cutoff id st cl w picked=() n=0
+    local mode=old age="" cutoff id st cl t W picked=() n=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --waiting) mode=waiting ;;
@@ -561,17 +592,24 @@ web_purge() {
         esac
         shift
     done
+    [ -z "$age" ] || [ "$mode" = old ] || die "--older-than goes with a plain purge, not --waiting or --all"
+    age=${age:-7d}
     [[ "$age" =~ ^[1-9][0-9]{0,3}[dh]$ ]] || die "bad age '$age' (<n>d or <n>h)"
-    cutoff="$(id_time "$age")"
-    w="$(cols)"
-    while IFS=$'\x1f' read -r id st cl; do
+    cutoff="$(since_epoch "$age")"
+    set_cols
+    while IFS=$'\x1f' read -r id st cl t; do
         case "$mode:$cl" in
-            old:done) [[ "$id" < "$cutoff" ]] || continue ;;
+            old:done) [ "$t" -lt "$cutoff" ] || continue ;;
             all:done|all:waiting|waiting:waiting) ;;
             *) continue ;;
         esac
-        case "$st" in held) cl=held ;; quarantined*) cl=quarantined ;; failed*|changed*|"gate failed"*) cl=failed ;; esac
-        row "$id" "$st" "$w"; picked+=("$id:$cl"); n=$((n + 1))
+        case "$st" in
+            held) cl=held ;;
+            "quarantined, release failed"*) cl=releasefailed ;;
+            quarantined*) cl=quarantined ;;
+            failed*|changed*|"gate failed"*) cl=failed ;;
+        esac
+        row "$id" "$st" "$W"; picked+=("$id:$cl"); n=$((n + 1))
     done < <(web_rows)
     [ "$n" -gt 0 ] || { echo "nothing to purge"; return 0; }
     echo
@@ -584,20 +622,63 @@ web_purge() {
 ROOT_PURGE='
 q=$1 web=$2 guard=$3; shift 3
 rc=0 gone=0 kept=0
-last() { grep -ahF "\"id\":\"$1\"" "$q/log/$web/stages.jsonl" "$q/log/$guard/stages.jsonl" 2>/dev/null | tail -n 1; }
+# The last stage line of an id in each worker log, read as the operator reads them: no link at any
+# step, a regular file, never blocking, 64 MB at most (the logs are the workers, who can swap
+# them for a link or a FIFO). "<web stage>US<guard stage>".
+last() {
+    python3 -I - "$q" "$web" "$guard" "$1" <<"PY"
+import os, re, stat, sys
+root, web, guard, i = sys.argv[1:5]
+STAGE = re.compile(rb""".*"stage":"([a-z]*)","result":"([a-z0-9 ,;()\x27-]*)".*""")
+ref = ("\"id\":\"%s\"" % i).encode()
+def last(user):
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        for p in ("log", user):
+            fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        f = os.open("stages.jsonl", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        if not stat.S_ISREG(os.fstat(f).st_mode):
+            return ""
+        data, cap = b"", 67108864
+        while len(data) < cap:
+            c = os.read(f, min(1048576, cap - len(data)))
+            if not c:
+                break
+            data += c
+    except OSError:
+        return ""
+    st = ""
+    for line in data.split(b"\n"):
+        if ref in line:
+            m = STAGE.fullmatch(line)
+            st = (m.group(1) + b": " + m.group(2)).decode() if m else ""
+    return st
+print("%s\x1f%s" % (last(web), last(guard)))
+PY
+}
 for e; do
     id=${e%%:*} cl=${e#*:}
     [[ "$id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$ ]] || { echo "bad id $id" >&2; rc=1; continue; }
-    # still what it was picked as (an approval or a retry meanwhile puts it back in flight)
+    # Still what it was picked as: an approval, a release or a retry meanwhile puts it back in flight.
+    ok=1
     case "$cl" in
-        done) [ -e "$q/answers/$id.md" ] || [ -e "$q/decisions/$id.reject" ] ;;
-        held) [ -e "$q/held/$id.json" ] && [ ! -e "$q/decisions/$id.approve" ] ;;
-        quarantined) [ -e "$q/quarantine/$id" ] && [ ! -e "$q/answers/$id.md" ] ;;
-        failed) last "$id" | grep -q "gave up\|changed" ;;
-        *) false ;;
-    esac || { echo "    $id changed meanwhile: kept"; kept=$((kept + 1)); continue; }
+        done) [ -e "$q/answers/$id.md" ] || [ -e "$q/decisions/$id.reject" ] || ok=0 ;;
+        held) { [ -e "$q/held/$id.json" ] && [ ! -e "$q/decisions/$id.approve" ] && [ ! -e "$q/answers/$id.md" ]; } || ok=0 ;;
+        quarantined) { [ -e "$q/quarantine/$id" ] && [ ! -e "$q/answers/$id.md" ] && [ ! -e "$q/decisions/$id.release" ]; } || ok=0 ;;
+        releasefailed|failed)
+            IFS=$(printf "\037") read -r ws gs < <(last "$id")
+            case "$cl:$ws:$gs" in
+                releasefailed:*:*"release failed, gave up"*) [ ! -e "$q/answers/$id.md" ] || ok=0 ;;
+                failed:*"gave up"*:*|failed:*changed*:*|failed:*:*"gave up"*) ;;
+                *) ok=0 ;;
+            esac
+            # a retry not yet picked up: its marker holds the stage lines it saw, still the last
+            if [ -e "$q/decisions/$id.retry" ] && [ "$(head -c 512 "$q/decisions/$id.retry" 2>/dev/null)" = "$ws|$gs" ]; then ok=0; fi ;;
+        *) ok=0 ;;
+    esac
+    [ "$ok" = 1 ] || { echo "    $id changed meanwhile: kept"; kept=$((kept + 1)); continue; }
     rm -f -- "$q/requests/$id.json" "$q/held/$id.json" "$q/answers/$id.md" \
-        "$q/decisions/$id.approve" "$q/decisions/$id.reject" "$q/decisions/$id.release" \
+        "$q/decisions/$id.approve" "$q/decisions/$id.reject" "$q/decisions/$id.release" "$q/decisions/$id.retry" \
         "$q/log/$web/$id.result.json" "$q/log/$guard/$id.result.json" \
         "$q/log/$web/transcripts/$id.jsonl" "$q/log/$guard/transcripts/$id.jsonl" || rc=1
     rm -rf -- "$q/reports/$id" "$q/quarantine/$id" || rc=1
@@ -622,7 +703,7 @@ web() {
                 # the newest request, named first
                 id="$(web_rows | awk -F '\037' 'NR == 1 { print $1 }')"   # read whole: no SIGPIPE
                 [ -n "$id" ] || die "no requests ($CMD web ask)"
-                row "$id" "$(web_state "$id")" "$(cols)"; echo
+                set_cols; row "$id" "$(web_state "$id")" "$W"; echo
             fi
             { if [ -e "$QUEUE/answers/$id.md" ]; then qread 1048576 "answers/$id.md" || echo "(not a plain file)"
             elif [ -e "$QUEUE/quarantine/$id" ]; then
@@ -633,7 +714,8 @@ web() {
             else echo "$id: $(web_state "$id")"; fi; } | clean ;;
         approve|reject|release)
             [ $# -ge 2 ] || candidates "$sub"
-            web_decide "$sub" "$(resolve_id "$2")" ;;
+            id="$(resolve_id "$2")" || exit 1
+            web_decide "$sub" "$id" ;;
         retry)
             [ $# -ge 2 ] || candidates retry
             id="$(resolve_id "$2")"
@@ -645,6 +727,9 @@ web() {
                 "gate failed"*|"quarantined, release failed"*) ;;
                 *) die "$id is $(web_state "$id"): nothing to retry" ;;
             esac
+            # For purge: a retry not picked up yet (the stage lines it saw are still the last).
+            printf '%s|%s' "$(last_stage "$WEB" "$id")" "$(last_stage "$GUARD" "$id")" > "$QUEUE/decisions/$id.retry.tmp" \
+                && chmod 0640 "$QUEUE/decisions/$id.retry.tmp" && mv -f "$QUEUE/decisions/$id.retry.tmp" "$QUEUE/decisions/$id.retry"
             # Only an id a worker gave up on: its state goes, so the next pass starts it over.
             # shellcheck disable=SC2016  # expanded on the worker's side
             AS=$WEB orun /bin/sh -c 'f="$HOME/.local/state/$2-worker/$1"
