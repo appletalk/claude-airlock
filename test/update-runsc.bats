@@ -429,3 +429,14 @@ EOF
     run "$U" --check
     [ "$status" -eq 10 ]
 }
+
+@test "a runsc whose error text is only blank lines still gets a message" {
+    release release-20261019.0
+    cat > "$T/bin/tar" <<'EOF'
+#!/bin/bash
+while [ $# -gt 0 ]; do case "$1" in -C) d=$2; shift ;; esac; shift; done
+printf '#!/bin/sh\necho >&2\necho "  " >&2\nexit 1\n' > "$d/runsc"; chmod 0700 "$d/runsc"
+EOF
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"reports no version; nothing installed"* ]] || { echo "$output"; return 1; }
+}
