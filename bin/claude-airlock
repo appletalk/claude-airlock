@@ -1325,6 +1325,7 @@ if [ "${1:-}" = "paste" ]; then
   _pself="${_pself%/*}"
   # shellcheck source=lib/clipboard-image.sh
   source "${_pself%/*}/lib/clipboard-image.sh" || exit 1
+  clip_abs_path
   shift
   _pcopy=0 _plist=0 _pn=10 _pproj="${AIRLOCK_PASTE_PROJECT:-}"
   while [ "$#" -gt 0 ]; do

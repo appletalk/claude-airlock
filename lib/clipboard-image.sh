@@ -4,6 +4,9 @@
 # agents/operator (`<command> paste`): one copy, so the two can't drift apart. Each caller
 # picks where the files live and publishes the result itself; this only reads and converts.
 #
+#   clip_abs_path         drops the empty and relative entries from PATH (call it first): the
+#                         caller's cwd may be a pastes dir a box can write, and with PATH=...:
+#                         or PATH=.:... a magick planted there would be the one that runs.
 #   clip_backend          sets CLIP_BACKEND to wayland or x11, by SESSION, not by which binary
 #                         happens to exist (under XWayland both can be installed and the native
 #                         one is the correct reader). Fails with the reason in CLIP_ERR.
@@ -21,6 +24,13 @@
 # Snipping Tool images through as image/bmp only) has to be converted or the box can't read it.
 
 CLIP_TYPES="image/png image/bmp image/x-bmp image/jpeg image/gif image/webp image/tiff"
+
+clip_abs_path() {
+  local d out="" parts=()
+  IFS=: read -ra parts <<< "$PATH"
+  for d in "${parts[@]}"; do case $d in /*) out+="${out:+:}$d" ;; esac; done
+  PATH=$out
+}
 
 clip_backend() {
   CLIP_BACKEND="" CLIP_ERR=""
@@ -91,7 +101,7 @@ from PIL import Image
 im = Image.open(sys.argv[1], formats=[sys.argv[3]])
 if im.mode not in ("1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16"):
     im = im.convert("RGBA")   # CMYK and the like: PNG cannot hold them
-im.save(sys.argv[2], "PNG")' "$raw" "$out" "${fmt^^}" \
+im.save(sys.argv[2], "PNG")' "$raw" "$out" "${fmt^^}" 2>/dev/null \
       || { CLIP_ERR="Pillow could not convert the clipboard's $type"; return 1; }
   else
     CLIP_ERR="the clipboard offered $type and no PNG converter is installed (imagemagick, ffmpeg or python-pillow / python3-pil)"

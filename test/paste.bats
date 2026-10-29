@@ -892,3 +892,36 @@ op_clean() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(head -c 8 "$output" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
 }
+
+# --- review round 3 ------------------------------------------------------------------------------
+
+@test "a relative or empty PATH entry never finds a converter planted in pastes/" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=bmp
+  stub_clipboard; no_converter
+  PATH_OVERRIDE=".:$PATH_OVERRIDE::"                  # PATH=.:...  and  PATH=$PATH:$UNSET
+  d="$(pastes_dir "$p")"; mkdir -p "$d"; chmod 700 "$TMP_BASE" "$TMP_BASE/$(_slug "$p")"
+  for b in magick convert ffmpeg python3; do
+    printf '#!/bin/sh\n: > "%s"\n' "$BATS_TEST_TMPDIR/pwned" > "$d/$b"; chmod +x "$d/$b"
+  done
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no PNG converter is installed"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/pwned" ]
+}
+
+@test "the work file is never in pastes/: a box swapping new files there for links writes nothing (O22)" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  d="$(pastes_dir "$p")"; mkdir -p "$d"; chmod 700 "$TMP_BASE" "$TMP_BASE/$(_slug "$p")"
+  victim="$BATS_TEST_TMPDIR/victim"; echo untouched > "$victim"
+  # A box watching pastes/: during the clipboard read, every hidden file there becomes a link.
+  cat > "$STUBBIN/wl-paste" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = --list-types ] && { echo image/png; exit 0; }
+for f in "$d"/.[!.]*; do [ -e "\$f" ] && { rm -f "\$f"; ln -s "$victim" "\$f"; }; done
+base64 -d <<<"\$PNG_B64"
+EOF
+  chmod +x "$STUBBIN/wl-paste"
+  run _paste "$p"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$victim")" = untouched ]
+}

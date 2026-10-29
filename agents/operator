@@ -1093,6 +1093,7 @@ case "$cmd" in
         # mktemp name and renamed, so no half-written file ever looks like a finished paste.
         # shellcheck source=lib/clipboard-image.sh
         . "${AGENTS_CLIP_LIB:-/usr/local/lib/airlock-agents/clipboard-image.sh}"
+        clip_abs_path
         clip_backend || die "$CLIP_ERR"
         [ -d "$INBOX/pastes" ] && [ -w "$INBOX/pastes" ] || die "$INBOX/pastes missing or not writable (airlock-agents-apply)"
         work="$(mktemp -d)" || die "no private work directory (\$TMPDIR)"

@@ -102,6 +102,8 @@ does not ask; it ends with a note (from a bundle too) while neither this nor
   decoded as the type the clipboard declared, never as whatever the bytes look like. Other
   image types (`image/x-ms-bmp`, AVIF, HEIC, icons) are refused too: copy the image as PNG.
   An animated or multi-page image becomes its first frame.
+- Python runs isolated (`python3 -I`), so a Pillow installed with `pip install --user` is
+  not seen: install the distribution's package.
 - The agents' `<command> paste` (docs/agents.md) shares this code
   (`lib/clipboard-image.sh`), so both read and convert alike.
 
