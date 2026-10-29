@@ -65,6 +65,11 @@ intact() {
         allowed "$rel" && [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %a "$f")" = 755 ] || return 1
         [ -n "$ROOT" ] || [ "$(stat -c %u "$f")" = 0 ] || return 1
         [ "$(sha256sum < "$f" | cut -d' ' -f1)" = "$sum" ] || return 1
+        # its own directory below $DEST (gvisor-bin/): root's 0755 too
+        if [ "$(dirname "$f")" != "$DEST" ]; then
+            [ ! -L "$(dirname "$f")" ] && [ "$(stat -c %a "$(dirname "$f")")" = 755 ] || return 1
+            [ -n "$ROOT" ] || [ "$(stat -c %u "$(dirname "$f")")" = 0 ] || return 1
+        fi
     done < <(awk '$1 == "file"' "$STATE")
     [ "$n" -gt 0 ] && [ -n "$(rec release)" ]
 }
@@ -79,7 +84,7 @@ boxes() {
 no_boxes() {
     local n; n="$(boxes)"
     [ "$n" -gt 0 ] || return 0
-    [ "$force" = 1 ] || die "$n gVisor box process(es) running. Stop the boxes first (the agents' sessions: <command> stop, <command> web stop), then run it again; or pass --force"
+    [ "$force" = 1 ] || die "$n gVisor box process(es) running. Stop the boxes first (the agents' sessions: <command> stop, and web stop with web research), then run it again; or pass --force"
     echo "update-runsc: WARNING: $n gVisor box process(es) running; replacing runsc under them (--force)" >&2
 }
 
@@ -96,8 +101,13 @@ present=0
 if [ -n "$recorded" ] || [ -e "$DEST/runsc" ] || [ -L "$DEST/runsc" ]; then present=1; fi
 if [ "$mode" = first ] && [ "$present" = 1 ]; then mode=check; fi
 
-# Work in a directory of root's beside the record (a noexec /tmp would stop the version run).
+# Work in a directory of root's beside the record (a noexec /tmp would stop the version run). One
+# run at a time; then whatever a killed run left (its download, staged files) can go.
 install -d -m 0755 "$(dirname "$STATE")"
+exec 9> "$(dirname "$STATE")/update-runsc.lock"
+flock -n 9 || die "another update-runsc is running"
+find "$(dirname "$STATE")" -maxdepth 1 -name 'tmp.*' -exec rm -rf -- {} + 2>/dev/null || true
+find "$DEST" -name '*.update-runsc.*' -delete 2>/dev/null || true
 tmp="$(mktemp -d "$(dirname "$STATE")/tmp.XXXXXX")"
 # Also sweep staged files an interrupted install left behind.
 trap 'rm -rf "$tmp"; find "$DEST" -name "*.update-runsc.$$" -delete 2>/dev/null || true' EXIT
@@ -145,7 +155,8 @@ chmod 0711 "$tmp"
 ver="$(cd / && setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$tmp/ver/runsc" --version 2>"$tmp/ver.err")" || ver=""
 candidate="$(awk '/^runsc version/ { print $3 }' <<< "$ver" | head -n 1)"
 if ! [[ "$candidate" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    why=""; [ ! -s "$tmp/ver.err" ] || why=" ($(tail -n 1 "$tmp/ver.err"))"
+    # its last line, printable characters only (it is the downloaded binary's text)
+    why=""; [ ! -s "$tmp/ver.err" ] || why=" ($(tail -c 4096 "$tmp/ver.err" | tail -n 1 | tr -cd '[:print:]' | cut -c1-200))"
     die "the unpacked runsc reports no version$why; nothing installed"
 fi
 
@@ -181,5 +192,8 @@ for rel in "${files[@]}"; do
     mv -f "$dst.update-runsc.$$" "$dst"
 done
 install -m 0644 "$new_state" "$STATE.new" && mv -f "$STATE.new" "$STATE"
-printf '%s  %s -> %s%s\n' "$(date -Is)" "${recorded:-none}" "$candidate" "$([ -n "$recorded" ] && [ -z "$installed" ] && echo ' (reinstalled: the files no longer matched the record)')" >> "$LOG"
-echo "installed runsc $candidate (was ${recorded:-none}$([ -n "$recorded" ] && [ -z "$installed" ] && echo ', reinstalled'))"
+note=""
+if [ -n "$recorded" ] && [ -z "$installed" ]; then note=" (reinstalled: the files no longer matched the record)"
+elif [ -z "$recorded" ] && [ "$present" = 1 ]; then note=" (replaced a runsc with no record)"; fi
+printf '%s  %s -> %s%s\n' "$(date -Is)" "${recorded:-none}" "$candidate" "$note" >> "$LOG"
+echo "installed runsc $candidate (was ${recorded:-none})$note"

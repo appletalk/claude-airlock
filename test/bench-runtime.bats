@@ -95,3 +95,17 @@ results() { printf 'variant\tworkload\trun\tvalue\tstatus\n'; printf '%b' "$1"; 
     run "$B" --summarize "$T/r.tsv"
     grep -qx $'git-gc\t0.05 FAIL\t1' <<< "$output"
 }
+
+@test "in the box, a workload whose pipeline fails partway (tar of an unreadable file) is a failure, not a fast success" {
+    [ "$(id -u)" != 0 ] || skip "root reads anything"
+    # the box script's settings and workload functions, as the bench writes them
+    sed -n "/<<'INNER'$/,/^INNER$/p" "$B" | sed '1d;$d' > "$T/inner.sh"
+    { grep -m1 '^set -' "$T/inner.sh"; sed -n '/^t() {/,/^pyc() {/p' "$T/inner.sh"; } > "$T/fns.sh"
+    grep -qx 'set -uo pipefail' "$T/fns.sh"
+    W="$T/w"; mkdir -p "$W/src"; echo a > "$W/src/a"; echo b > "$W/src/b"; chmod 000 "$W/src/b"
+    run bash -c 'source "$1"; W=$2; t files-tar-stat 1 files' _ "$T/fns.sh" "$W"
+    chmod 600 "$W/src/b"
+    [[ "$output" == $'files-tar-stat\t1\t'*$'\tfail' ]] || { echo "$output"; return 1; }
+    run bash -c 'source "$1"; W=$2; t files-tar-stat 1 files' _ "$T/fns.sh" "$W"
+    [[ "$output" == $'files-tar-stat\t1\t'*$'\tok' ]] || { echo "$output"; return 1; }
+}

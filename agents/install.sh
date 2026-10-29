@@ -159,7 +159,8 @@ if [ "${AGENTS_RUNSC:-on}" = on ]; then
     rc=0; /usr/local/sbin/update-runsc --first || rc=$?
     case "$rc" in
         0) ;;
-        10) echo "==> gVisor: stop the agents' sessions ($AGENTS_COMMAND stop$([ -z "$AGENTS_WEB" ] || echo ", $AGENTS_COMMAND web stop")), then: sudo update-runsc; start them again after" ;;
+        10) echo "==> gVisor: stop the agents' sessions ($AGENTS_COMMAND stop$([ -z "$AGENTS_WEB" ] || echo ", $AGENTS_COMMAND web stop")), then: sudo update-runsc; start them again after"
+            echo "    (a runsc you installed yourself is replaced by that: to keep it, put external runsc in agents.conf instead)" ;;
         *) echo "install-agents: WARNING: runsc not installed or checked (above); boxes don't run under it yet. Retry: sudo update-runsc" >&2 ;;
     esac
 fi

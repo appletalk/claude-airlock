@@ -48,6 +48,8 @@ EOF
 #!/bin/bash
 o=(); while [[ "${1:-}" == --* ]]; do o+=("$1"); shift; done
 echo "setpriv ${o[*]}" >> "$CALLS"
+v=$(dirname "$1"); t=$(dirname "$v")
+echo "modes cwd=$PWD work=$(stat -c %a "$t") ver=$(ls "$v" | tr '\n' ' ')$(stat -c %a "$v") new=$(stat -c %a "$t/new") new-writable=$(find "$t/new" -perm /022 | wc -l)" >> "$CALLS"
 exec "$@"
 EOF
     chmod +x "$T/bin/"*
@@ -301,7 +303,7 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     chmod 0777 "$R/usr/local/bin/runsc"
     release release-20261026.0
     run "$U"
-    [[ "$output" == *"installed runsc release-20261026.0 (was release-20261019.0, reinstalled)"* ]]
+    [[ "$output" == *"installed runsc release-20261026.0 (was release-20261019.0) (reinstalled: the files no longer matched the record)"* ]]
     grep -q '  release-20261019.0 -> release-20261026.0 (reinstalled: the files no longer matched the record)$' "$R/var/log/update-runsc.log"
     release release-20261026.0 ""
     "$U" >/dev/null
@@ -342,4 +344,55 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     sed -i 's#exit ${VERSION_RC:-0}#echo "exec format error" >\&2; exit 1#' "$T/bin/tar"
     run "$U"
     [ "$status" -eq 1 ]; [[ "$output" == *"reports no version (exec format error)"* ]]
+}
+
+@test "the version run: as nobody, from /, in a work dir only root can list, seeing a copy of runsc alone" {
+    release release-20261019.0
+    "$U" >/dev/null
+    grep -qx 'modes cwd=/ work=711 ver=runsc 755 new=700 new-writable=0' "$CALLS"
+    case "$(dirname "$S")" in "$R"/var/lib/claude-airlock) ;; *) return 1 ;; esac
+    run find "$R/var/lib/claude-airlock" -maxdepth 1 -name 'tmp.*'
+    [ -z "$output" ]
+}
+
+@test "what a killed run left (its work dir, staged files) is swept; a second run at once is refused" {
+    mkdir -p "$R/var/lib/claude-airlock/tmp.old1" && echo big > "$R/var/lib/claude-airlock/tmp.old1/gvisor.tar.zstd"
+    echo x > "$R/usr/local/bin/runsc.update-runsc.4242"
+    release release-20261019.0
+    run "$U"
+    [ "$status" -eq 0 ]
+    [ ! -e "$R/var/lib/claude-airlock/tmp.old1" ] && [ ! -e "$R/usr/local/bin/runsc.update-runsc.4242" ]
+    exec 8> "$R/var/lib/claude-airlock/update-runsc.lock"; flock 8
+    run "$U" --check
+    exec 8>&-
+    [ "$status" -eq 1 ]; [[ "$output" == *"another update-runsc is running"* ]]
+}
+
+@test "replacing a runsc that has no record is logged as such" {
+    printf '#!/bin/sh\necho mine\n' > "$R/usr/local/bin/runsc"; chmod 0755 "$R/usr/local/bin/runsc"
+    release release-20261019.0
+    run "$U"
+    [[ "$output" == *"(was none) (replaced a runsc with no record)"* ]]
+    grep -q '  none -> release-20261019.0 (replaced a runsc with no record)$' "$R/var/log/update-runsc.log"
+}
+
+@test "the downloaded runsc's error text reaches the terminal as printable characters only" {
+    release release-20261019.0
+    cat > "$T/bin/tar" <<'EOF'
+#!/bin/bash
+while [ $# -gt 0 ]; do case "$1" in -C) d=$2; shift ;; esac; shift; done
+printf '#!/bin/sh\nprintf "bad\\033[2J\\007end\\n" >&2\nexit 1\n' > "$d/runsc"; chmod 0700 "$d/runsc"
+EOF
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"reports no version (bad[2Jend)"* ]] || { echo "$output" | od -c | head; return 1; }
+}
+
+@test "a helper directory others can write counts as not installed" {
+    release release-20261019.0
+    "$U" >/dev/null
+    chmod 0777 "$R/usr/local/bin/gvisor-bin"
+    run "$U" --check
+    [ "$status" -eq 10 ]
+    "$U" >/dev/null
+    [ "$(stat -c %a "$R/usr/local/bin/gvisor-bin")" = 755 ]
 }

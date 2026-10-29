@@ -181,7 +181,8 @@ cat "$out/facts.txt"
 # One box per variant runs every workload; each line: workload, run, seconds (or a value), status.
 cat > "$W/inner.sh" <<'INNER'
 #!/usr/bin/env bash
-set -u
+# pipefail: a pipeline that fails partway (tar of an unreadable file) is a failed workload
+set -uo pipefail
 W=$1 REPS=$2 QUICK=$3
 cd "$W" || exit 1
 t() {  # t <workload> <run> <command...>: time it
