@@ -11,8 +11,9 @@
 # research (a web user and a guard user, default <agent>-web and <agent>-guard), their uids and
 # subordinate id ranges (the next free ones), home image sizes and the operator command's name,
 # then writes /etc/claude-airlock/agents/agents.conf. Later runs keep that file and update the
-# installed toolkit. Every run ends with `airlock-agents-apply --confirm` (it renders and
-# provisions; see its --help).
+# installed toolkit. With `runsc on` (the default) the first run also installs gVisor's runsc
+# (bin/update-runsc) and later runs report a waiting update. Every run ends with
+# `airlock-agents-apply --confirm` (it renders and provisions; see its --help).
 set -euo pipefail
 umask 022
 export LC_ALL=C
@@ -111,6 +112,7 @@ elif [ ! -e "$ETC/agents.conf" ]; then
         echo "# Written by agents/install.sh; edit it, then: sudo airlock-agents-apply --confirm"
         echo "operator $op"
         echo "command  $cmd"
+        echo "runsc    on              # gVisor's runsc, installed and kept for the boxes (off: none)"
         printf '%s\n' "${lines[@]}"
         [ "${#users[@]}" = 1 ] || echo "# internal-name example.com      # your domains: a research question carrying them waits for you"
     } > "$ETC/agents.conf.new"
@@ -131,6 +133,7 @@ put 0644 "$SRC/lib/worker-common.sh" "$LIBDIR/worker-common.sh"
 put 0644 "$SRC/../lib/clipboard-image.sh" "$LIBDIR/clipboard-image.sh"   # the operator's paste (shared with airlock paste)
 put 0755 "$SRC/operator" "$LIBDIR/operator"
 put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
+put 0755 "$SRC/../bin/update-runsc" /usr/local/sbin/update-runsc
 for f in containers.conf tmux.conf tmux-clipboard.conf completion.zsh completion.bash managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
 for f in "$SRC"/box/* "$SRC"/templates/*; do d=${f%/*}; put 0644 "$f" "$SHARE/${d##*/}/${f##*/}"; done
 put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
@@ -147,6 +150,23 @@ if [ -d /etc/apt/apt.conf.d ]; then put 0644 "$SRC/hooks/80airlock-agents-nodump
 
 # Each user's default claude-airlock config is written by the apply (once; the site's afterwards).
 eval "$("$SRC/airlock-agents-apply" --env "$ETC/agents.conf" | grep -E '^AGENTS_[A-Z_]+=[A-Za-z0-9_./-]*$')"
+
+# gVisor's runsc (agents.conf: runsc on|off, or external runsc): installed on the first run, after
+# that only reported. An update replaces the runtime under running boxes, so it stays a step of
+# its own (sudo update-runsc). Neither a failed download nor a waiting update stops the install.
+if [ "${AGENTS_RUNSC:-on}" = on ]; then
+    if [ ! -e /usr/local/bin/runsc ]; then
+        echo "==> installing gVisor (runsc)"
+        /usr/local/sbin/update-runsc || echo "install-agents: WARNING: runsc was not installed (above); boxes don't need it yet. Retry: sudo update-runsc" >&2
+    else
+        rc=0; out="$(/usr/local/sbin/update-runsc --check 2>&1)" || rc=$?
+        case "$rc" in
+            0) ;;
+            10) echo "==> gVisor: an update is waiting. Stop the boxes ($AGENTS_COMMAND halt), then: sudo update-runsc" ;;
+            *) echo "install-agents: WARNING: could not check for a runsc update: $(tail -n 1 <<< "$out")" >&2 ;;
+        esac
+    fi
+fi
 
 echo "==> airlock-agents-apply --confirm"
 /usr/local/sbin/airlock-agents-apply --confirm

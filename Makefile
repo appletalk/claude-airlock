@@ -14,13 +14,13 @@ SHELLCHECK ?= $(shell command -v shellcheck 2>/dev/null || echo .tooling/bin/she
 BATS       ?= $(shell command -v bats 2>/dev/null || echo .tooling/bin/bats)
 
 # Shell we lint. The zsh integration is excluded — shellcheck doesn't parse zsh.
-SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh \
+SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh bin/update-runsc \
                  image/init-firewall.sh image/entrypoint.sh \
                  config/airlock-statusline.sh \
                  hooks/pre-commit hooks/pre-merge-commit hooks/commit-msg scripts/private-names-check test/private-names-check-test.sh \
                  scripts/bootstrap-tools.sh \
                  scripts/airlock-doctor.sh lib/host-dns.sh lib/clipboard-image.sh \
-                 scripts/image-smoke.sh scripts/validator-checks.sh \
+                 scripts/image-smoke.sh scripts/validator-checks.sh scripts/bench-runtime.sh \
                  scripts/run-tests.sh \
                  agents/install.sh agents/airlock-agents-apply agents/operator agents/share/completion.bash \
                  agents/lib/session-run agents/lib/session-stop agents/lib/web-session-run \
@@ -91,6 +91,9 @@ doctor: ## verify THIS host can actually contain a box (live containment test)
 image-smoke: ## prove the dev image's validators work offline (needs a built :dev)
 	@bash scripts/image-smoke.sh
 
+bench-runtime: ## time box work under crun and gVisor on this host (docs/gvisor.md; ARGS=--quick)
+	@bash scripts/bench-runtime.sh $(ARGS)
+
 check: lint test ## lint + test (what the pre-commit hook runs)
 
 hooks: ## install the git pre-commit, pre-merge-commit and commit-msg hooks (symlinks)
@@ -102,4 +105,4 @@ hooks: ## install the git pre-commit, pre-merge-commit and commit-msg hooks (sym
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install-airlock install-agents bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke check hooks bootstrap
+.PHONY: help install-airlock install-agents bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke bench-runtime check hooks bootstrap

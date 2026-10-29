@@ -27,6 +27,22 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     grep -qx 'AGENTS_QUEUE=' <<< "$output"
 }
 
+@test "runsc: on by default, on|off or external runsc; off and external together are refused" {
+    site "$OK"
+    run "$A" --env "$T/site"
+    grep -qx 'AGENTS_RUNSC=on' <<< "$output"
+    site "${OK}runsc off\n"
+    run "$A" --env "$T/site"
+    grep -qx 'AGENTS_RUNSC=off' <<< "$output"
+    site "${OK}external runsc\n"
+    run "$A" --env "$T/site"
+    grep -qx 'AGENTS_RUNSC=external' <<< "$output"
+    refuses "want: runsc on|off" "${OK}runsc yes\n"
+    refuses "want: runsc on|off" "${OK}runsc\n"
+    refuses "runsc off and external runsc: pick one" "${OK}runsc off\nexternal runsc\n"
+    refuses "unknown external part 'gvisor'" "${OK}external gvisor\n"
+}
+
 @test "names derive from the users: command, inbox, queue, units, sockets" {
     site 'operator bob\nagent ada uid 2100 subuid 2100000 home 20G\nweb ada-net uid 2101 subuid 2200000 home 5G\nguard ada-gate uid 2102 subuid 2300000 home 5G\n'
     run "$A" --env "$T/site"

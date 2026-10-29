@@ -53,7 +53,8 @@ if [ "$mode" = record ]; then
     # itself: it is made in a temp dir first).
     [ "$(id -u)" = 0 ] || [ -n "$ROOT" ] || die "run as root"
     t="$(mktemp)"; trap 'rm -f "$t"' EXIT
-    { find "$ROOT$LIBDIR" -maxdepth 1 -type f; find "$ROOT$SHARE" -type f ! -name 'TOOLKIT.sha256*'; echo "$ROOT/usr/local/sbin/airlock-agents-apply"; } \
+    { find "$ROOT$LIBDIR" -maxdepth 1 -type f; find "$ROOT$SHARE" -type f ! -name 'TOOLKIT.sha256*'; echo "$ROOT/usr/local/sbin/airlock-agents-apply"
+        [ ! -f "$ROOT/usr/local/sbin/update-runsc" ] || echo "$ROOT/usr/local/sbin/update-runsc"; } \
         | LC_ALL=C sort | sed "s#^$ROOT##" | while IFS= read -r f; do printf '%s  %s\n' "$(sha256sum < "$ROOT$f" | cut -d' ' -f1)" "$f"; done > "$t"
     install -m 0644 "$t" "$ROOT$SHARE/TOOLKIT.sha256.new" && mv -f "$ROOT$SHARE/TOOLKIT.sha256.new" "$ROOT$SHARE/TOOLKIT.sha256"
     echo "recorded $(wc -l < "$ROOT$SHARE/TOOLKIT.sha256") toolkit files"
@@ -64,7 +65,7 @@ site="${site:-$ROOT$ETC/agents.conf}"
 
 # ---- parse ------------------------------------------------------------------------------------
 
-OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off
+OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on
 ROLES=(agent web guard)
 declare -A NAME=() UID_OF=() SUB=() SIZE=() MEMHIGH=() MEMMAX=() TASKS=() CPU=()
 INTERNAL_NAMES=() INTERNAL_HOSTS=()
@@ -88,6 +89,11 @@ while IFS= read -r line || [ -n "$line" ]; do
             # the operator's clipboard.
             [ "${#w[@]}" = 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: clipboard on|off"
             CLIPBOARD=${w[1]} ;;
+        runsc)
+            # on: install-agents installs gVisor's runsc (bin/update-runsc) and reports updates.
+            # off: neither the script nor runsc. Boxes don't run under it yet either way.
+            [ "${#w[@]}" = 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: runsc on|off"
+            RUNSC=${w[1]} ;;
         operator|command|inbox|queue|daily-cap)
             [ "${#w[@]}" = 2 ] || die "$where: want: ${w[0]} <value>"
             v=${w[1]}
@@ -134,7 +140,7 @@ while IFS= read -r line || [ -n "$line" ]; do
             # Parts the site manages itself (a host config repo): not written here, checked live.
             [ "${#w[@]}" -gt 1 ] || die "$where: external lists nothing"
             for v in "${w[@]:1}"; do
-                case "$v" in nftables|polkit|profile) EXTERNAL[$v]=1 ;; *) die "$where: unknown external part '$v' (nftables, polkit, profile)" ;; esac
+                case "$v" in nftables|polkit|profile|runsc) EXTERNAL[$v]=1 ;; *) die "$where: unknown external part '$v' (nftables, polkit, profile, runsc)" ;; esac
             done ;;
         accept)
             # Findings the operator has looked at and accepts: they no longer pause an apply.
@@ -145,11 +151,13 @@ while IFS= read -r line || [ -n "$line" ]; do
         internal-host)
             [ "${#w[@]}" -gt 1 ] || die "$where: internal-host lists nothing"
             for v in "${w[@]:1}"; do [[ "$v" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "$where: bad internal host '$v'"; INTERNAL_HOSTS+=("$v"); done ;;
-        *) die "$where: unknown line '${w[0]}' (operator, command, agent, web, guard, inbox, queue, internal-name, internal-host, daily-cap, external, accept)" ;;
+        *) die "$where: unknown line '${w[0]}' (operator, command, agent, web, guard, inbox, queue, internal-name, internal-host, daily-cap, clipboard, runsc, external, accept)" ;;
     esac
 done < "$site"
 
 [ -n "$OPERATOR" ] || die "$site: no operator line (the user who runs the agents)"
+[ "$RUNSC" = on ] || [ -z "${EXTERNAL[runsc]:-}" ] || die "$site: runsc off and external runsc: pick one (external: the host provides runsc; off: no runsc)"
+[ -z "${EXTERNAL[runsc]:-}" ] || RUNSC=external
 [ -n "${NAME[agent]:-}" ] || die "$site: no agent line"
 if [ -n "${NAME[web]:-}" ] || [ -n "${NAME[guard]:-}" ]; then
     [ -n "${NAME[web]:-}" ] && [ -n "${NAME[guard]:-}" ] || die "$site: web research needs both a web and a guard line"
@@ -208,6 +216,7 @@ AGENTS_GUARD_UID=${UID_OF[guard]:-}
 AGENTS_QUEUE=${QUEUE:-}
 AGENTS_DAILY_CAP=$DAILY_CAP
 AGENTS_EXTERNAL="${!EXTERNAL[*]}"
+AGENTS_RUNSC=$RUNSC
 AGENTS_LIB=$LIBDIR
 AGENTS_SHARE=$SHARE
 AGENTS_ETC=$ETC
@@ -839,6 +848,18 @@ if [ -n "${EXTERNAL[polkit]:-}" ]; then
         done
         [ "$granted" = 1 ] || pause "polkit is managed elsewhere, but no rule lets $OPERATOR open a host shell as ${NAME[$r]}: see --render's external/etc/polkit-1/rules.d/50-airlock-agents.rules"
     done
+fi
+# gVisor's runsc: boxes don't run under it yet, so a missing one is only a note. One anyone but
+# root can write is a pause: the agent users' boxes will run under that binary.
+if [ "$RUNSC" != off ]; then
+    rs="$ROOT/usr/local/bin/runsc"
+    if [ ! -e "$rs" ]; then
+        if [ "$RUNSC" = external ]; then echo "note: runsc is managed elsewhere (external runsc), but there is no /usr/local/bin/runsc" >&2
+        else echo "note: no /usr/local/bin/runsc yet (sudo update-runsc installs it)" >&2; fi
+    elif [ -L "$rs" ] || [ ! -f "$rs" ] || { [ -z "$ROOT" ] && [ "$(stat -c %u "$rs")" != 0 ]; } \
+            || [ $(( 8#$(stat -c %a "$rs") & 8#022 )) != 0 ]; then
+        pause "/usr/local/bin/runsc must be a regular file owned by root and writable by root alone (the agents' boxes will run under it): sudo update-runsc --force puts a clean copy there"
+    fi
 fi
 # A home image that no longer matches agents.conf (it only grows by hand).
 for r in "${ROLES[@]}"; do

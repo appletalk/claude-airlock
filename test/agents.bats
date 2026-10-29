@@ -2580,6 +2580,42 @@ EOF
     [ "$status" -eq 1 ]; [[ "$output" == *"toolkit files differ from the install"*"operator"* ]]
 }
 
+@test "runsc: missing is a note, never a pause; one others can write pauses; off checks nothing" {
+    run "$P"
+    [[ "$output" == *"note: no /usr/local/bin/runsc yet (sudo update-runsc installs it)"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"runsc must be"* ]] || { echo "$output"; return 1; }
+    mkdir -p "$R/usr/local/bin"; printf '#!/bin/sh\n' > "$R/usr/local/bin/runsc"
+    chmod 0775 "$R/usr/local/bin/runsc"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"paused, nothing changed"*"/usr/local/bin/runsc must be a regular file owned by root"* ]] || { echo "$output"; return 1; }
+    chmod 0755 "$R/usr/local/bin/runsc"
+    run "$P"
+    [[ "$output" != *"runsc"* ]] || { echo "$output"; return 1; }
+    rm "$R/usr/local/bin/runsc"; ln -s /bin/true "$R/usr/local/bin/runsc"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"/usr/local/bin/runsc must be a regular file"* ]] || { echo "$output"; return 1; }
+    printf 'runsc off\n' >> "$E/agents.conf"
+    run "$P"
+    [[ "$output" != *"runsc"* ]] || { echo "$output"; return 1; }
+    sed -i 's/^runsc off$/external runsc/' "$E/agents.conf"; rm "$R/usr/local/bin/runsc"
+    run "$P"
+    [[ "$output" == *"note: runsc is managed elsewhere (external runsc), but there is no /usr/local/bin/runsc"* ]] || { echo "$output"; return 1; }
+}
+
+@test "the toolkit record lists update-runsc when it is installed" {
+    mkdir -p "$R/usr/local/share/airlock-agents" "$R/usr/local/lib/airlock-agents" "$R/usr/local/sbin"
+    cp "$REPO/agents/airlock-agents-apply" "$R/usr/local/sbin/airlock-agents-apply"
+    run "$P" --record-toolkit
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    ! grep -q 'update-runsc' "$R/usr/local/share/airlock-agents/TOOLKIT.sha256" || return 1
+    cp "$REPO/bin/update-runsc" "$R/usr/local/sbin/update-runsc"
+    run "$P" --record-toolkit
+    grep -q "^$(sha256sum < "$REPO/bin/update-runsc" | cut -d' ' -f1)  /usr/local/sbin/update-runsc$" "$R/usr/local/share/airlock-agents/TOOLKIT.sha256"
+    echo '# changed' >> "$R/usr/local/sbin/update-runsc"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"toolkit files differ from the install"*"update-runsc"* ]] || { echo "$output"; return 1; }
+}
+
 @test "external nftables: the toolkit's own table, or a drop outside an output chain, is not the site's drop" {
     printf 'external nftables\n' >> "$E/agents.conf"
     export NFT_RULESET="$T/ruleset"

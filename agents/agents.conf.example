@@ -14,8 +14,12 @@
 #   internal-name <domain>...   names a research question must not carry (your domains)
 #   internal-host <name>...     host names a research question must not carry
 #   daily-cap <n>            research runs a day at most (default 40)
-#   external <part>...       parts your own config repo manages: nftables, polkit, profile. Not
-#                            written here; checked live (--render shows what they must provide)
+#   runsc on|off             gVisor's runsc (default on): install-agents installs it into
+#                            /usr/local/bin on its first run and later reports a waiting update
+#                            (sudo update-runsc applies it). off: none. Boxes don't run under
+#                            it yet (docs/gvisor.md)
+#   external <part>...       parts your own config repo manages: nftables, polkit, profile, runsc.
+#                            Not written here; checked live (--render shows what they must provide)
 #   accept <finding>...      findings you accept, so they don't pause an apply: wsl-interop,
 #                            wsl-drives, generic-dropins, id-ranges
 #   clipboard on|off         Claude's copy in a session reaches your terminal's clipboard
@@ -23,6 +27,7 @@
 #                            user's own tmux could undo: your terminal is the real control)
 
 operator alice
+runsc    on
 agent    claude        uid 1100 subuid 1100000 home 30G
 web      claude-web    uid 1101 subuid 1200000 home 10G
 guard    claude-guard  uid 1102 subuid 1300000 home 10G

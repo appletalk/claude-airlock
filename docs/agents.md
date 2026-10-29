@@ -125,6 +125,14 @@ what each part must provide, under `external/`.
 
 Files the toolkit owns aren't edited locally: changes come with a toolkit update.
 
+### gVisor (runsc)
+
+`runsc on` (the default; install writes the line) has `make install-agents` install gVisor's
+`runsc` into `/usr/local/bin` on its first run, and report a waiting update on later runs: it
+never updates on its own, because an update replaces the runtime under running boxes. `runsc
+off` installs none; `external runsc` says your config repo provides it (apply checks it's there).
+Boxes don't run under it yet: [gvisor.md](gvisor.md) has the plan and the benchmark to run first.
+
 ### The clipboard
 
 By default the session's tmux doesn't pass clipboard writes on to your terminal. `clipboard on`
