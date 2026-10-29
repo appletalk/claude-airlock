@@ -1317,6 +1317,14 @@ fi
 # mounts. With AIRLOCK_PASTE_DIR set, pastes go there instead, for every project: a drop
 # box every box mounts read-only (see the launcher).
 if [ "${1:-}" = "paste" ]; then
+  # The clipboard read and the conversion are lib/clipboard-image.sh's, shared with the agents'
+  # operator command (agents/operator). Sourced HERE, before anything below cds into the pastes
+  # dir: a launcher run by a relative path would otherwise resolve the lib in there, where a box
+  # can plant one.
+  _pself="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+  _pself="${_pself%/*}"
+  # shellcheck source=lib/clipboard-image.sh
+  source "${_pself%/*}/lib/clipboard-image.sh" || exit 1
   shift
   _pcopy=0 _plist=0 _pn=10 _pproj="${AIRLOCK_PASTE_PROJECT:-}"
   while [ "$#" -gt 0 ]; do
@@ -1421,12 +1429,6 @@ if [ "${1:-}" = "paste" ]; then
     exit 0
   fi
 
-  # The clipboard read and the conversion are lib/clipboard-image.sh's, shared with the agents'
-  # operator command (agents/operator).
-  _pself="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-  _pself="${_pself%/*}"
-  # shellcheck source=lib/clipboard-image.sh
-  source "${_pself%/*}/lib/clipboard-image.sh"
   if ! clip_backend; then
     echo "claude-airlock: $CLIP_ERR" >&2
     if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then

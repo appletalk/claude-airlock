@@ -1097,7 +1097,7 @@ case "$cmd" in
         [ -d "$INBOX/pastes" ] && [ -w "$INBOX/pastes" ] || die "$INBOX/pastes missing or not writable (airlock-agents-apply)"
         work="$(mktemp -d)" || die "no private work directory (\$TMPDIR)"
         pub=""
-        trap 'rm -rf -- "$work"; [ -z "$pub" ] || rm -f -- "$pub"; [ -z "$TMPLIST" ] || rm -f -- "$TMPLIST"' EXIT
+        trap 'rm -rf -- "$work"; [ -z "$pub" ] || rm -f -- "$pub"' EXIT
         clip_png "$work/raw" "$work/png" || die "$CLIP_ERR"
         f="$INBOX/pastes/$(date +%Y%m%d-%H%M%S%3N).png"
         pub="$(mktemp --suffix=.work "$INBOX/pastes/.paste.XXXXXX")" || die "could not write in $INBOX/pastes"

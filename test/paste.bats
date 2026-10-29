@@ -860,3 +860,35 @@ op_clean() {
   [ "$(head -c 8 "$output" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
   [ -z "$(find "$TMP_BASE" -name '*.work')" ] || { find "$TMP_BASE"; return 1; }
 }
+
+# --- review round 2 ------------------------------------------------------------------------------
+
+@test "a launcher run by a relative path never sources a lib planted in pastes/" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  d="$(pastes_dir "$p")"; mkdir -p "$d/lib" "$d/bin/lib"; chmod 700 "$TMP_BASE" "$TMP_BASE/$(_slug "$p")"
+  for l in "$d/lib" "$d/bin/lib" "$TMP_BASE/$(_slug "$p")/lib"; do
+    mkdir -p "$l"; printf ': > "%s"\n' "$BATS_TEST_TMPDIR/pwned" > "$l/clipboard-image.sh"
+  done
+  _paste_env
+  repo="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  for rel in bin/claude-airlock ./bin/claude-airlock; do
+    run bash -c 'cd "$1" && shift && exec env -i "$@" </dev/null' _ "$repo" "${PASTE_ENV[@]}" bash "$rel" paste
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -e "$output" ]
+  done
+  ( cd "$repo/bin" && env -i "${PASTE_ENV[@]}" bash claude-airlock paste </dev/null >/dev/null )
+  [ ! -e "$BATS_TEST_TMPDIR/pwned" ]
+}
+
+@test "Pillow converts a CMYK JPEG (PNG has no CMYK) (real Pillow)" {
+  python3 -I -c 'import PIL' 2>/dev/null && command -v magick >/dev/null || skip "needs Pillow, and magick to make the fixture"
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0
+  stub_clipboard; minimal_path                     # no magick on the paste's PATH: Pillow's turn
+  magick -size 8x8 xc:red -colorspace CMYK "$BATS_TEST_TMPDIR/cmyk.jpg"
+  printf '#!/usr/bin/env bash\n[ "$1" = --list-types ] && { echo image/jpeg; exit 0; }\ncat "%s"\n' "$BATS_TEST_TMPDIR/cmyk.jpg" > "$STUBBIN/wl-paste"
+  ln -sf "$(command -v cat)" "$MINBIN/cat"
+  run _paste "$p"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(head -c 8 "$output" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
+}

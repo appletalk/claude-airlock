@@ -99,7 +99,9 @@ does not ask; it ends with a note (from a bundle too) while neither this nor
   fails and writes nothing rather than saving an unreadable file.
 - PNG is taken first, then BMP, then JPEG, GIF, WebP or TIFF. Only those raster types: an
   SVG or other type is refused (the message names what the clipboard offered), and each is
-  decoded as the type the clipboard declared, never as whatever the bytes look like.
+  decoded as the type the clipboard declared, never as whatever the bytes look like. Other
+  image types (`image/x-ms-bmp`, AVIF, HEIC, icons) are refused too: copy the image as PNG.
+  An animated or multi-page image becomes its first frame.
 - The agents' `<command> paste` (docs/agents.md) shares this code
   (`lib/clipboard-image.sh`), so both read and convert alike.
 
