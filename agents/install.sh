@@ -128,6 +128,7 @@ shipped="$(mktemp)"; trap 'rm -f "$shipped"' EXIT
 for f in session-run session-stop web-session-run web-worker guard-worker nodump-refresh; do put 0755 "$SRC/lib/$f" "$LIBDIR/$f"; done
 put 0755 "$SRC/host-test.sh" "$LIBDIR/host-test.sh"
 put 0644 "$SRC/lib/worker-common.sh" "$LIBDIR/worker-common.sh"
+put 0644 "$SRC/../lib/clipboard-image.sh" "$LIBDIR/clipboard-image.sh"   # the operator's paste (shared with airlock paste)
 put 0755 "$SRC/operator" "$LIBDIR/operator"
 put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
 for f in containers.conf tmux.conf tmux-clipboard.conf completion.zsh completion.bash managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done

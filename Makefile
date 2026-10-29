@@ -19,7 +19,7 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bun
                  config/airlock-statusline.sh \
                  hooks/pre-commit hooks/pre-merge-commit hooks/commit-msg scripts/private-names-check test/private-names-check-test.sh \
                  scripts/bootstrap-tools.sh \
-                 scripts/airlock-doctor.sh lib/host-dns.sh \
+                 scripts/airlock-doctor.sh lib/host-dns.sh lib/clipboard-image.sh \
                  scripts/image-smoke.sh scripts/validator-checks.sh \
                  scripts/run-tests.sh \
                  agents/install.sh agents/airlock-agents-apply agents/operator agents/share/completion.bash \

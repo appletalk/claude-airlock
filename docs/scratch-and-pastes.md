@@ -95,8 +95,13 @@ does not ask; it ends with a note (from a bundle too) while neither this nor
   native reader.
 - A PNG on the clipboard is used as is, which is the normal case on Linux desktops.
 - WSLg offers **BMP only**, and the Claude API accepts PNG, JPEG, GIF and WebP. There, one
-  of `python3-pil`, `imagemagick` or `ffmpeg` is needed to convert. Without one, `paste`
+  of `imagemagick`, `ffmpeg` or `python3-pil` is needed to convert. Without one, `paste`
   fails and writes nothing rather than saving an unreadable file.
+- PNG is taken first, then BMP, then JPEG, GIF, WebP or TIFF. Only those raster types: an
+  SVG or other type is refused (the message names what the clipboard offered), and each is
+  decoded as the type the clipboard declared, never as whatever the bytes look like.
+- The agents' `<command> paste` (docs/agents.md) shares this code
+  (`lib/clipboard-image.sh`), so both read and convert alike.
 
 **Every failure removes the output file.** A missing paste always means the grab failed,
 never "here is an older image you are about to mistake for the new one".

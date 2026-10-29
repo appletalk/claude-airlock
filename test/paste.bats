@@ -20,6 +20,7 @@ setup() {
   # /tmp/airlock-<user>.
   TMP_BASE="$BATS_TEST_TMPDIR/airlock-tmp"
   export PNG_B64 TMP_BASE
+  OPIN="$BATS_TEST_TMPDIR/opinbox"   # the operator's agent inbox (_op_paste)
 }
 
 # Stub both clipboard tools. $CLIPTEST selects what the "clipboard" holds.
@@ -31,6 +32,10 @@ case "$CLIPTEST" in
   bmp)  [ "$1" = --list-types ] && { echo "image/bmp"; exit 0; }; printf 'BM\x76\x00\x00\x00body' ;;
   text) [ "$1" = --list-types ] && { echo "text/plain"; exit 0; }; echo hello ;;
   empty)[ "$1" = --list-types ] && { echo "image/png"; exit 0; }; : ;;
+  # BMP listed first: the PNG must still win. Each read answers for the type it asked.
+  both) [ "$1" = --list-types ] && { printf 'image/bmp\nimage/png\n'; exit 0; }
+        if [ "$2" = image/png ]; then base64 -d <<<"$PNG_B64"; else printf 'BM\x76\x00\x00\x00body'; fi ;;
+  svg)  [ "$1" = --list-types ] && { printf 'image/svg+xml\ntext/html\n'; exit 0; }; echo '<svg/>' ;;
 esac
 EOF
   cat > "$STUBBIN/xclip" <<'EOF'
@@ -649,4 +654,176 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(ls "$else3")" = "$before" ] || { echo "the link target changed"; false; }
   [ -n "$(ls "$pd.real"/*.png 2>/dev/null)" ]                  # it landed in the checked folder
+}
+
+# --- the clipboard's type and the converter (lib/clipboard-image.sh, shared) ------------------
+
+# A converter stub that records its arguments and writes a PNG to the png:<out> it was given.
+stub_magick() {
+  cat > "$STUBBIN/magick" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$BATS_TEST_TMPDIR/magick.calls"
+out="\${2#png:}"; base64 -d <<<"\$PNG_B64" > "\$out"
+EOF
+  chmod +x "$STUBBIN/magick"
+}
+# No converter at all: minimal_path has none of magick, convert or ffmpeg, and this python3
+# says Pillow is missing, whatever the host has.
+no_converter() {
+  minimal_path
+  cat > "$STUBBIN/python3" <<EOF
+#!/usr/bin/env bash
+[ "\$*" = "-c import PIL" ] && exit 1
+exec "$(command -v python3)" "\$@"
+EOF
+  chmod +x "$STUBBIN/python3"
+}
+
+@test "PNG is preferred when the clipboard offers BMP too: no conversion" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=both
+  stub_clipboard; stub_magick
+  run _paste "$p"
+  [ "$status" -eq 0 ]
+  cmp -s "$output" <(base64 -d <<<"$PNG_B64")
+  [ ! -e "$BATS_TEST_TMPDIR/magick.calls" ]
+}
+
+@test "BMP is decoded as BMP: the converter is told the type, never left to sniff" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=bmp
+  stub_clipboard; stub_magick
+  run _paste "$p"
+  [ "$status" -eq 0 ]
+  grep -qE '^bmp:[^ ]+ png:[^ ]+$' "$BATS_TEST_TMPDIR/magick.calls"
+}
+
+@test "BMP with no converter fails naming the packages, and writes nothing" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=bmp
+  stub_clipboard; no_converter
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no PNG converter is installed (imagemagick, ffmpeg or python-pillow / python3-pil)"* ]]
+  [[ "$output" == *"image/bmp"* ]]
+  run _paste "$p" list
+  [ -z "$output" ]
+}
+
+@test "no image: the message names what the clipboard did offer" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=text
+  stub_clipboard
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no image on the clipboard (offered: text/plain)"* ]]
+}
+
+@test "an SVG is not an image we take: refused, and no converter ever sees it" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=svg
+  stub_clipboard; stub_magick
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no image on the clipboard (offered: image/svg+xml text/html)"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/magick.calls" ]
+}
+
+@test "an image/png that isn't a PNG is refused, not passed through" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  printf '#!/usr/bin/env bash\n[ "$1" = --list-types ] && { echo image/png; exit 0; }\necho "<svg/>"\n' > "$STUBBIN/wl-paste"
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"image/png is not a PNG"* ]]
+  run _paste "$p" list
+  [ -z "$output" ]
+}
+
+# --- the agents' operator command: `<command> paste` ------------------------------------------
+# The same reader and converter, publishing into the agent inbox's pastes/.
+
+_op_paste() {
+  local t="$BATS_TEST_TMPDIR"
+  mkdir -p "$OPIN/pastes" "$t/ophome" "$t/optmp"
+  printf '%s\n' AGENTS_OPERATOR=alice AGENTS_COMMAND=agent AGENTS_AGENT=agent AGENTS_AGENT_UID=1100 \
+    AGENTS_WEB=agent-web AGENTS_GUARD=agent-guard "AGENTS_LIB=$t/oplib" "AGENTS_QUEUE=$t/opqueue" \
+    "AGENTS_INBOX=$OPIN" > "$t/agents.env"
+  printf '#!/usr/bin/env bash\necho enabled\n' > "$STUBBIN/systemctl"
+  printf '#!/usr/bin/env bash\ncat > "%s/clip.out"\n' "$t" > "$STUBBIN/wl-copy"
+  chmod +x "$STUBBIN/systemctl" "$STUBBIN/wl-copy"
+  env -i PATH="${PATH_OVERRIDE:-$STUBBIN:/usr/bin:/bin}" HOME="$t/ophome" TMPDIR="$t/optmp" \
+    AIRLOCK_AGENTS_ENV="$t/agents.env" AGENTS_CLIP_LIB="$BATS_TEST_DIRNAME/../lib/clipboard-image.sh" \
+    WAYLAND_DISPLAY=wayland-0 CLIPTEST="$CLIPTEST" PNG_B64="$PNG_B64" \
+    bash "$BATS_TEST_DIRNAME/../agents/operator" paste </dev/null
+}
+# Nothing but finished pastes in pastes/, and no work directory left behind.
+op_clean() {
+  [ -z "$(find "$OPIN/pastes" -mindepth 1 ! -name '[0-9]*-[0-9]*.png')" ] || { ls -la "$OPIN/pastes"; return 1; }
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/optmp")" ] || { ls -la "$BATS_TEST_TMPDIR/optmp"; return 1; }
+}
+
+@test "operator paste: a PNG lands in the inbox, 0640, and its path goes on the clipboard" {
+  export CLIPTEST=png; stub_clipboard
+  run _op_paste
+  [ "$status" -eq 0 ]
+  f="${output% (path on the clipboard)}"
+  [[ "$f" == "$OPIN/pastes/"[0-9]*-[0-9]*.png ]]
+  cmp -s "$f" <(base64 -d <<<"$PNG_B64")
+  [ "$(stat -c %a "$f")" = 640 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/clip.out")" = "$f" ]
+  op_clean
+}
+
+@test "operator paste: BMP only (Windows Snipping Tool under WSLg) is converted to PNG" {
+  export CLIPTEST=bmp; stub_clipboard; stub_magick
+  run _op_paste
+  [ "$status" -eq 0 ]
+  f="${output% (path on the clipboard)}"
+  [ "$(head -c 8 "$f" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
+  grep -qE '^bmp:' "$BATS_TEST_TMPDIR/magick.calls"
+  # the converter wrote in the private work directory, never in pastes/ (O22)
+  if grep -qF "$OPIN" "$BATS_TEST_TMPDIR/magick.calls"; then cat "$BATS_TEST_TMPDIR/magick.calls"; return 1; fi
+  op_clean
+}
+
+@test "operator paste: PNG is still preferred when BMP is offered too" {
+  export CLIPTEST=both; stub_clipboard; stub_magick
+  run _op_paste
+  [ "$status" -eq 0 ]
+  cmp -s "${output% (path on the clipboard)}" <(base64 -d <<<"$PNG_B64")
+  [ ! -e "$BATS_TEST_TMPDIR/magick.calls" ]
+}
+
+@test "operator paste: BMP with no converter fails naming the packages; nothing left anywhere" {
+  export CLIPTEST=bmp; stub_clipboard; no_converter
+  # the operator needs a few more tools than airlock paste's minimal PATH
+  for b in env rm cp mv chmod mktemp date; do ln -sf "$(command -v "$b")" "$MINBIN/$b"; done
+  run _op_paste
+  [ "$status" -ne 0 ]
+  [[ "$output" == "agent: the clipboard offered image/bmp and no PNG converter is installed (imagemagick, ffmpeg or python-pillow / python3-pil)" ]]
+  [ -z "$(ls -A "$OPIN/pastes")" ]
+  op_clean
+}
+
+@test "operator paste: no image names what was offered" {
+  export CLIPTEST=text; stub_clipboard
+  run _op_paste
+  [ "$status" -ne 0 ]
+  [ "$output" = "agent: no image on the clipboard (offered: text/plain)" ]
+  [ -z "$(ls -A "$OPIN/pastes")" ]
+  op_clean
+}
+
+@test "operator paste: a failing clipboard tool still says so (set -e can't swallow it)" {
+  export CLIPTEST=png; stub_clipboard
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STUBBIN/wl-paste"
+  run _op_paste
+  [ "$status" -ne 0 ]
+  [ "$output" = "agent: no image on the clipboard (offered: nothing)" ]
+}
+
+@test "operator paste: a converter that fails half-way leaves no file in pastes/" {
+  export CLIPTEST=bmp; stub_clipboard
+  printf '#!/usr/bin/env bash\nprintf garbage > "${2#png:}"; exit 1\n' > "$STUBBIN/magick"; chmod +x "$STUBBIN/magick"
+  run _op_paste
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"magick could not convert the clipboard's image/bmp"* ]]
+  [ -z "$(ls -A "$OPIN/pastes")" ]
+  op_clean
 }
