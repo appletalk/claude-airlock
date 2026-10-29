@@ -195,12 +195,17 @@ _airlock_release_artifacts() {
 # (--fork-session gives a resumed conversation a new id, so it can't collide).
 _airlock_conv_of() {
   local a prev="" conv="" fork=0
+  # A leading non-flag word is a subcommand (`claude mcp ...`), not a session; nothing after
+  # `--` is claude's.
+  case "${1:-}" in ''|-*) ;; *) return 0 ;; esac
   for a in "$@"; do
+    [ "$a" != -- ] || break
     case "$prev" in -r|--resume|--session-id) case "$a" in -*|'') ;; *) conv="$a" ;; esac ;; esac
     case "$a" in
       -c|--continue) conv="continue" ;;
       --resume=*|--session-id=*) conv="${a#*=}" ;;
-      --fork-session) fork=1 ;;
+      --fork-session|--fork-session=*) fork=1 ;;
+      -[!-]?*) case "${a#-}" in *[!A-Za-z]*) ;; *c*) conv="continue" ;; esac ;;   # -cp: combined short flags
     esac
     prev="$a"
   done
@@ -252,9 +257,23 @@ if [ "${1:-}" = "session" ]; then
       printf '%s %s%s\n' "$(_airlock_proc_start "$_xpid")" "${4:-host}" "${_xconv:+ $_xconv}" > "$_xdir/$_xpid" ;;
     holders)   # the host wrapper's collision check: who has the conversation these args open
       [ -n "$_xpid" ] || { echo "usage: airlock session holders <pid> [claude args...]" >&2; exit 1; }
-      [ -d "$_xdir" ] || exit 0
-      _airlock_peers_in "$_xdir" "$_xpid" || true
-      _airlock_conv_holders "$_xdir" "$_xpid" "$(_airlock_conv_of "${@:4}")"; echo ;;
+      _xconv="$(_airlock_conv_of "${@:4}")" _xh=""
+      if [ -d "$_xdir" ]; then
+        _airlock_peers_in "$_xdir" "$_xpid" || true
+        _xh="$(_airlock_conv_holders "$_xdir" "$_xpid" "$_xconv")"
+      fi
+      # and, for --continue, a live lock holder that never registered (conversation unknown)
+      _xlock="${_xdir%/sessions}/session.lock"
+      if [ "$_xconv" = continue ] && [ -f "$_xlock" ]; then
+        _lp=""; _ls=""; read -r _lp _ _ _ls < "$_xlock" 2>/dev/null || true
+        case "${_lp:-}" in ''|*[!0-9]*) _lp="" ;; esac
+        if [ -n "$_lp" ] && [ "$_lp" != "$_xpid" ] && [ ! -e "$_xdir/$_lp" ] \
+           && [ -n "$(_airlock_proc_start "$_lp")" ] \
+           && { [ -z "${_ls:-}" ] || [ "$_ls" = "$(_airlock_proc_start "$_lp")" ]; }; then
+          _xh="${_xh:+$_xh }$_lp"
+        fi
+      fi
+      echo "airlock-holders:${_xh}" ;;
     release)
       [ -n "$_xpid" ] || { echo "usage: airlock session release <pid>" >&2; exit 1; }
       rm -f "$_xdir/$_xpid"

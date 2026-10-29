@@ -747,3 +747,45 @@ EOF
   _host_claude "$proj" --resume 88888888-8888-4888-8888-888888888888
   midrun | grep -qE '^ENT=[0-9]+ host 88888888-8888-4888-8888-888888888888$' || { midrun; return 1; }
 }
+
+@test "a conversation value is one word: spaces, newlines and flags never reach the registry" {
+  proj="$(mkproj convword)"
+  sleep 60 & P=$!
+  for v in "a b shell" $'x\nshell' "--name"; do
+    _launch "$proj" session register "$P" host --resume "$v"
+    [[ "$(cat "$(sessions_dir "$proj")/$P")" =~ ^[0-9]+\ host$ ]] || { cat "$(sessions_dir "$proj")/$P"; return 1; }
+  done
+  kill "$P" 2>/dev/null || true
+}
+
+@test "subcommands, anything after --, and -c inside a short-flag cluster" {
+  proj="$(mkproj convparse)"
+  sleep 60 & P=$!
+  _launch "$proj" session register "$P" host
+  holders() { _launch "$proj" session holders "$$" "$@" | sed -n 's/^airlock-holders://p'; }
+  [ -z "$(holders mcp add foo -- npx srv -c cfg)" ]   # a subcommand is no session
+  [ -z "$(holders -p hi -- --continue)" ]             # after -- is not claude's
+  [ "$(holders -cp hi)" = "$P" ]                       # -c -p combined
+  [ "$(holders --continue)" = "$P" ]
+  [ -z "$(holders --continue --fork-session)" ]
+  kill "$P" 2>/dev/null || true
+}
+
+@test "host claude asks when the launcher can't answer and the lock names a live peer (fails closed)" {
+  proj="$(mkproj hostfailclosed)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")"
+  printf '%s airlock 0 %s\n' "$PEER_PID" "$(proc_start "$PEER_PID")" > "$(state_dir "$proj")/session.lock"
+  # a launcher without `session holders` (older), standing in via the wrapper's variable
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/oldlauncher"; chmod +x "$BATS_TEST_TMPDIR/oldlauncher"
+  cat > "$STUBBIN/claude" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "$STUBBIN/claude"
+  run env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" TERM=xterm AIRLOCK_TMP_BASE="$AIRLOCK_TMP_BASE" \
+    zsh -c "source '$ZSH_LIB' >/dev/null 2>&1; _AIRLOCK_LAUNCHER='$BATS_TEST_TMPDIR/oldlauncher'; cd '$proj' || exit 1; claude" </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"(pid(s): $PEER_PID)"* ]]
+  kill "$PEER_PID" 2>/dev/null || true
+}

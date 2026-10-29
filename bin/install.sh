@@ -647,7 +647,7 @@ if [ -z "$_rc_done" ]; then
 
 That gives you:
     airlock   -> Claude Code in the sandbox (use this for a project)
-    claude    -> normal host Claude, warns if an airlock session is already open
+    claude    -> normal host Claude, asks before sharing a live session's conversation
     (command claude ... always bypasses the guard)
 
 EOF

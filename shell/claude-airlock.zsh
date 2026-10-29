@@ -7,7 +7,7 @@
 #   airlock          run Claude Code inside the sandbox for the current project
 #   alpaste          put the clipboard image where a box can read it (short for
 #                    `airlock paste --copy`; `alpaste list [N]` shows recent ones)
-#   claude           your normal host Claude, plus a cross-session lock warning
+#   claude           your normal host Claude, asking first only before it would share a conversation
 #   command claude   always bypasses the guard to reach the raw binary
 #
 # This is the canonical copy of the `claude` override. If you pasted it directly
@@ -85,20 +85,24 @@ claude() {
     fi
   fi
   lock="$HOME/.config/claude-airlock/state/$slug/session.lock"
-  # Who has the conversation these arguments open (the launcher answers from the registry),
-  # plus, for --continue, a live lock holder that never registered (its conversation is
-  # unknown, and --continue takes the newest).
-  local holders conv=""
-  holders="$("$_AIRLOCK_LAUNCHER" session holders $$ "$@" 2>/dev/null)"
-  local a; for a in "$@"; do [[ "$a" == (-c|--continue) ]] && conv=continue; done
-  for a in "$@"; do [[ "$a" == --fork-session ]] && conv=""; done
-  if [[ "$conv" == continue && -z "$holders" && -f "$lock" ]]; then
-    read -r pid kind _ start < "$lock"
-    # Identity, not just a number: a recycled pid would otherwise prompt on every launch
-    # forever. Locks from older versions carry no 4th field, so fall back to a bare check.
-    if [[ -n "$pid" && "$pid" != $$ ]] && kill -0 "$pid" 2>/dev/null \
-       && { [[ -z "$start" ]] || [[ "$start" == "$(_airlock_pstart $pid)" ]] }; then
-      holders="$pid"
+  # Who has the conversation these arguments open: the launcher answers (one parser, the
+  # registry, and for --continue a live lock holder that never registered). A launcher that
+  # can't answer (missing, older, failing) fails closed: ask whenever the lock names a live
+  # peer, as this wrapper always did.
+  local holders reply
+  reply="$("$_AIRLOCK_LAUNCHER" session holders $$ "$@" 2>/dev/null)"
+  if [[ "$reply" == *airlock-holders:* ]]; then
+    holders="${${reply##*airlock-holders:}%%$'\n'*}"
+  else
+    holders=""
+    if [[ -f "$lock" ]]; then
+      read -r pid kind _ start < "$lock"
+      # Identity, not just a number: a recycled pid would otherwise prompt on every launch
+      # forever. Locks from older versions carry no 4th field, so fall back to a bare check.
+      if [[ -n "$pid" && "$pid" != $$ ]] && kill -0 "$pid" 2>/dev/null \
+         && { [[ -z "$start" ]] || [[ "$start" == "$(_airlock_pstart $pid)" ]] }; then
+        holders="$pid"
+      fi
     fi
   fi
   if [[ -n "$holders" ]]; then
