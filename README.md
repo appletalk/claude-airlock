@@ -137,10 +137,12 @@ conversation history, and each conversation is its own transcript. They also sha
 project's Claude settings, and only the first box installs into `.venv` and `node_modules`
 (later ones get them read-only, and say so). What forks a history is two sessions writing
 the same conversation, so that alone asks first: `--continue` while another session is
-live, or `--resume <id>` of an id another live session was started with (`--resume` or
-`--session-id`, as agent sessions are). A session started without one has no id the check
-knows, so resuming its conversation by id elsewhere is not caught; neither is the `/resume`
-picker (or a bare `--resume`). `--fork-session` starts a new conversation and never asks.
+live, or `--resume <id or name>` of a conversation another live session was started with
+(`--resume`, `--session-id` or `--name`, as agent sessions are). A session started without
+one (a new conversation, or `--continue`) has no id the check knows, so resuming its
+conversation by id elsewhere is not caught; neither are the `/resume` picker, a bare
+`--resume`, `--from-pr`, or a `--bg` session after its launch returns. `--fork-session`
+starts a new conversation and never asks.
 
 ## Why rootless Podman
 

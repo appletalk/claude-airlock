@@ -189,48 +189,79 @@ _airlock_release_artifacts() {
   rmdir "$dir/artifacts-created" 2>/dev/null || true
 }
 
-# The conversation a claude command line opens, for the registry and the collision check:
-# "continue" for -c/--continue (the project's newest), the id given to --resume/-r or
-# --session-id, else nothing: a new conversation, the /resume picker, or a fork
-# (--fork-session gives a resumed conversation a new id, so it can't collide).
+# The conversation a claude command line opens, for the registry and the collision check,
+# as "<conversation> <name>" ("-" for none). The conversation is "continue" for -c/--continue
+# (the project's newest), the value of --resume/-r (an id or a session name) or of
+# --session-id, else none: a new conversation, the /resume picker, or a fork (--fork-session
+# gives a resumed conversation a new id). The name is --name/-n's, so a later
+# `--resume <name>` is matched too. Short flags may be clustered (-cp, -pr <id>, -r<id>), as
+# claude's option parser allows: the first letter that takes a value takes the rest.
 _airlock_conv_of() {
-  local a prev="" conv="" fork=0
-  # A leading non-flag word is a subcommand (`claude mcp ...`), not a session; nothing after
-  # `--` is claude's.
-  case "${1:-}" in ''|-*) ;; *) return 0 ;; esac
+  local a v prev="" conv="" name="" fork=0 i ch
+  # claude's subcommands are no session; a prompt word ahead of the options is (claude reads
+  # options after positionals). Nothing after `--` is claude's.
+  case "${1:-}" in
+    agents|attach|auth|auto-mode|config|doctor|gateway|import|install|kill|logs|mcp|migrate-installer|\
+    plugin|plugins|purge|remote-control|respawn|rm|setup-token|stop|ultrareview|update|upgrade)
+      printf '%s %s' - -; return 0 ;;
+  esac
   for a in "$@"; do
     [ "$a" != -- ] || break
-    case "$prev" in -r|--resume|--session-id) case "$a" in -*|'') ;; *) conv="$a" ;; esac ;; esac
+    v=""
+    case "$prev" in
+      -r|--resume|--session-id) case "$a" in -*|'') ;; *) conv="$a" ;; esac ;;
+      -n|--name) case "$a" in -*|'') ;; *) name="$a" ;; esac ;;
+    esac
+    prev="$a"
     case "$a" in
       -c|--continue) conv="continue" ;;
       --resume=*|--session-id=*) conv="${a#*=}" ;;
+      --name=*) name="${a#*=}" ;;
       --fork-session|--fork-session=*) fork=1 ;;
-      -[!-]?*) case "${a#-}" in *[!A-Za-z]*) ;; *c*) conv="continue" ;; esac ;;   # -cp: combined short flags
+      --*) ;;
+      -?*)
+        for (( i = 1; i < ${#a}; i++ )); do
+          ch="${a:i:1}"
+          case "$ch" in
+            c) conv="continue" ;;
+            r|n|d) v="${a:i+1}"   # takes a value: the rest, or the next argument
+                   if [ -n "$v" ]; then
+                     case "$ch" in r) conv="$v" ;; n) name="$v" ;; esac; prev=""
+                   else prev="-$ch"; fi
+                   break ;;
+          esac
+        done ;;
     esac
-    prev="$a"
   done
   [ "$fork" = 0 ] || conv=""
-  case "$conv" in *[!A-Za-z0-9._-]*) conv="" ;; esac   # one word: it's a field in a registry line
-  printf '%s' "$conv"
+  # One word each: they are fields of a registry line.
+  case "$conv" in ''|-*|*[!A-Za-z0-9._-]*) conv=- ;; esac
+  case "$name" in ''|-*|*[!A-Za-z0-9._-]*) name=- ;; esac
+  printf '%s %s' "$conv" "$name"
 }
 
 # The live history writers (not `shell`) other than $2 in registry $1 that a session opening
 # conversation $3 would share a conversation with, as "pid pid ...". "continue" opens the
-# newest conversation, which may be any of theirs; an id collides only with a peer recorded
-# on that same id. A peer that recorded none (a new conversation, an older launcher or
-# wrapper) is on its own conversation as far as anyone can tell. Prunes nothing - the
-# caller runs _airlock_peers_in first, which does.
+# newest conversation, which may be any of theirs; an id or name collides only with a peer
+# that recorded it (as its conversation or its --name). A peer that recorded neither (a new
+# conversation, an older launcher or wrapper) is on its own conversation as far as anyone
+# can tell, and so is one that recorded "continue" against a later --resume of an id: which
+# conversation --continue picked isn't known. Prunes nothing - the caller runs
+# _airlock_peers_in first, which does.
 _airlock_conv_holders() {
-  local dir="$1" self="$2" want="$3" f pid kind conv out=""
-  [ -n "$want" ] || return 0
+  local dir="$1" self="$2" want="$3" f pid kind conv name out=""
+  case "$want" in ''|-) return 0 ;; esac
   for f in "$dir"/*; do
     [ -e "$f" ] || continue
     pid="${f##*/}"
     [ "$pid" = "$self" ] && continue
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kind=""; conv=""; read -r _ kind conv _ < "$f" 2>/dev/null || true
+    kind=""; conv=""; name=""; read -r _ kind conv name _ < "$f" 2>/dev/null || true
     [ "${kind:-}" = shell ] && continue
-    if [ "$want" = continue ] || [ "${conv:-}" = "$want" ]; then out="$out$pid "; fi
+    if [ "$want" = continue ] || { [ "${conv:-}" != - ] && [ "${conv:-}" = "$want" ]; } \
+       || { [ "$want" != continue ] && [ "${name:--}" != - ] && [ "$name" = "$want" ]; }; then
+      out="$out$pid "
+    fi
   done
   printf '%s' "${out% }"
 }
@@ -254,10 +285,11 @@ if [ "${1:-}" = "session" ]; then
       # wrapper's `airlock session register <pid> host <claude args...>`) is what a later
       # session is checked against.
       _xconv="$(_airlock_conv_of "${@:5}")"
+      [ "$_xconv" != "- -" ] || _xconv=""
       printf '%s %s%s\n' "$(_airlock_proc_start "$_xpid")" "${4:-host}" "${_xconv:+ $_xconv}" > "$_xdir/$_xpid" ;;
     holders)   # the host wrapper's collision check: who has the conversation these args open
       [ -n "$_xpid" ] || { echo "usage: airlock session holders <pid> [claude args...]" >&2; exit 1; }
-      _xconv="$(_airlock_conv_of "${@:4}")" _xh=""
+      _xconv="$(_airlock_conv_of "${@:4}")" _xh=""; _xconv="${_xconv% *}"
       if [ -d "$_xdir" ]; then
         _airlock_peers_in "$_xdir" "$_xpid" || true
         _xh="$(_airlock_conv_holders "$_xdir" "$_xpid" "$_xconv")"
@@ -1825,9 +1857,11 @@ mkdir -p "$SESS_DIR"
 SESS_FILE="$SESS_DIR/$$"
 if [ "$AIRLOCK_SHELL" = 1 ]; then _selfkind=shell; else _selfkind=airlock; fi
 # The conversation this session opens, when the arguments say (the collision check below).
-_selfconv=""
-[ "$AIRLOCK_SHELL" = 1 ] || [ ${#AIRLOCK_EXEC[@]} -gt 0 ] || _selfconv="$(_airlock_conv_of "$@")"
-printf '%s %s%s\n' "$SELF_START" "$_selfkind" "${_selfconv:+ $_selfconv}" > "$SESS_FILE"
+_selfrec=""
+[ "$AIRLOCK_SHELL" = 1 ] || [ ${#AIRLOCK_EXEC[@]} -gt 0 ] || _selfrec="$(_airlock_conv_of "$@")"
+[ "$_selfrec" != "- -" ] || _selfrec=""
+_selfconv="${_selfrec% *}"; [ "$_selfconv" != - ] || _selfconv=""
+printf '%s %s%s\n' "$SELF_START" "$_selfkind" "${_selfrec:+ $_selfrec}" > "$SESS_FILE"
 
 # One implementation, shared with the host wrapper via `airlock session` - see the
 # primitives above the subcommand dispatch.

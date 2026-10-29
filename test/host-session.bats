@@ -459,9 +459,9 @@ exit 0
 EOF
   cp "$STUBBIN/podman" "$STUBBIN/docker"; chmod +x "$STUBBIN/podman" "$STUBBIN/docker"
   _launch "$proj" --remote-control --name p.main --resume 55555555-5555-4555-8555-555555555555
-  [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock\ 55555555-5555-4555-8555-555555555555$ ]]
+  [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock\ 55555555-5555-4555-8555-555555555555\ p\.main$ ]]
   _launch "$proj" --continue
-  [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock\ continue$ ]]
+  [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock\ continue\ -$ ]]
   _launch "$proj"
   [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock$ ]]
 }
@@ -745,7 +745,7 @@ EOF
 @test "host claude registers the conversation it opens" {
   proj="$(mkproj hostrecord)"
   _host_claude "$proj" --resume 88888888-8888-4888-8888-888888888888
-  midrun | grep -qE '^ENT=[0-9]+ host 88888888-8888-4888-8888-888888888888$' || { midrun; return 1; }
+  midrun | grep -qE '^ENT=[0-9]+ host 88888888-8888-4888-8888-888888888888 -$' || { midrun; return 1; }
 }
 
 @test "a conversation value is one word: spaces, newlines and flags never reach the registry" {
@@ -788,4 +788,40 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"(pid(s): $PEER_PID)"* ]]
   kill "$PEER_PID" 2>/dev/null || true
+}
+
+@test "the check reads claude's argument grammar: prompt first, names, clustered short flags" {
+  proj="$(mkproj convgrammar)"
+  sleep 60 & P=$!
+  # an agent session: resumes its id, named <project>.<name>
+  _launch "$proj" session register "$P" airlock --remote-control --name proj.main --resume abc-123
+  holders() { _launch "$proj" session holders "$$" "$@" | sed -n 's/^airlock-holders://p'; }
+  [ "$(holders "fix the failing test" -c)" = "$P" ]  # a prompt ahead of the options
+  [ "$(holders --resume proj.main)" = "$P" ]          # resumed by its name
+  [ "$(holders -r proj.main)" = "$P" ]
+  [ "$(holders -pr abc-123)" = "$P" ]                 # -p -r abc-123
+  [ "$(holders -rabc-123)" = "$P" ]                   # -r abc-123, attached
+  [ -z "$(holders -r proj.other)" ]
+  [ -z "$(holders --name abc-123)" ]                  # a new conversation NAMED like an id: no
+  [ -z "$(holders -nc)" ]                             # -n c: a name, not --continue
+  [ -z "$(holders doctor -c)" ]                       # a subcommand
+  kill "$P" 2>/dev/null || true
+}
+
+@test "holders: dead peers, a recycled lock pid, and the asking pid itself are never named" {
+  proj="$(mkproj holdersprune)"
+  sleep 60 & P=$!
+  dead="$(dead_pid)"
+  mkdir -p "$(sessions_dir "$proj")"
+  printf '1 airlock continue -\n' > "$(sessions_dir "$proj")/$dead"           # a dead registered peer
+  holders() { _launch "$proj" session holders "$1" --continue | sed -n 's/^airlock-holders://p'; }
+  # the lock names a live pid whose start time doesn't match: a recycled pid, not the session
+  printf '%s host 0 1\n' "$P" > "$(state_dir "$proj")/session.lock"
+  [ -z "$(holders "$$")" ]
+  [ ! -e "$(sessions_dir "$proj")/$dead" ]                                     # pruned
+  # the lock is the asker's own (the wrapper wrote it for its pid): not a peer
+  printf '%s host 0 %s\n' "$P" "$(proc_start "$P")" > "$(state_dir "$proj")/session.lock"
+  [ -z "$(holders "$P")" ]
+  [ "$(holders "$$")" = "$P" ]                                                 # but it is for anyone else
+  kill "$P" 2>/dev/null || true
 }
