@@ -1424,8 +1424,8 @@ if [ "${1:-}" = "paste" ]; then
   # The clipboard read and the conversion are lib/clipboard-image.sh's, shared with the agents'
   # operator command (agents/operator).
   _pself="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-  # shellcheck source=lib/clipboard-image.sh
   _pself="${_pself%/*}"
+  # shellcheck source=lib/clipboard-image.sh
   source "${_pself%/*}/lib/clipboard-image.sh"
   if ! clip_backend; then
     echo "claude-airlock: $CLIP_ERR" >&2

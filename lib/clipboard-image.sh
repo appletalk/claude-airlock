@@ -50,9 +50,9 @@ _clip_is_png() { [ "$(head -c 8 "$1" | od -An -tx1 | tr -d ' \n')" = "89504e470d
 clip_png() {
   local raw=$1 out=$2 types t type="" fmt rc=0
   CLIP_ERR=""
-  # `|| true` is load-bearing under `set -e`: an assignment takes the substitution's exit
-  # status, so a failing wl-paste/xclip would end the caller HERE, silently, and the "no image"
-  # message could never print. An empty clipboard is the commonest way paste is used wrong.
+  # `|| true`: a failing wl-paste/xclip is "no image" (said below), never an exit. Under
+  # `set -e` an assignment takes the substitution's status, and a caller that ever ran this
+  # outside an `if`/`||` would otherwise end HERE, silently.
   types="$(_clip_types || true)"
   # PNG first (no conversion), then BMP (what Windows offers), then the first other raster type.
   for t in $CLIP_TYPES; do   # whole lines only: image/png-foo is not image/png
@@ -71,20 +71,27 @@ clip_png() {
   if [ "$fmt" = png ]; then
     _clip_is_png "$raw" || { CLIP_ERR="the clipboard's image/png is not a PNG"; return 1; }
     cp -- "$raw" "$out" || { CLIP_ERR="could not write the work file"; return 1; }
+  # [0]: the first frame only. An animated GIF or WebP, or a multi-page TIFF, would otherwise
+  # be written as <out>-0, <out>-1 ... next to <out>, which stays empty.
   elif command -v magick >/dev/null 2>&1; then
-    magick "$fmt:$raw" "png:$out" || { CLIP_ERR="magick could not convert the clipboard's $type"; return 1; }
+    magick "$fmt:${raw}[0]" "png:$out" || { CLIP_ERR="magick could not convert the clipboard's $type"; return 1; }
   elif command -v convert >/dev/null 2>&1; then
-    convert "$fmt:$raw" "png:$out" || { CLIP_ERR="convert could not convert the clipboard's $type"; return 1; }
+    convert "$fmt:${raw}[0]" "png:$out" || { CLIP_ERR="convert could not convert the clipboard's $type"; return 1; }
   elif command -v ffmpeg >/dev/null 2>&1; then
     # Demuxer named (bmp_pipe and so on; GIF's is gif), and the muxer: <out> has no extension
     # for ffmpeg to guess from, and -update 1 takes it as one file, not a numbered pattern.
     local dmx="${fmt}_pipe"; [ "$fmt" = gif ] && dmx=gif
     ffmpeg -nostdin -y -loglevel error -f "$dmx" -i "$raw" -frames:v 1 -c:v png -f image2 -update 1 "$out" \
       || { CLIP_ERR="ffmpeg could not convert the clipboard's $type"; return 1; }
-  elif python3 -c 'import PIL' 2>/dev/null; then
+  # -I on the probe too: `python3 -c` puts the current directory first on sys.path, and the
+  # caller's may be a pastes dir a box can write (a planted PIL.py would run here, on the host).
+  elif python3 -I -c 'import PIL' 2>/dev/null; then
     python3 -I -c 'import sys
 from PIL import Image
-Image.open(sys.argv[1], formats=[sys.argv[3]]).save(sys.argv[2], "PNG")' "$raw" "$out" "${fmt^^}" \
+im = Image.open(sys.argv[1], formats=[sys.argv[3]])
+if im.mode not in ("1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16"):
+    im = im.convert("RGBA")   # CMYK and the like: PNG cannot hold them
+im.save(sys.argv[2], "PNG")' "$raw" "$out" "${fmt^^}" \
       || { CLIP_ERR="Pillow could not convert the clipboard's $type"; return 1; }
   else
     CLIP_ERR="the clipboard offered $type and no PNG converter is installed (imagemagick, ffmpeg or python-pillow / python3-pil)"

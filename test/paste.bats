@@ -673,7 +673,7 @@ no_converter() {
   minimal_path
   cat > "$STUBBIN/python3" <<EOF
 #!/usr/bin/env bash
-[ "\$*" = "-c import PIL" ] && exit 1
+case "\$*" in "-c import PIL"|"-I -c import PIL") exit 1 ;; esac
 exec "$(command -v python3)" "\$@"
 EOF
   chmod +x "$STUBBIN/python3"
@@ -810,7 +810,7 @@ op_clean() {
   op_clean
 }
 
-@test "operator paste: a failing clipboard tool still says so (set -e can't swallow it)" {
+@test "operator paste: a failing clipboard tool is reported as no image, not a silent exit" {
   export CLIPTEST=png; stub_clipboard
   printf '#!/usr/bin/env bash\nexit 1\n' > "$STUBBIN/wl-paste"
   run _op_paste
@@ -826,4 +826,37 @@ op_clean() {
   [[ "$output" == *"magick could not convert the clipboard's image/bmp"* ]]
   [ -z "$(ls -A "$OPIN/pastes")" ]
   op_clean
+}
+
+# --- review round 1 ------------------------------------------------------------------------------
+
+@test "types match whole lines: image/png-foo is not a PNG" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
+  stub_clipboard
+  printf '#!/usr/bin/env bash\n[ "$1" = --list-types ] && { printf "image/png-foo\\nximage/bmp\\n"; exit 0; }\nexit 9\n' > "$STUBBIN/wl-paste"
+  run _paste "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no image on the clipboard (offered: image/png-foo ximage/bmp)"* ]]
+}
+
+@test "a PIL.py planted in pastes/ never runs on the host (the Pillow probe is isolated)" {
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=bmp
+  stub_clipboard; minimal_path                     # no magick, convert or ffmpeg: Pillow's turn
+  d="$(pastes_dir "$p")"; mkdir -p "$d"; chmod 700 "$TMP_BASE" "$TMP_BASE/$(_slug "$p")"
+  printf 'open(%s, "w").write("ran")\n' "'$BATS_TEST_TMPDIR/pwned'" > "$d/PIL.py"
+  run _paste "$p"                                  # converts, or fails without Pillow: either way
+  [ ! -e "$BATS_TEST_TMPDIR/pwned" ]
+}
+
+@test "an animated GIF becomes its first frame, with no per-frame files left behind (real magick)" {
+  command -v magick >/dev/null || skip "no ImageMagick"
+  p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0
+  stub_clipboard
+  magick -size 8x8 xc:red xc:blue "$BATS_TEST_TMPDIR/anim.gif"
+  printf '#!/usr/bin/env bash\n[ "$1" = --list-types ] && { echo image/gif; exit 0; }\ncat "%s"\n' "$BATS_TEST_TMPDIR/anim.gif" > "$STUBBIN/wl-paste"
+  PATH_OVERRIDE="$STUBBIN:/usr/bin:/usr/sbin:/bin"
+  run _paste "$p"
+  [ "$status" -eq 0 ]
+  [ "$(head -c 8 "$output" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
+  [ -z "$(find "$TMP_BASE" -name '*.work')" ] || { find "$TMP_BASE"; return 1; }
 }
