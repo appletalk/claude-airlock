@@ -43,6 +43,13 @@ n=$BOXES
 if [ -f "$BOXES" ]; then n="$(head -n 1 "$BOXES")"; sed -i 1d "$BOXES"; fi
 echo "${n:-0}"; [ "${n:-0}" -gt 0 ]
 EOF
+    # setpriv OPTIONS... CMD...: records its options, runs CMD (as the caller: no root here)
+    cat > "$T/bin/setpriv" <<'EOF'
+#!/bin/bash
+o=(); while [[ "${1:-}" == --* ]]; do o+=("$1"); shift; done
+echo "setpriv ${o[*]}" >> "$CALLS"
+exec "$@"
+EOF
     chmod +x "$T/bin/"*
     export PATH="$T/bin:$PATH"
 }
@@ -67,6 +74,7 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     run find "$R/usr/local/bin" -name '*.update-runsc.*'
     [ -z "$output" ]
     grep -q -- "--proto =https --proto-redir =https" "$CALLS"
+    grep -qx 'setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs' "$CALLS"
 }
 
 @test "up to date: only the checksum is fetched, and the installed runsc is never run" {
@@ -143,7 +151,7 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     [[ "$output" == *"already on release-20261019.0"* ]]
     [ "$(stat -c %i "$R/usr/local/bin/runsc")" = "$ino" ]
     grep -qx "tarball $(cut -d' ' -f1 "$BUCKET/gvisor.tar.zstd.sha512")" "$S"
-    [ "$(wc -l < "$R/var/log/update-runsc.log")" = 1 ]
+    [ "$(wc -l < "$R/var/log/update-runsc.log")" = 2 ]
 }
 
 @test "an installed copy that no longer matches its record (changed, or writable by others) is reinstalled, even with upstream unchanged" {
@@ -268,4 +276,70 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     run "$U" --bogus
     [ "$status" -eq 2 ]
     [[ "$output" == *"usage:"* ]]
+}
+
+@test "--first never replaces a runsc that is there: put there by hand, or changed since it was installed" {
+    printf '#!/bin/sh\necho mine\n' > "$R/usr/local/bin/runsc"; chmod 0755 "$R/usr/local/bin/runsc"
+    release release-20261026.0
+    run "$U" --first
+    [ "$status" -eq 10 ]; [[ "$output" == *"doesn't match this script's record"* ]]
+    [ "$(sed -n 2p "$R/usr/local/bin/runsc")" = "echo mine" ]
+    rm "$R/usr/local/bin/runsc"
+    release release-20261019.0
+    "$U" >/dev/null
+    chmod 0775 "$R/usr/local/bin/runsc"
+    release release-20261026.0
+    run "$U" --first
+    [ "$status" -eq 10 ]
+    grep -qx 'release release-20261019.0' "$S"
+    [ "$(stat -c %a "$R/usr/local/bin/runsc")" = 775 ]
+}
+
+@test "the log: every change, a repair with the release it had, a record-only change too" {
+    release release-20261019.0
+    "$U" >/dev/null
+    chmod 0777 "$R/usr/local/bin/runsc"
+    release release-20261026.0
+    run "$U"
+    [[ "$output" == *"installed runsc release-20261026.0 (was release-20261019.0, reinstalled)"* ]]
+    grep -q '  release-20261019.0 -> release-20261026.0 (reinstalled: the files no longer matched the record)$' "$R/var/log/update-runsc.log"
+    release release-20261026.0 ""
+    "$U" >/dev/null
+    grep -q '  release-20261026.0: a new tarball with the same files, its checksum recorded$' "$R/var/log/update-runsc.log"
+    [ "$(wc -l < "$R/var/log/update-runsc.log")" = 3 ]
+}
+
+@test "a tarball of the same release with different files is installed, not just recorded" {
+    release release-20261019.0
+    "$U" >/dev/null
+    sed -i 's/^echo "helper /echo "helper2 /' "$T/bin/tar"
+    release release-20261019.0 ""
+    run "$U"
+    [ "$status" -eq 0 ]; [[ "$output" == *"installed runsc release-20261019.0"* ]]
+    [ "$(cat "$R/usr/local/bin/gvisor-bin/helper")" = "helper2 release-20261019.0" ]
+}
+
+@test "the record is checked whole: a symlinked runsc, a record with no files, or a path outside the allowlist" {
+    release release-20261019.0
+    "$U" >/dev/null
+    cp "$R/usr/local/bin/runsc" "$T/real"; ln -sf "$T/real" "$R/usr/local/bin/runsc"
+    run "$U" --check
+    [ "$status" -eq 10 ]
+    "$U" >/dev/null
+    [ ! -L "$R/usr/local/bin/runsc" ]
+    sed -i '/^file /d' "$S"
+    run "$U" --check
+    [ "$status" -eq 10 ]
+    "$U" >/dev/null
+    cp "$R/usr/local/bin/runsc" "$R/usr/local/bin/other"
+    sed -i 's#^\(file [0-9a-f]*\) runsc$#\1 other#' "$S"
+    run "$U" --check
+    [ "$status" -eq 10 ]
+}
+
+@test "a runsc that fails to run says why" {
+    release release-20261019.0
+    sed -i 's#exit ${VERSION_RC:-0}#echo "exec format error" >\&2; exit 1#' "$T/bin/tar"
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"reports no version (exec format error)"* ]]
 }

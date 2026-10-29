@@ -83,16 +83,22 @@ no_boxes() {
     echo "update-runsc: WARNING: $n gVisor box process(es) running; replacing runsc under them (--force)" >&2
 }
 
-installed="$(rec release || true)"
+recorded="$(rec release || true)"     # what the record says, for the log
+installed="$recorded"
 if [ -n "$installed" ] && ! intact; then
-    echo "installed: $installed, but the files no longer match the record (they will be reinstalled)"
+    echo "installed: $installed, but the files no longer match the record (a plain run reinstalls them)"
     installed=""
 fi
 echo "installed: ${installed:-none}"
+# --first installs only onto nothing: a runsc or a record already there (as installed, or changed
+# since, or put there by hand) is only checked; a repair or an update is a run of its own.
+present=0
+if [ -n "$recorded" ] || [ -e "$DEST/runsc" ] || [ -L "$DEST/runsc" ]; then present=1; fi
+if [ "$mode" = first ] && [ "$present" = 1 ]; then mode=check; fi
 
-if [ "$mode" = first ] && [ -n "$installed" ]; then mode=check; fi
-
-tmp="$(mktemp -d)"
+# Work in a directory of root's beside the record (a noexec /tmp would stop the version run).
+install -d -m 0755 "$(dirname "$STATE")"
+tmp="$(mktemp -d "$(dirname "$STATE")/tmp.XXXXXX")"
 # Also sweep staged files an interrupted install left behind.
 trap 'rm -rf "$tmp"; find "$DEST" -name "*.update-runsc.$$" -delete 2>/dev/null || true' EXIT
 
@@ -107,7 +113,8 @@ if [ -n "$installed" ] && [ "$remote_sum" = "$(rec tarball || true)" ]; then
 fi
 if [ "$mode" = check ]; then
     if [ -n "$installed" ]; then echo "update available: the upstream tarball differs from the last install ($cmd)"
-    else echo "runsc is not installed as recorded ($cmd installs it)"; fi
+    elif [ "$present" = 1 ]; then echo "the runsc in $DEST doesn't match this script's record ($cmd reinstalls it)"
+    else echo "runsc is not installed ($cmd installs it)"; fi
     exit 10
 fi
 
@@ -116,8 +123,9 @@ fetch gvisor.tar.zstd
 [ "$(sha512sum < "$tmp/gvisor.tar.zstd" | cut -d' ' -f1)" = "$remote_sum" ] \
     || die "the tarball does not match its checksum; nothing installed"
 
-mkdir "$tmp/new"
+mkdir -m 0700 "$tmp/new"
 tar --zstd -xf "$tmp/gvisor.tar.zstd" -C "$tmp/new" --no-same-owner || die "could not unpack the tarball (is zstd installed?)"
+chmod -R go-w "$tmp/new"
 files=()
 while IFS= read -r -d '' p; do
     rel="${p#"$tmp/new/"}"
@@ -130,12 +138,16 @@ done < <(find "$tmp/new" -mindepth 1 -print0)
 [ -f "$tmp/new/runsc" ] || die "the tarball has no runsc; nothing installed"
 
 # The new release's name, from the new binary, run as nobody: the checksum shows the download is
-# intact, not whose it is, so it doesn't run as root before it is installed.
-chmod 0755 "$tmp" "$tmp/new" "$tmp/new/runsc"
-if [ -z "$ROOT" ]; then ver="$(setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$tmp/new/runsc" --version 2>/dev/null)" || ver=""
-else ver="$("$tmp/new/runsc" --version 2>/dev/null)" || ver=""; fi
+# intact, not whose it is, so it doesn't run as root before it is installed. A copy of runsc alone
+# is reachable for nobody (the unpacked tree stays root's).
+mkdir -m 0755 "$tmp/ver" && cp "$tmp/new/runsc" "$tmp/ver/runsc" && chmod 0755 "$tmp/ver/runsc"
+chmod 0711 "$tmp"
+ver="$(cd / && setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$tmp/ver/runsc" --version 2>"$tmp/ver.err")" || ver=""
 candidate="$(awk '/^runsc version/ { print $3 }' <<< "$ver" | head -n 1)"
-[[ "$candidate" =~ ^[A-Za-z0-9._-]+$ ]] || die "the unpacked runsc reports no version; nothing installed"
+if ! [[ "$candidate" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    why=""; [ ! -s "$tmp/ver.err" ] || why=" ($(tail -n 1 "$tmp/ver.err"))"
+    die "the unpacked runsc reports no version$why; nothing installed"
+fi
 
 new_state="$tmp/state"
 {
@@ -152,6 +164,7 @@ done
 install -d -m 0755 "$(dirname "$STATE")" "$(dirname "$LOG")"
 if [ "$same" = 1 ] && [ "$candidate" = "$installed" ]; then
     install -m 0644 "$new_state" "$STATE.new" && mv -f "$STATE.new" "$STATE"
+    printf '%s  %s: a new tarball with the same files, its checksum recorded\n' "$(date -Is)" "$candidate" >> "$LOG"
     echo "already on $candidate: checksum recorded, nothing installed"
     exit 0
 fi
@@ -168,5 +181,5 @@ for rel in "${files[@]}"; do
     mv -f "$dst.update-runsc.$$" "$dst"
 done
 install -m 0644 "$new_state" "$STATE.new" && mv -f "$STATE.new" "$STATE"
-printf '%s  %s -> %s\n' "$(date -Is)" "${installed:-none}" "$candidate" >> "$LOG"
-echo "installed runsc $candidate (was ${installed:-none})"
+printf '%s  %s -> %s%s\n' "$(date -Is)" "${recorded:-none}" "$candidate" "$([ -n "$recorded" ] && [ -z "$installed" ] && echo ' (reinstalled: the files no longer matched the record)')" >> "$LOG"
+echo "installed runsc $candidate (was ${recorded:-none}$([ -n "$recorded" ] && [ -z "$installed" ] && echo ', reinstalled'))"

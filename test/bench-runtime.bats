@@ -81,3 +81,17 @@ results() { printf 'variant\tworkload\trun\tvalue\tstatus\n'; printf '%b' "$1"; 
     grep -qx $'git-gc\t1\tFAIL\t-' <<< "$output"
     grep -qx $'check-inner-run\tok\tFAIL (exit 137)\tok' <<< "$output"
 }
+
+@test "summary: a variant whose boxes never start is FAIL on every workload, with no blank cell" {
+    results 'crun\tgit-gc\t1\t1.0\tok\ncrun\tcheck-inner-run\t1\t-\tok\nrunsc-ptrace\tstart-true\t1\t0.5\tfail\nrunsc-ptrace\tcheck-inner-run\t1\tboxes do not start\tfail\n' > "$T/r.tsv"
+    run "$B" --summarize "$T/r.tsv"
+    grep -qx $'git-gc\t1\tFAIL' <<< "$output"
+    grep -qx $'check-inner-run\tok\tFAIL (boxes do not start)' <<< "$output"
+    ! grep -q $'\t\t' <<< "$output" || { echo "$output"; return 1; }
+}
+
+@test "summary: no ratio against a crun value that failed" {
+    results 'crun\tgit-gc\t1\t0.05\tfail\nrunsc-systrap\tgit-gc\t1\t1.0\tok\n' > "$T/r.tsv"
+    run "$B" --summarize "$T/r.tsv"
+    grep -qx $'git-gc\t0.05 FAIL\t1' <<< "$output"
+}

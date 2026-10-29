@@ -56,9 +56,9 @@ summarize() {
           k = vo[i] SUBSEP wl
           if (k in chk) { printf "\t%s", chk[k]; continue }
           # nothing measured: failed, not measurable here (n/a), its box died (FAIL), or not run
-          if (!(k in n)) { printf "\t%s", ((k in bad) ? "FAIL" : (k in na) ? "n/a" : (chk[vo[i] SUBSEP "check-inner-run"] ~ /^FAIL/) ? "FAIL" : "-"); continue }
+          if (!(k in n)) { printf "\t%s", ((k in bad) ? "FAIL" : (k in na) ? "n/a" : (((vo[i] SUBSEP "check-inner-run") in chk) && chk[vo[i] SUBSEP "check-inner-run"] ~ /^FAIL/) ? "FAIL" : "-"); continue }
           m = median(k); cell = sprintf("%g", m)
-          if (vo[i] != "crun" && base > 0 && m > 0 && !(k in bad) && wl != "idle-pss-mib") cell = cell sprintf(" (%.2fx)", (wl == "pgbench-tps") ? base / m : m / base)
+          if (vo[i] != "crun" && base > 0 && m > 0 && !(k in bad) && !(("crun" SUBSEP wl) in bad) && wl != "idle-pss-mib") cell = cell sprintf(" (%.2fx)", (wl == "pgbench-tps") ? base / m : m / base)
           if (k in bad) cell = cell " FAIL"
           printf "\t%s", cell
         }
@@ -245,13 +245,15 @@ box() {  # box <variant> <run args...> -- <command...>: a box as the launcher st
 # for every variant). Best effort: a sandboxed user manager may hide the box's processes.
 idle_pss() {
   local v=$1 name="airlock-bench-$$" id pss
-  box "$v" -d --name "$name" "$IMAGE" sleep 60 >/dev/null 2>&1 || { echo n/a; return; }
+  box "$v" -d --name "$name" "$IMAGE" sleep 60 >/dev/null 2>&1 || { printf 'n/a\tfail'; return; }
   sleep 5
   id="$("$ENGINE" inspect -f '{{.Id}}' "$name" 2>/dev/null)"
-  pss="$(grep -l -- "$id" /proc/[0-9]*/cgroup 2>/dev/null | while read -r f; do
+  # no id (the box already gone): nothing to measure, never every process
+  [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || { "$ENGINE" rm -f "$name" >/dev/null 2>&1; printf 'n/a\tfail'; return; }
+  pss="$(grep -lF -- "$id" /proc/[0-9]*/cgroup 2>/dev/null | while read -r f; do
            awk '/^Pss:/ { print $2 }' "${f%/cgroup}/smaps_rollup" 2>/dev/null; done | awk '{ s += $1 } END { if (s) printf "%.1f", s / 1024 }')"
   "$ENGINE" rm -f "$name" >/dev/null 2>&1
-  echo "${pss:-n/a}"
+  printf '%s\tok' "${pss:-n/a}"
 }
 
 # A file the host changes while the box runs is seen in it (new files and new contents).
@@ -292,10 +294,11 @@ for v in "${variants[@]}"; do
   done
   if ! grep -q "^$v"$'\tstart-true\t.*\tok$' "$out/results.tsv"; then
     echo "    $v: boxes don't start (see $log); skipped"
+    printf '%s\tcheck-inner-run\t1\tboxes do not start\tfail\n' "$v" >> "$out/results.tsv"
     continue
   fi
   printf '%s\tcheck-host-change\t1\t-\t%s\n' "$v" "$(host_change "$v")" >> "$out/results.tsv"
-  printf '%s\tidle-pss-mib\t1\t%s\t%s\n' "$v" "$(idle_pss "$v")" ok >> "$out/results.tsv"
+  printf '%s\tidle-pss-mib\t1\t%s\n' "$v" "$(idle_pss "$v")" >> "$out/results.tsv"
   : > "$W/inner.err"
   box "$v" "$IMAGE" bash "$W/inner.sh" "$W" "$reps" "$quick" 2>>"$log" | sed "s/^/$v\t/" >> "$out/results.tsv"
   st="${PIPESTATUS[0]}"

@@ -861,6 +861,8 @@ elif [ -L "$rs" ] || [ ! -f "$rs" ] || { [ -z "$ROOT" ] && [ "$(stat -c %u "$rs"
         || [ $(( 8#$(stat -c %a "$rs") & 8#022 )) != 0 ]; then
     if [ "$RUNSC" = external ]; then
         pause "/usr/local/bin/runsc must be a regular file owned by root and writable by root alone (the agents' boxes would run under it); your config repo provides it (external runsc)"
+    elif [ "$RUNSC" = off ]; then
+        pause "/usr/local/bin/runsc must be a regular file owned by root and writable by root alone (the agents' boxes would run under it): with runsc off, remove it"
     else
         pause "/usr/local/bin/runsc must be a regular file owned by root and writable by root alone (the agents' boxes would run under it): sudo update-runsc reinstalls it (a copy that doesn't match its record counts as not installed)"
     fi
