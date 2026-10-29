@@ -65,11 +65,13 @@ intact() {
         allowed "$rel" && [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %a "$f")" = 755 ] || return 1
         [ -n "$ROOT" ] || [ "$(stat -c %u "$f")" = 0 ] || return 1
         [ "$(sha256sum < "$f" | cut -d' ' -f1)" = "$sum" ] || return 1
-        # its own directory below $DEST (gvisor-bin/): root's 0755 too
-        if [ "$(dirname "$f")" != "$DEST" ]; then
-            [ ! -L "$(dirname "$f")" ] && [ "$(stat -c %a "$(dirname "$f")")" = 755 ] || return 1
-            [ -n "$ROOT" ] || [ "$(stat -c %u "$(dirname "$f")")" = 0 ] || return 1
-        fi
+        # every directory between it and $DEST (gvisor-bin/...): root's 0755 too
+        local d; d="$(dirname "$f")"
+        while [ "$d" != "$DEST" ]; do
+            [ ! -L "$d" ] && [ "$(stat -c %a "$d")" = 755 ] || return 1
+            [ -n "$ROOT" ] || [ "$(stat -c %u "$d")" = 0 ] || return 1
+            d="$(dirname "$d")"
+        done
     done < <(awk '$1 == "file"' "$STATE")
     [ "$n" -gt 0 ] && [ -n "$(rec release)" ]
 }
@@ -88,6 +90,15 @@ no_boxes() {
     echo "update-runsc: WARNING: $n gVisor box process(es) running; replacing runsc under them (--force)" >&2
 }
 
+# One changing run at a time, from before the record is read. --check changes nothing and takes
+# no lock (the record is replaced whole, by a rename).
+if [ "$mode" != check ]; then
+    install -d -m 0755 "$(dirname "$STATE")"
+    exec 9> "$(dirname "$STATE")/update-runsc.lock"
+    command -v flock >/dev/null || die "flock is missing (util-linux)"
+    flock -n 9 || die "another update-runsc is running"
+fi
+
 recorded="$(rec release || true)"     # what the record says, for the log
 installed="$recorded"
 if [ -n "$installed" ] && ! intact; then
@@ -101,18 +112,19 @@ present=0
 if [ -n "$recorded" ] || [ -e "$DEST/runsc" ] || [ -L "$DEST/runsc" ]; then present=1; fi
 if [ "$mode" = first ] && [ "$present" = 1 ]; then mode=check; fi
 
-# Work in a directory of root's beside the record (a noexec /tmp would stop the version run). One
-# run at a time; then whatever a killed run left (its download, staged files) can go.
-install -d -m 0755 "$(dirname "$STATE")"
-exec 9> "$(dirname "$STATE")/update-runsc.lock"
-flock -n 9 || die "another update-runsc is running"
-find "$(dirname "$STATE")" -maxdepth 1 -name 'tmp.*' -exec rm -rf -- {} + 2>/dev/null || true
-find "$DEST" -name '*.update-runsc.*' -delete 2>/dev/null || true
-tmp="$(mktemp -d "$(dirname "$STATE")/tmp.XXXXXX")"
+if [ "$mode" = check ]; then
+    tmp="$(mktemp -d)"                 # only the checksum file goes here
+else
+    # Work in a directory of root's beside the record (a noexec /tmp would stop the version run),
+    # under the lock: whatever a killed run left (its download, staged files) can go first.
+    find "$(dirname "$STATE")" -maxdepth 1 -name 'tmp.*' -exec rm -rf -- {} + 2>/dev/null || true
+    find "$DEST" "$DEST/gvisor-bin" -maxdepth 1 -name '*.update-runsc.*' -type f -delete 2>/dev/null || true
+    tmp="$(mktemp -d "$(dirname "$STATE")/tmp.XXXXXX")"
+fi
 # Also sweep staged files an interrupted install left behind.
 trap 'rm -rf "$tmp"; find "$DEST" -name "*.update-runsc.$$" -delete 2>/dev/null || true' EXIT
 
-fetch() { curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$tmp/$1" "$URL/$1" || die "could not fetch $1 from $URL"; }
+fetch() { curl 9>&- -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$tmp/$1" "$URL/$1" || die "could not fetch $1 from $URL"; }
 fetch gvisor.tar.zstd.sha512
 remote_sum="$(awk '{ print $1; exit }' "$tmp/gvisor.tar.zstd.sha512")"
 [[ "$remote_sum" =~ ^[0-9a-f]{128}$ ]] || die "the checksum file from $URL is not a sha512"
@@ -134,14 +146,14 @@ fetch gvisor.tar.zstd
     || die "the tarball does not match its checksum; nothing installed"
 
 mkdir -m 0700 "$tmp/new"
-tar --zstd -xf "$tmp/gvisor.tar.zstd" -C "$tmp/new" --no-same-owner || die "could not unpack the tarball (is zstd installed?)"
+tar 9>&- --zstd -xf "$tmp/gvisor.tar.zstd" -C "$tmp/new" --no-same-owner || die "could not unpack the tarball (is zstd installed?)"
 chmod -R go-w "$tmp/new"
 files=()
 while IFS= read -r -d '' p; do
     rel="${p#"$tmp/new/"}"
     [ -d "$p" ] && [ ! -L "$p" ] && continue
     if ! { [ -f "$p" ] && [ ! -L "$p" ] && allowed "$rel"; }; then
-        die "the tarball holds $rel, which isn't runsc, its shim or a gvisor-bin/ helper; nothing installed"
+        die "the tarball holds $(printf %q "$rel" | cut -c1-200), which isn't runsc, its shim or a gvisor-bin/ helper; nothing installed"
     fi
     files+=("$rel")
 done < <(find "$tmp/new" -mindepth 1 -print0)
@@ -152,11 +164,11 @@ done < <(find "$tmp/new" -mindepth 1 -print0)
 # is reachable for nobody (the unpacked tree stays root's).
 mkdir -m 0755 "$tmp/ver" && cp "$tmp/new/runsc" "$tmp/ver/runsc" && chmod 0755 "$tmp/ver/runsc"
 chmod 0711 "$tmp"
-ver="$(cd / && setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$tmp/ver/runsc" --version 2>"$tmp/ver.err")" || ver=""
+ver="$(cd / && setpriv 9>&- --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$tmp/ver/runsc" --version 2>"$tmp/ver.err")" || ver=""
 candidate="$(awk '/^runsc version/ { print $3 }' <<< "$ver" | head -n 1)"
 if ! [[ "$candidate" =~ ^[A-Za-z0-9._-]+$ ]]; then
     # its last line, printable characters only (it is the downloaded binary's text)
-    why=""; [ ! -s "$tmp/ver.err" ] || why=" ($(tail -c 4096 "$tmp/ver.err" | tail -n 1 | tr -cd '[:print:]' | cut -c1-200))"
+    why=""; [ ! -s "$tmp/ver.err" ] || why=" ($(tail -c 4096 "$tmp/ver.err" | tr -cd '[:print:]\n' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-200))"
     die "the unpacked runsc reports no version$why; nothing installed"
 fi
 
@@ -188,6 +200,7 @@ no_boxes
 for rel in "${files[@]}"; do
     dst="$DEST/$rel"
     install -d -m 0755 "$(dirname "$dst")"
+    [ -n "$ROOT" ] || chown 0:0 "$(dirname "$dst")"   # an existing one keeps its owner otherwise
     install -m 0755 "$tmp/new/$rel" "$dst.update-runsc.$$"
     mv -f "$dst.update-runsc.$$" "$dst"
 done

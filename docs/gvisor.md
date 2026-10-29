@@ -35,8 +35,9 @@ version as `nobody`, not as root.
 It refuses while gVisor boxes are running (checked before the download and again before any
 file is replaced): a box keeps the old binary open and works on, but its stop and cleanup would
 run the new one against state the old one made. Stop them first (the agents' sessions:
-`<command> stop`, and `<command> web stop` with web research), or pass `--force`. Boxes that are created but stopped
-aren't seen; remove them before an update.
+`<command> stop`, and `<command> web stop` with web research), or pass `--force`. Boxes that
+are created but stopped aren't seen; remove them before an update. `--check` changes nothing; a
+changing run takes a lock, so only one runs at a time.
 
 With agent users, `make install-agents` runs `update-runsc --first` (`runsc on`, the default in
 `agents.conf`): it installs runsc when there is none, and otherwise only reports a waiting update;

@@ -48,6 +48,7 @@ EOF
 #!/bin/bash
 o=(); while [[ "${1:-}" == --* ]]; do o+=("$1"); shift; done
 echo "setpriv ${o[*]}" >> "$CALLS"
+[ ! -e /proc/self/fd/9 ] || echo "setpriv: fd 9 inherited" >> "$CALLS"
 v=$(dirname "$1"); t=$(dirname "$v")
 echo "modes cwd=$PWD work=$(stat -c %a "$t") ver=$(ls "$v" | tr '\n' ' ')$(stat -c %a "$v") new=$(stat -c %a "$t/new") new-writable=$(find "$t/new" -perm /022 | wc -l)" >> "$CALLS"
 exec "$@"
@@ -77,6 +78,7 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     [ -z "$output" ]
     grep -q -- "--proto =https --proto-redir =https" "$CALLS"
     grep -qx 'setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs' "$CALLS"
+    ! grep -q 'fd 9 inherited' "$CALLS" || return 1
 }
 
 @test "up to date: only the checksum is fetched, and the installed runsc is never run" {
@@ -363,9 +365,10 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     [ "$status" -eq 0 ]
     [ ! -e "$R/var/lib/claude-airlock/tmp.old1" ] && [ ! -e "$R/usr/local/bin/runsc.update-runsc.4242" ]
     exec 8> "$R/var/lib/claude-airlock/update-runsc.lock"; flock 8
-    run "$U" --check
+    run "$U"
     exec 8>&-
     [ "$status" -eq 1 ]; [[ "$output" == *"another update-runsc is running"* ]]
+    ! grep -q 'fd 9 inherited' "$CALLS" || return 1
 }
 
 @test "replacing a runsc that has no record is logged as such" {
@@ -395,4 +398,34 @@ EOF
     [ "$status" -eq 10 ]
     "$U" >/dev/null
     [ "$(stat -c %a "$R/usr/local/bin/gvisor-bin")" = 755 ]
+}
+
+@test "--check writes nothing: no state dir, no lock, no sweep" {
+    release release-20261019.0
+    mkdir -p "$R/usr/local/bin/sub"; echo keep > "$R/usr/local/bin/sub/notes.update-runsc.bak"
+    run "$U" --check
+    [ "$status" -eq 10 ]
+    [ ! -e "$R/var/lib/claude-airlock" ]
+    [ -f "$R/usr/local/bin/sub/notes.update-runsc.bak" ]
+}
+
+@test "a refused file name reaches the terminal quoted, control characters included" {
+    release release-20261026.0 "$(printf 'evil\033[2Jname')"
+    run "$U"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"holds \$'evil\\E[2Jname'"* ]] || { echo "$output" | od -c | head -4; return 1; }
+}
+
+@test "nested helper directories are checked at every level" {
+    release release-20261019.0 gvisor-bin/sub/x
+    "$U" >/dev/null
+    run "$U" --check
+    [ "$status" -eq 0 ]
+    # only the nested helper left under gvisor-bin/: its top is checked through it
+    sed -i '/ gvisor-bin\/helper$/d' "$S"; rm "$R/usr/local/bin/gvisor-bin/helper"
+    run "$U" --check
+    [ "$status" -eq 0 ]
+    chmod 0777 "$R/usr/local/bin/gvisor-bin"
+    run "$U" --check
+    [ "$status" -eq 10 ]
 }
