@@ -12,23 +12,35 @@ stack has no iptables, so the firewall posture can't come up under it.
 
 `bin/update-runsc` installs runsc from Google's release bucket into `/usr/local/bin`, root-owned
 (the boxes' runtime must not be writable by the users who run them). It tracks the latest
-release, takes the tarball (the loose binaries upstream stopped updating), checks it against the
-bucket's sha512, and logs every change to `/var/log/update-runsc.log`.
+release, takes the tarball (upstream stopped publishing the loose binaries), checks it against
+the bucket's sha512, installs only runsc, its containerd shim and gVisor's `gvisor-bin/` helpers
+(a tarball holding anything else is refused), and logs every change to
+`/var/log/update-runsc.log`.
 
 ```sh
-sudo bin/update-runsc            # install, or update to the latest release
-sudo bin/update-runsc --check    # exit 10 when an update is waiting
+sudo bin/update-runsc            # install, update to the latest release, or repair
+sudo bin/update-runsc --check    # exit 10 when an update (or a repair) is waiting
+sudo bin/update-runsc --first    # install when there is none, else only --check
 ```
 
 The checksum comes from the same bucket as the tarball: it shows the download is intact, not who
 published it.
 
-It refuses while gVisor boxes are running: a box keeps the old binary open and works on, but its
-stop and cleanup would run the new one against state the old one made. Stop them first (the
-agents' `halt`), or pass `--force`.
+It never runs the installed binaries as root. What is installed is known from its record
+(`/var/lib/claude-airlock/update-runsc.state`: the tarball's checksum, the release and each
+file's sha256); a file that no longer matches the record, or that anyone but root can write,
+counts as not installed, and the next run reinstalls it. The downloaded runsc is asked its
+version as `nobody`, not as root.
 
-With agent users, `make install-agents` installs it for you (`runsc on`, the default in
-`agents.conf`) and reports waiting updates on later runs; see [agents.md](agents.md#gvisor-runsc).
+It refuses while gVisor boxes are running (checked before the download and again before any
+file is replaced): a box keeps the old binary open and works on, but its stop and cleanup would
+run the new one against state the old one made. Stop them first (the agents' sessions:
+`<command> stop`, `<command> web stop`), or pass `--force`. Boxes that are created but stopped
+aren't seen; remove them before an update.
+
+With agent users, `make install-agents` runs `update-runsc --first` (`runsc on`, the default in
+`agents.conf`): it installs runsc when there is none, and otherwise only reports a waiting update;
+see [agents.md](agents.md#gvisor-runsc).
 
 ## The benchmark
 
@@ -60,5 +72,7 @@ bats files and the whole suite once, pgbench, and an idle box's memory. Checks: 
 through the proxy, and a file changed on the host seen in the box. Medians of 5 runs (`--quick`:
 one run, no whole suite). Expect up to an hour for every variant; `--quick` takes minutes.
 
+Every variant gets an untimed warm-up box first, so the baseline doesn't carry the cold start.
 Results go to `~/.cache/airlock-bench/<time>/`: `facts.txt` (the host) and `summary.tsv`
-(medians, and how many times slower than crun) are the ones to keep.
+(medians, and how many times slower than crun) are the ones to keep. A workload that failed, or
+never ran because its box died, reads FAIL; `--summarize <results.tsv>` redraws a summary.

@@ -11,8 +11,8 @@
 # research (a web user and a guard user, default <agent>-web and <agent>-guard), their uids and
 # subordinate id ranges (the next free ones), home image sizes and the operator command's name,
 # then writes /etc/claude-airlock/agents/agents.conf. Later runs keep that file and update the
-# installed toolkit. With `runsc on` (the default) the first run also installs gVisor's runsc
-# (bin/update-runsc) and later runs report a waiting update. Every run ends with
+# installed toolkit. With `runsc on` (the default) it also installs gVisor's runsc when there is
+# none (bin/update-runsc) and otherwise reports a waiting update. Every run ends with
 # `airlock-agents-apply --confirm` (it renders and provisions; see its --help).
 set -euo pipefail
 umask 022
@@ -151,21 +151,17 @@ if [ -d /etc/apt/apt.conf.d ]; then put 0644 "$SRC/hooks/80airlock-agents-nodump
 # Each user's default claude-airlock config is written by the apply (once; the site's afterwards).
 eval "$("$SRC/airlock-agents-apply" --env "$ETC/agents.conf" | grep -E '^AGENTS_[A-Z_]+=[A-Za-z0-9_./-]*$')"
 
-# gVisor's runsc (agents.conf: runsc on|off, or external runsc): installed on the first run, after
-# that only reported. An update replaces the runtime under running boxes, so it stays a step of
-# its own (sudo update-runsc). Neither a failed download nor a waiting update stops the install.
+# gVisor's runsc (agents.conf: runsc on|off, or external runsc): installed when there is none,
+# otherwise only reported (update-runsc --first). An update replaces the runtime under running
+# boxes, so it stays a step of its own. Neither a failed download nor a waiting update stops this.
 if [ "${AGENTS_RUNSC:-on}" = on ]; then
-    if [ ! -e /usr/local/bin/runsc ]; then
-        echo "==> installing gVisor (runsc)"
-        /usr/local/sbin/update-runsc || echo "install-agents: WARNING: runsc was not installed (above); boxes don't need it yet. Retry: sudo update-runsc" >&2
-    else
-        rc=0; out="$(/usr/local/sbin/update-runsc --check 2>&1)" || rc=$?
-        case "$rc" in
-            0) ;;
-            10) echo "==> gVisor: an update is waiting. Stop the boxes ($AGENTS_COMMAND halt), then: sudo update-runsc" ;;
-            *) echo "install-agents: WARNING: could not check for a runsc update: $(tail -n 1 <<< "$out")" >&2 ;;
-        esac
-    fi
+    echo "==> gVisor (runsc)"
+    rc=0; /usr/local/sbin/update-runsc --first || rc=$?
+    case "$rc" in
+        0) ;;
+        10) echo "==> gVisor: stop the agents' sessions ($AGENTS_COMMAND stop, $AGENTS_COMMAND web stop), then: sudo update-runsc; start them again after" ;;
+        *) echo "install-agents: WARNING: runsc not installed or checked (above); boxes don't run under it yet. Retry: sudo update-runsc" >&2 ;;
+    esac
 fi
 
 echo "==> airlock-agents-apply --confirm"

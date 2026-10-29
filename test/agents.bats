@@ -2580,7 +2580,7 @@ EOF
     [ "$status" -eq 1 ]; [[ "$output" == *"toolkit files differ from the install"*"operator"* ]]
 }
 
-@test "runsc: missing is a note, never a pause; one others can write pauses; off checks nothing" {
+@test "runsc: missing is a note, never a pause; one others can write pauses, with runsc off too; off notes nothing" {
     run "$P"
     [[ "$output" == *"note: no /usr/local/bin/runsc yet (sudo update-runsc installs it)"* ]] || { echo "$output"; return 1; }
     [[ "$output" != *"runsc must be"* ]] || { echo "$output"; return 1; }
@@ -2596,8 +2596,11 @@ EOF
     [ "$status" -eq 1 ]; [[ "$output" == *"/usr/local/bin/runsc must be a regular file"* ]] || { echo "$output"; return 1; }
     printf 'runsc off\n' >> "$E/agents.conf"
     run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"/usr/local/bin/runsc must be a regular file"* ]] || { echo "$output"; return 1; }
+    rm "$R/usr/local/bin/runsc"
+    run "$P"
     [[ "$output" != *"runsc"* ]] || { echo "$output"; return 1; }
-    sed -i 's/^runsc off$/external runsc/' "$E/agents.conf"; rm "$R/usr/local/bin/runsc"
+    sed -i 's/^runsc off$/external runsc/' "$E/agents.conf"
     run "$P"
     [[ "$output" == *"note: runsc is managed elsewhere (external runsc), but there is no /usr/local/bin/runsc"* ]] || { echo "$output"; return 1; }
 }

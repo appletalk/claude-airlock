@@ -15,9 +15,9 @@
 #   internal-host <name>...     host names a research question must not carry
 #   daily-cap <n>            research runs a day at most (default 40)
 #   runsc on|off             gVisor's runsc (default on): install-agents installs it into
-#                            /usr/local/bin on its first run and later reports a waiting update
-#                            (sudo update-runsc applies it). off: none. Boxes don't run under
-#                            it yet (docs/gvisor.md)
+#                            /usr/local/bin when there is none, and otherwise reports a waiting
+#                            update (sudo update-runsc applies it). off: no runsc. Boxes don't
+#                            run under it yet (docs/gvisor.md)
 #   external <part>...       parts your own config repo manages: nftables, polkit, profile, runsc.
 #                            Not written here; checked live (--render shows what they must provide)
 #   accept <finding>...      findings you accept, so they don't pause an apply: wsl-interop,

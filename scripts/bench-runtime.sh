@@ -32,11 +32,47 @@ KVM="${BENCH_KVM:-/dev/kvm}"
 OSRELEASE="${BENCH_OSRELEASE:-/proc/sys/kernel/osrelease}"
 die() { echo "bench-runtime: $*" >&2; exit 1; }
 
+# The summary of a results file: per workload, each variant's median, and how many times slower
+# than crun (pgbench-tps is a rate: by its rate). check-* rows are pass/fail.
+summarize() {
+  awk -F'\t' '
+    NR == 1 { next }
+    $2 ~ /^check-/ { chk[$1 SUBSEP $2] = ($5 == "ok" ? "ok" : "FAIL") ($4 != "-" ? " (" $4 ")" : ""); }
+    $2 !~ /^check-/ && $4 ~ /^[0-9.]+$/ { k = $1 SUBSEP $2; n[k]++; v[k, n[k]] = $4 }
+    $5 != "ok" { bad[$1 SUBSEP $2] = 1 }
+    $4 == "n/a" { na[$1 SUBSEP $2] = 1 }
+    { if (!($2 in seen)) { seen[$2] = 1; order[++w] = $2 } if (!($1 in vs)) { vs[$1] = 1; vo[++nv] = $1 } }
+    function median(k,   i, j, t, m) {
+      m = n[k]; for (i = 1; i <= m; i++) a[i] = v[k, i] + 0
+      for (i = 2; i <= m; i++) { t = a[i]; for (j = i - 1; j >= 1 && a[j] > t; j--) a[j + 1] = a[j]; a[j + 1] = t }
+      return (m % 2) ? a[(m + 1) / 2] : (a[m / 2] + a[m / 2 + 1]) / 2
+    }
+    END {
+      printf "workload"; for (i = 1; i <= nv; i++) printf "\t%s", vo[i]; printf "\n"
+      for (x = 1; x <= w; x++) {
+        wl = order[x]; printf "%s", wl
+        base = ((("crun" SUBSEP wl) in n)) ? median("crun" SUBSEP wl) : 0
+        for (i = 1; i <= nv; i++) {
+          k = vo[i] SUBSEP wl
+          if (k in chk) { printf "\t%s", chk[k]; continue }
+          # nothing measured: failed, not measurable here (n/a), its box died (FAIL), or not run
+          if (!(k in n)) { printf "\t%s", ((k in bad) ? "FAIL" : (k in na) ? "n/a" : (chk[vo[i] SUBSEP "check-inner-run"] ~ /^FAIL/) ? "FAIL" : "-"); continue }
+          m = median(k); cell = sprintf("%g", m)
+          if (vo[i] != "crun" && base > 0 && m > 0 && !(k in bad) && wl != "idle-pss-mib") cell = cell sprintf(" (%.2fx)", (wl == "pgbench-tps") ? base / m : m / base)
+          if (k in bad) cell = cell " FAIL"
+          printf "\t%s", cell
+        }
+        printf "\n"
+      }
+    }' "$1"
+}
+
 reps=5 quick=0 list=0 want=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --quick) quick=1; reps=1 ;;
     --list) list=1 ;;
+    --summarize) [ $# -ge 2 ] || die "--summarize needs a results.tsv"; summarize "$2"; exit ;;
     --variants) [ $# -ge 2 ] || die "--variants needs a list"; want=$2; shift ;;
     -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument $1 (see --help)" ;;
@@ -155,7 +191,7 @@ t() {  # t <workload> <run> <command...>: time it
   e=$(date +%s.%N)
   printf '%s\t%s\t%s\t%s\n' "$name" "$run" "$(awk -v s="$s" -v e="$e" 'BEGIN { printf "%.3f", e - s }')" "$st"
 }
-burst() { local i; for i in $(seq 2000); do /bin/true; done; }
+burst() { local i; for i in $(seq 2000); do /bin/true || return 1; done; }
 gstatus() { local i; for i in $(seq 20); do git -C "$W/src" status --porcelain >/dev/null || return 1; done; }
 nodes() { local i; for i in $(seq 50); do node -e 0 || return 1; done; }
 claudev() { local i; for i in $(seq 10); do claude --version >/dev/null || return 1; done; }
@@ -232,6 +268,17 @@ host_change() {
   [ "$st" = 0 ] && echo ok || echo fail
 }
 
+# The idle-memory box, if a run stops while it is up.
+trap '"$ENGINE" rm -f "airlock-bench-$$" >/dev/null 2>&1 || true' EXIT
+
+# Warm-up, untimed, every variant before any is timed: the image layers, the work tree and the
+# tools in the page cache, so the first variant timed (crun) doesn't carry the cold start.
+echo "==> warm-up"
+for v in "${variants[@]}"; do
+  # shellcheck disable=SC2016  # expanded by the box's shell
+  box "$v" "$IMAGE" bash -c 'node -e 0; claude --version; git -C "$1/src" log -p | tail -n 1; tar -C "$1/src" -cf - . | wc -c' _ "$W" >/dev/null 2>&1 || true
+done
+
 echo -e "variant\tworkload\trun\tvalue\tstatus" > "$out/results.tsv"
 for v in "${variants[@]}"; do
   echo "==> $v"
@@ -251,43 +298,17 @@ for v in "${variants[@]}"; do
   printf '%s\tidle-pss-mib\t1\t%s\t%s\n' "$v" "$(idle_pss "$v")" ok >> "$out/results.tsv"
   : > "$W/inner.err"
   box "$v" "$IMAGE" bash "$W/inner.sh" "$W" "$reps" "$quick" 2>>"$log" | sed "s/^/$v\t/" >> "$out/results.tsv"
+  st="${PIPESTATUS[0]}"
+  printf '%s\tcheck-inner-run\t1\t%s\t%s\n' "$v" "$([ "$st" = 0 ] && echo - || echo "exit $st")" "$([ "$st" = 0 ] && echo ok || echo fail)" >> "$out/results.tsv"
   cat "$W/inner.err" >> "$log"
 done
 
-# ---- summary: medians, and the ratio to crun (for times; pgbench-tps is a rate) ----------------
-awk -F'\t' '
-  NR == 1 { next }
-  $2 ~ /^check-/ { chk[$1 SUBSEP $2] = ($5 == "ok" ? "ok" : "FAIL") ($4 != "-" ? " (" $4 ")" : ""); }
-  $2 !~ /^check-/ && $4 ~ /^[0-9.]+$/ { k = $1 SUBSEP $2; n[k]++; v[k, n[k]] = $4 }
-  $5 != "ok" { bad[$1 SUBSEP $2] = 1 }
-  $4 == "n/a" { na[$1 SUBSEP $2] = 1 }
-  { if (!($2 in seen)) { seen[$2] = 1; order[++w] = $2 } if (!($1 in vs)) { vs[$1] = 1; vo[++nv] = $1 } }
-  function median(k,   i, j, t, m) {
-    m = n[k]; for (i = 1; i <= m; i++) a[i] = v[k, i] + 0
-    for (i = 2; i <= m; i++) { t = a[i]; for (j = i - 1; j >= 1 && a[j] > t; j--) a[j + 1] = a[j]; a[j + 1] = t }
-    return (m % 2) ? a[(m + 1) / 2] : (a[m / 2] + a[m / 2 + 1]) / 2
-  }
-  END {
-    printf "workload"; for (i = 1; i <= nv; i++) printf "\t%s", vo[i]; printf "\n"
-    for (x = 1; x <= w; x++) {
-      wl = order[x]; printf "%s", wl
-      base = ((("crun" SUBSEP wl) in n)) ? median("crun" SUBSEP wl) : 0
-      for (i = 1; i <= nv; i++) {
-        k = vo[i] SUBSEP wl
-        if (k in chk) { printf "\t%s", chk[k]; continue }
-        if (!(k in n)) { printf "\t%s", ((k in bad) ? "FAIL" : (k in na) ? "n/a" : "-"); continue }
-        m = median(k); cell = sprintf("%g", m)
-        if (vo[i] != "crun" && base > 0 && wl != "idle-pss-mib") cell = cell sprintf(" (%.2fx)", (wl == "pgbench-tps") ? base / m : m / base)
-        if (k in bad) cell = cell " FAIL"
-        printf "\t%s", cell
-      }
-      printf "\n"
-    }
-  }' "$out/results.tsv" > "$out/summary.tsv"
-
+summarize "$out/results.tsv" > "$out/summary.tsv"
 echo
 column -t -s $'\t' "$out/summary.tsv" 2>/dev/null || cat "$out/summary.tsv"
 echo
 echo "Medians: seconds, except idle-pss-mib (MiB) and pgbench-tps (transactions a second). (Nx): how"
 echo "many times slower than crun (for pgbench, by its rate). check-*: pass/fail, nothing timed."
+echo "FAIL: failed, or never ran because its box died (check-inner-run). n/a: not measurable here."
+echo "-: not run for this variant."
 echo "results: $out  (paste facts.txt and summary.tsv)"

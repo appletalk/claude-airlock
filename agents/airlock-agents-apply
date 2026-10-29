@@ -91,7 +91,8 @@ while IFS= read -r line || [ -n "$line" ]; do
             CLIPBOARD=${w[1]} ;;
         runsc)
             # on: install-agents installs gVisor's runsc (bin/update-runsc) and reports updates.
-            # off: neither the script nor runsc. Boxes don't run under it yet either way.
+            # off: it installs no runsc (update-runsc itself is part of the toolkit either way).
+            # Boxes don't run under it yet.
             [ "${#w[@]}" = 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: runsc on|off"
             RUNSC=${w[1]} ;;
         operator|command|inbox|queue|daily-cap)
@@ -849,16 +850,19 @@ if [ -n "${EXTERNAL[polkit]:-}" ]; then
         [ "$granted" = 1 ] || pause "polkit is managed elsewhere, but no rule lets $OPERATOR open a host shell as ${NAME[$r]}: see --render's external/etc/polkit-1/rules.d/50-airlock-agents.rules"
     done
 fi
-# gVisor's runsc: boxes don't run under it yet, so a missing one is only a note. One anyone but
-# root can write is a pause: the agent users' boxes will run under that binary.
-if [ "$RUNSC" != off ]; then
-    rs="$ROOT/usr/local/bin/runsc"
-    if [ ! -e "$rs" ]; then
-        if [ "$RUNSC" = external ]; then echo "note: runsc is managed elsewhere (external runsc), but there is no /usr/local/bin/runsc" >&2
-        else echo "note: no /usr/local/bin/runsc yet (sudo update-runsc installs it)" >&2; fi
-    elif [ -L "$rs" ] || [ ! -f "$rs" ] || { [ -z "$ROOT" ] && [ "$(stat -c %u "$rs")" != 0 ]; } \
-            || [ $(( 8#$(stat -c %a "$rs") & 8#022 )) != 0 ]; then
-        pause "/usr/local/bin/runsc must be a regular file owned by root and writable by root alone (the agents' boxes will run under it): sudo update-runsc --force puts a clean copy there"
+# gVisor's runsc: boxes don't run under it yet, so a missing one is only a note (none with runsc
+# off). One anyone but root can write is a pause whatever the setting, while it is there: the
+# agent users' boxes would run under that binary.
+rs="$ROOT/usr/local/bin/runsc"
+if [ ! -e "$rs" ] && [ ! -L "$rs" ]; then
+    if [ "$RUNSC" = external ]; then echo "note: runsc is managed elsewhere (external runsc), but there is no /usr/local/bin/runsc" >&2
+    elif [ "$RUNSC" = on ]; then echo "note: no /usr/local/bin/runsc yet (sudo update-runsc installs it)" >&2; fi
+elif [ -L "$rs" ] || [ ! -f "$rs" ] || { [ -z "$ROOT" ] && [ "$(stat -c %u "$rs")" != 0 ]; } \
+        || [ $(( 8#$(stat -c %a "$rs") & 8#022 )) != 0 ]; then
+    if [ "$RUNSC" = external ]; then
+        pause "/usr/local/bin/runsc must be a regular file owned by root and writable by root alone (the agents' boxes would run under it); your config repo provides it (external runsc)"
+    else
+        pause "/usr/local/bin/runsc must be a regular file owned by root and writable by root alone (the agents' boxes would run under it): sudo update-runsc reinstalls it (a copy that doesn't match its record counts as not installed)"
     fi
 fi
 # A home image that no longer matches agents.conf (it only grows by hand).

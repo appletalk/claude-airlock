@@ -128,9 +128,10 @@ Files the toolkit owns aren't edited locally: changes come with a toolkit update
 ### gVisor (runsc)
 
 `runsc on` (the default; install writes the line) has `make install-agents` install gVisor's
-`runsc` into `/usr/local/bin` on its first run, and report a waiting update on later runs: it
-never updates on its own, because an update replaces the runtime under running boxes. `runsc
-off` installs none; `external runsc` says your config repo provides it (apply checks it's there).
+`runsc` into `/usr/local/bin` when there is none, and otherwise only report a waiting update: it
+never updates on its own, because an update replaces the runtime under running boxes (stop the
+sessions, then `sudo update-runsc`). `runsc off` installs none; `external runsc` says your config
+repo provides it. Either way apply pauses on a runsc anyone but root can write.
 Boxes don't run under it yet: [gvisor.md](gvisor.md) has the plan and the benchmark to run first.
 
 ### The clipboard

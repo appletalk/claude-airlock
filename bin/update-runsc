@@ -2,22 +2,31 @@
 # update-runsc: install or update gVisor (runsc) from Google's release bucket, for boxes that run
 # under it (docs/gvisor.md). Root; `make install-agents` runs it, or run it by hand.
 #
-#   sudo update-runsc            install, or update to the latest release
-#   sudo update-runsc --check    say whether an update is waiting; exit 10 if one is
-#   sudo update-runsc --force    update even while gVisor boxes are running
+#   sudo update-runsc            install, update to the latest release, or repair an installed
+#                                copy that no longer matches what was installed
+#   sudo update-runsc --check    say whether anything is waiting; exit 10 if so
+#   sudo update-runsc --first    install when nothing is installed, else only --check (what
+#                                install-agents runs: it never replaces a runtime on its own)
+#   sudo update-runsc --force    go ahead even while gVisor boxes are running
 #
 # It tracks the latest release. Most distributions don't package gVisor, so it comes from
-# upstream: the tarball, never the loose binaries (those stopped at release 20260817.0 while the
+# upstream: the tarball, never the loose binaries (upstream stopped publishing those while the
 # tarball kept moving; fetching them installs a stale build, checksum-verified and exit 0). The
 # checksum file is fetched first, so an unchanged upstream costs a few bytes rather than a 120 MB
-# download. The last installed checksum is kept in $STATE and every change is logged to $LOG.
+# download. Every change is logged to $LOG.
 #
 # The checksum comes from the same bucket as the tarball: it proves the download is intact, not
 # who published it.
 #
+# The installed binaries are never run as root here (the agent users run boxes under runsc; one
+# they could change must not become root's code). What is installed is known from $STATE: the
+# tarball's checksum, the release, and each file's sha256. A file that no longer matches that
+# record, or that anyone but root can write, counts as not installed: the next run reinstalls it.
+#
 # Running boxes: a gVisor box holds runsc open and keeps working after it is replaced, but the
 # box's later stop and cleanup run the new runsc against state the old one made. It refuses
-# while any are running; stop them first (the agents' `halt`, or `podman stop`), or pass --force.
+# while any are running (checked before the download and again before the files are replaced);
+# stop them first, or pass --force. Boxes that are created but stopped aren't seen: remove them.
 set -euo pipefail
 umask 022
 
@@ -25,90 +34,139 @@ ROOT="${AIRLOCK_RUNSC_ROOT:-}"   # test hook: file paths go under it (commands a
 ARCH="$(uname -m)"
 URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
 DEST="$ROOT/usr/local/bin"
-STATE="$ROOT/var/lib/claude-airlock/update-runsc.sha512"
+STATE="$ROOT/var/lib/claude-airlock/update-runsc.state"
 LOG="$ROOT/var/log/update-runsc.log"
+# What the tarball may hold: the runtime and its containerd shim, and gVisor's helpers in their
+# own directory (never anything else on root's PATH).
+allowed() { case "$1" in runsc|containerd-shim-runsc-v1|gvisor-bin/[A-Za-z0-9]*) [[ "$1" =~ ^[A-Za-z0-9/._-]+$ && "$1" != *..* ]] ;; *) false ;; esac; }
 die() { echo "update-runsc: $*" >&2; exit 1; }
 
-check_only=0 force=0
+mode=update force=0
 for a in "$@"; do
     case "$a" in
-        --check) check_only=1 ;;
+        --check) mode=check ;;
+        --first) mode=first ;;
         --force) force=1 ;;
         -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-        *) echo "usage: ${0##*/} [--check] [--force]" >&2; exit 2 ;;
+        *) echo "usage: ${0##*/} [--check | --first] [--force]" >&2; exit 2 ;;
     esac
 done
 [ -n "$ROOT" ] || [ "$EUID" -eq 0 ] || die "run as root: sudo ${0##*/}"
+cmd="sudo ${0##*/}"
 
-runsc_version() {
-    [ -x "$1" ] || { echo none; return; }
-    "$1" --version 2>/dev/null | awk '/^runsc version/ { print $3; exit }'
+# The release and the sha512 the record names, and whether every recorded file is in place as
+# installed: a regular file, root's (outside the test root), mode 0755, the recorded sha256.
+rec() { [ -f "$STATE" ] && awk -v k="$1" '$1 == k { print $2; exit }' "$STATE"; }
+intact() {
+    local sum rel f n=0
+    [ -f "$STATE" ] || return 1
+    while read -r _ sum rel; do
+        f="$DEST/$rel"; n=$((n + 1))
+        allowed "$rel" && [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %a "$f")" = 755 ] || return 1
+        [ -n "$ROOT" ] || [ "$(stat -c %u "$f")" = 0 ] || return 1
+        [ "$(sha256sum < "$f" | cut -d' ' -f1)" = "$sum" ] || return 1
+    done < <(awk '$1 == "file"' "$STATE")
+    [ "$n" -gt 0 ] && [ -n "$(rec release)" ]
 }
+# gVisor box processes: the sandbox re-executes runsc as runsc-sandbox, its file proxy as
+# runsc-gofer. pgrep exits 1 for none; anything else means it can't tell, which is a stop.
+boxes() {
+    local n rc=0
+    command -v pgrep >/dev/null || die "pgrep is missing: can't tell whether gVisor boxes are running"
+    n="$(pgrep -c -f '^runsc-(sandbox|gofer)( |$)')" || rc=$?
+    case "$rc" in 0|1) echo "${n:-0}" ;; *) die "pgrep failed (exit $rc): can't tell whether gVisor boxes are running" ;; esac
+}
+no_boxes() {
+    local n; n="$(boxes)"
+    [ "$n" -gt 0 ] || return 0
+    [ "$force" = 1 ] || die "$n gVisor box process(es) running. Stop the boxes first (the agents' sessions: <command> stop, <command> web stop), then run it again; or pass --force"
+    echo "update-runsc: WARNING: $n gVisor box process(es) running; replacing runsc under them (--force)" >&2
+}
+
+installed="$(rec release || true)"
+if [ -n "$installed" ] && ! intact; then
+    echo "installed: $installed, but the files no longer match the record (they will be reinstalled)"
+    installed=""
+fi
+echo "installed: ${installed:-none}"
+
+if [ "$mode" = first ] && [ -n "$installed" ]; then mode=check; fi
 
 tmp="$(mktemp -d)"
 # Also sweep staged files an interrupted install left behind.
 trap 'rm -rf "$tmp"; find "$DEST" -name "*.update-runsc.$$" -delete 2>/dev/null || true' EXIT
 
-installed="$(runsc_version "$DEST/runsc")"
-echo "installed: $installed"
-
-curl -fsSL --retry 3 -o "$tmp/gvisor.tar.zstd.sha512" "$URL/gvisor.tar.zstd.sha512" \
-    || die "could not fetch the checksum from $URL"
-remote_sum="$(awk '{ print $1 }' "$tmp/gvisor.tar.zstd.sha512")"
+fetch() { curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$tmp/$1" "$URL/$1" || die "could not fetch $1 from $URL"; }
+fetch gvisor.tar.zstd.sha512
+remote_sum="$(awk '{ print $1; exit }' "$tmp/gvisor.tar.zstd.sha512")"
 [[ "$remote_sum" =~ ^[0-9a-f]{128}$ ]] || die "the checksum file from $URL is not a sha512"
-local_sum="$(cat "$STATE" 2>/dev/null || true)"
 
-if [ "$remote_sum" = "$local_sum" ] && [ "$installed" != none ]; then
+if [ -n "$installed" ] && [ "$remote_sum" = "$(rec tarball || true)" ]; then
     echo "up to date: the upstream tarball is unchanged since the last install"
     exit 0
 fi
-if [ "$check_only" = 1 ]; then
-    echo "update available: the upstream tarball differs from the last install (sudo ${0##*/})"
+if [ "$mode" = check ]; then
+    if [ -n "$installed" ]; then echo "update available: the upstream tarball differs from the last install ($cmd)"
+    else echo "runsc is not installed as recorded ($cmd installs it)"; fi
     exit 10
 fi
 
-# The sandbox re-executes runsc as runsc-sandbox, and its file proxy as runsc-gofer.
-boxes="$(pgrep -c -f '^runsc-(sandbox|gofer)( |$)' || true)"
-if [ "${boxes:-0}" -gt 0 ]; then
-    if [ "$force" = 1 ]; then
-        echo "update-runsc: WARNING: ${boxes} gVisor box process(es) running; replacing runsc under them (--force)" >&2
-    else
-        die "${boxes} gVisor box process(es) running. Stop the boxes first (the agents' halt, or podman stop), then run it again; or pass --force"
-    fi
-fi
-
-echo "downloading gvisor.tar.zstd"
-curl -fsSL --retry 3 -o "$tmp/gvisor.tar.zstd" "$URL/gvisor.tar.zstd" || die "could not fetch the tarball from $URL"
-(cd "$tmp" && sha512sum --quiet -c gvisor.tar.zstd.sha512) || die "the tarball does not match its checksum; nothing installed"
+no_boxes
+fetch gvisor.tar.zstd
+[ "$(sha512sum < "$tmp/gvisor.tar.zstd" | cut -d' ' -f1)" = "$remote_sum" ] \
+    || die "the tarball does not match its checksum; nothing installed"
 
 mkdir "$tmp/new"
-tar --zstd -xf "$tmp/gvisor.tar.zstd" -C "$tmp/new" || die "could not unpack the tarball (is zstd installed?)"
+tar --zstd -xf "$tmp/gvisor.tar.zstd" -C "$tmp/new" --no-same-owner || die "could not unpack the tarball (is zstd installed?)"
+files=()
+while IFS= read -r -d '' p; do
+    rel="${p#"$tmp/new/"}"
+    [ -d "$p" ] && [ ! -L "$p" ] && continue
+    if ! { [ -f "$p" ] && [ ! -L "$p" ] && allowed "$rel"; }; then
+        die "the tarball holds $rel, which isn't runsc, its shim or a gvisor-bin/ helper; nothing installed"
+    fi
+    files+=("$rel")
+done < <(find "$tmp/new" -mindepth 1 -print0)
+[ -f "$tmp/new/runsc" ] || die "the tarball has no runsc; nothing installed"
 
-candidate="$(runsc_version "$tmp/new/runsc")"
-[ "$candidate" != none ] && [ -n "$candidate" ] || die "the unpacked runsc reports no version; nothing installed"
+# The new release's name, from the new binary, run as nobody: the checksum shows the download is
+# intact, not whose it is, so it doesn't run as root before it is installed.
+chmod 0755 "$tmp" "$tmp/new" "$tmp/new/runsc"
+if [ -z "$ROOT" ]; then ver="$(setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$tmp/new/runsc" --version 2>/dev/null)" || ver=""
+else ver="$("$tmp/new/runsc" --version 2>/dev/null)" || ver=""; fi
+candidate="$(awk '/^runsc version/ { print $3 }' <<< "$ver" | head -n 1)"
+[[ "$candidate" =~ ^[A-Za-z0-9._-]+$ ]] || die "the unpacked runsc reports no version; nothing installed"
 
-# A new tarball can carry the same release (a rebuild): record its checksum so the cheap path
-# works next time, and leave the binaries alone.
-if [ "$candidate" = "$installed" ]; then
+new_state="$tmp/state"
+{
+    echo "tarball $remote_sum"
+    echo "release $candidate"
+    for rel in "${files[@]}"; do echo "file $(sha256sum < "$tmp/new/$rel" | cut -d' ' -f1) $rel"; done
+} > "$new_state"
+
+# A new tarball can carry exactly the files in place (a rebuild): record it and leave them alone.
+same=1
+for rel in "${files[@]}"; do
+    [ -n "$installed" ] && [ -f "$DEST/$rel" ] && cmp -s "$tmp/new/$rel" "$DEST/$rel" || same=0
+done
+install -d -m 0755 "$(dirname "$STATE")" "$(dirname "$LOG")"
+if [ "$same" = 1 ] && [ "$candidate" = "$installed" ]; then
+    install -m 0644 "$new_state" "$STATE.new" && mv -f "$STATE.new" "$STATE"
     echo "already on $candidate: checksum recorded, nothing installed"
-    install -d -m 0755 "$(dirname "$STATE")"
-    printf '%s\n' "$remote_sum" > "$STATE"
     exit 0
 fi
 
+# Last look before anything changes: a box started during the download counts too.
+no_boxes
 # Stage each file beside its target and rename it over: a running sandbox holds runsc open for
 # execution, so writing in place fails (ETXTBSY), while a rename publishes the new file whole and
-# leaves running boxes on the old inode. Root-owned, not writable by anyone else: the agent users
-# run their boxes under this binary.
-while IFS= read -r -d '' src; do
-    rel="${src#"$tmp/new/"}"
+# leaves running boxes on the old inode. Root-owned, 0755: the agent users run boxes under it.
+for rel in "${files[@]}"; do
     dst="$DEST/$rel"
     install -d -m 0755 "$(dirname "$dst")"
-    install -m 0755 "$src" "$dst.update-runsc.$$"
+    install -m 0755 "$tmp/new/$rel" "$dst.update-runsc.$$"
     mv -f "$dst.update-runsc.$$" "$dst"
-done < <(find "$tmp/new" -type f -print0)
-
-install -d -m 0755 "$(dirname "$STATE")" "$(dirname "$LOG")"
-printf '%s\n' "$remote_sum" > "$STATE"
-printf '%s  %s -> %s\n' "$(date -Is)" "$installed" "$candidate" >> "$LOG"
-echo "installed runsc $candidate (was $installed)"
+done
+install -m 0644 "$new_state" "$STATE.new" && mv -f "$STATE.new" "$STATE"
+printf '%s  %s -> %s\n' "$(date -Is)" "${installed:-none}" "$candidate" >> "$LOG"
+echo "installed runsc $candidate (was ${installed:-none})"

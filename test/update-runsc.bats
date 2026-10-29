@@ -5,135 +5,234 @@
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     T="$BATS_TEST_TMPDIR"
-    export AIRLOCK_RUNSC_ROOT="$T/root" CALLS="$T/calls" BUCKET="$T/bucket" BOXES=0
+    export AIRLOCK_RUNSC_ROOT="$T/root" CALLS="$T/calls" BUCKET="$T/bucket" BOXES=0 RAN="$T/ran"
     R="$AIRLOCK_RUNSC_ROOT"
     mkdir -p "$R/usr/local/bin" "$BUCKET" "$T/bin"
     U="$REPO/bin/update-runsc"
-    # curl -fsSL --retry 3 -o FILE URL: the bucket's file of that name
+    S="$R/var/lib/claude-airlock/update-runsc.state"
+    # curl ... -o FILE URL: the bucket's file of that name
     cat > "$T/bin/curl" <<'EOF'
 #!/bin/bash
-echo "curl ${*: -1}" >> "$CALLS"
+echo "curl $*" >> "$CALLS"
 while [ $# -gt 1 ]; do [ "$1" = -o ] && out=$2; shift; done
 cp "$BUCKET/${1##*/}" "$out"
 EOF
-    # tar --zstd -xf TARBALL -C DIR: the tarball holds the release name; unpack a runsc that says it
+    # tar --zstd -xf TARBALL -C DIR: the tarball's first line is the release, any further lines
+    # are extra files it holds. Its runsc prints that release (and notes each run in $RAN).
     cat > "$T/bin/tar" <<'EOF'
 #!/bin/bash
 echo "tar $*" >> "$CALLS"
 while [ $# -gt 0 ]; do case "$1" in -xf) tb=$2; shift ;; -C) d=$2; shift ;; esac; shift; done
-v="$(cat "$tb")"
+v="$(head -n 1 "$tb")"
 mkdir -p "$d/gvisor-bin"
-printf '#!/bin/sh\n[ -n "%s" ] && echo "runsc version %s"\necho spec: 1.2\n' "$v" "$v" > "$d/runsc"
-echo shim > "$d/containerd-shim-runsc-v1"
-echo helper > "$d/gvisor-bin/helper"
+printf '#!/bin/sh\necho ran >> "%s"\nexit ${VERSION_RC:-0}\n' "$RAN" > "$d/runsc"
+[ -z "$v" ] || printf 'echo "runsc version %s"\necho spec: 1.2\n' "$v" >> "$d/runsc"
+sed -i '3{h;d};${G}' "$d/runsc"    # the exit last
+echo "shim $v" > "$d/containerd-shim-runsc-v1"
+echo "helper $v" > "$d/gvisor-bin/helper"
+tail -n +2 "$tb" | while read -r f; do [ -n "$f" ] && mkdir -p "$d/$(dirname "$f")" && echo x > "$d/$f"; done
 chmod 0700 "$d/runsc"
 EOF
-    printf '#!/bin/bash\necho "${BOXES:-0}"; [ "${BOXES:-0}" -gt 0 ]\n' > "$T/bin/pgrep"
+    # pgrep: the pattern it was given goes to $CALLS; BOXES boxes (a file: one count per call);
+    # PGREP_RC: fail like pgrep does on an error
+    cat > "$T/bin/pgrep" <<'EOF'
+#!/bin/bash
+echo "pgrep $*" >> "$CALLS"
+[ -z "${PGREP_RC:-}" ] || { echo "pgrep: some error" >&2; exit "$PGREP_RC"; }
+n=$BOXES
+if [ -f "$BOXES" ]; then n="$(head -n 1 "$BOXES")"; sed -i 1d "$BOXES"; fi
+echo "${n:-0}"; [ "${n:-0}" -gt 0 ]
+EOF
     chmod +x "$T/bin/"*
     export PATH="$T/bin:$PATH"
 }
-release() {  # release <name>: the bucket now serves this release (empty name: a runsc with no version)
-    printf '%s' "$1" > "$BUCKET/gvisor.tar.zstd"
+release() {  # release <name> [extra file...]: what the bucket serves now
+    printf '%s\n' "$@" > "$BUCKET/gvisor.tar.zstd"
     (cd "$BUCKET" && sha512sum gvisor.tar.zstd > gvisor.tar.zstd.sha512)
 }
-installed() {  # installed <name>: a runsc of that release in place
-    printf '#!/bin/sh\necho "runsc version %s"\n' "$1" > "$R/usr/local/bin/runsc"
-    chmod 0755 "$R/usr/local/bin/runsc"
-}
+tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
 
-@test "a first install: every file of the release, 0755, the checksum recorded and the change logged" {
+@test "a first install: the allowed files, 0755, the record (tarball, release, each file's sha256) and the log" {
     release release-20261019.0
     run "$U"
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"installed runsc release-20261019.0 (was none)"* ]]
-    [ "$("$R/usr/local/bin/runsc" --version | head -n 1)" = "runsc version release-20261019.0" ]
     for f in runsc containerd-shim-runsc-v1 gvisor-bin/helper; do
         [ "$(stat -c %a "$R/usr/local/bin/$f")" = 755 ] || { echo "$f: $(stat -c %a "$R/usr/local/bin/$f")"; return 1; }
+        grep -qx "file $(sha256sum < "$R/usr/local/bin/$f" | cut -d' ' -f1) $f" "$S"
     done
-    [ "$(cat "$R/var/lib/claude-airlock/update-runsc.sha512")" = "$(cut -d' ' -f1 "$BUCKET/gvisor.tar.zstd.sha512")" ]
+    grep -qx "tarball $(cut -d' ' -f1 "$BUCKET/gvisor.tar.zstd.sha512")" "$S"
+    grep -qx 'release release-20261019.0' "$S"
     grep -q '  none -> release-20261019.0$' "$R/var/log/update-runsc.log"
     run find "$R/usr/local/bin" -name '*.update-runsc.*'
     [ -z "$output" ]
+    grep -q -- "--proto =https --proto-redir =https" "$CALLS"
 }
 
-@test "up to date: only the checksum is fetched; nothing changes" {
+@test "up to date: only the checksum is fetched, and the installed runsc is never run" {
     release release-20261019.0
     "$U" >/dev/null
-    : > "$CALLS"
+    : > "$CALLS"; rm -f "$RAN"
     run "$U"
     [ "$status" -eq 0 ]
     [[ "$output" == *"up to date"* ]]
-    [ "$(cat "$CALLS")" = "curl https://storage.googleapis.com/gvisor/releases/release/latest/$(uname -m)/gvisor.tar.zstd.sha512" ]
+    [ "$(grep -c '^curl' "$CALLS")" = 1 ] && grep -q 'gvisor.tar.zstd.sha512$' "$CALLS"
+    [ ! -e "$RAN" ]
 }
 
-@test "--check: exit 10 with a waiting update, 0 without; never downloads or installs" {
+@test "the installed runsc is never run as part of an update or a check, whatever it is" {
     release release-20261019.0
+    "$U" >/dev/null
+    printf '#!/bin/sh\ntouch "%s/pwned"\necho "runsc version release-20261019.0"\n' "$T" > "$R/usr/local/bin/runsc"
+    chmod 0755 "$R/usr/local/bin/runsc"
+    "$U" --check >/dev/null || true
+    "$U" >/dev/null
+    [ ! -e "$T/pwned" ]
+}
+
+@test "--check: exit 10 with a waiting update or nothing installed, 0 without; never downloads or installs" {
+    release release-20261019.0
+    run "$U" --check
+    [ "$status" -eq 10 ]; [[ "$output" == *"not installed"* ]]
+    [ ! -e "$R/usr/local/bin/runsc" ]
     "$U" >/dev/null
     release release-20261026.0
     : > "$CALLS"
     run "$U" --check
     [ "$status" -eq 10 ]
     [[ "$output" == *"update available"* ]]
-    ! grep -q 'gvisor.tar.zstd$' "$CALLS" || return 1
-    [ "$("$R/usr/local/bin/runsc" --version | head -n 1)" = "runsc version release-20261019.0" ]
+    ! tar_fetched || return 1
+    grep -qx 'release release-20261019.0' "$S"
     "$U" >/dev/null
     run "$U" --check
     [ "$status" -eq 0 ]
 }
 
-@test "an update: the new release in place, logged as old -> new" {
-    installed release-20261019.0
+@test "--first: installs when there is none, otherwise only checks (a waiting update is exit 10, nothing replaced)" {
+    release release-20261019.0
+    run "$U" --first
+    [ "$status" -eq 0 ]; [[ "$output" == *"installed runsc release-20261019.0"* ]]
+    release release-20261026.0
+    : > "$CALLS"
+    run "$U" --first
+    [ "$status" -eq 10 ]
+    ! tar_fetched || return 1
+    grep -qx 'release release-20261019.0' "$S"
+}
+
+@test "an update: the new release in place, logged as old -> new, through a rename (a new inode)" {
+    release release-20261019.0
+    "$U" >/dev/null
+    ino="$(stat -c %i "$R/usr/local/bin/runsc")"
     release release-20261026.0
     run "$U"
     [ "$status" -eq 0 ]
     [[ "$output" == *"installed runsc release-20261026.0 (was release-20261019.0)"* ]]
     grep -q '  release-20261019.0 -> release-20261026.0$' "$R/var/log/update-runsc.log"
+    [ "$(stat -c %i "$R/usr/local/bin/runsc")" != "$ino" ]
+    grep -qx 'release release-20261026.0' "$S"
 }
 
-@test "a rebuilt tarball of the installed release: checksum recorded, binaries left alone" {
-    installed release-20261019.0
-    before="$(sha256sum < "$R/usr/local/bin/runsc")"
+@test "a rebuilt tarball with the same files: the new checksum recorded, the files left alone" {
     release release-20261019.0
+    "$U" >/dev/null
+    ino="$(stat -c %i "$R/usr/local/bin/runsc")"
+    release release-20261019.0 ""            # a different tarball, the same files
     run "$U"
     [ "$status" -eq 0 ]
     [[ "$output" == *"already on release-20261019.0"* ]]
-    [ "$(sha256sum < "$R/usr/local/bin/runsc")" = "$before" ]
-    [ -s "$R/var/lib/claude-airlock/update-runsc.sha512" ]
-    [ ! -e "$R/var/log/update-runsc.log" ]
+    [ "$(stat -c %i "$R/usr/local/bin/runsc")" = "$ino" ]
+    grep -qx "tarball $(cut -d' ' -f1 "$BUCKET/gvisor.tar.zstd.sha512")" "$S"
+    [ "$(wc -l < "$R/var/log/update-runsc.log")" = 1 ]
 }
 
-@test "running gVisor boxes: refused, nothing downloaded or replaced; --force replaces it with a warning" {
-    installed release-20261019.0
+@test "an installed copy that no longer matches its record (changed, or writable by others) is reinstalled, even with upstream unchanged" {
+    release release-20261019.0
+    "$U" >/dev/null
+    good="$(sha256sum < "$R/usr/local/bin/runsc")"
+    chmod 0777 "$R/usr/local/bin/runsc"
+    run "$U" --check
+    [ "$status" -eq 10 ]
+    run "$U"
+    [ "$status" -eq 0 ]; [[ "$output" == *"no longer match the record"*"installed runsc release-20261019.0"* ]]
+    [ "$(stat -c %a "$R/usr/local/bin/runsc")" = 755 ]
+    echo '# changed' >> "$R/usr/local/bin/gvisor-bin/helper"
+    run "$U"
+    [ "$status" -eq 0 ]; [[ "$output" == *"no longer match the record"* ]]
+    [ "$(cat "$R/usr/local/bin/gvisor-bin/helper")" = "helper release-20261019.0" ]
+    [ "$(sha256sum < "$R/usr/local/bin/runsc")" = "$good" ]
+}
+
+@test "running gVisor boxes: refused before the download; the pattern is runsc's sandbox and gofer; --force goes ahead with a warning" {
+    release release-20261019.0
+    "$U" >/dev/null
     release release-20261026.0
     export BOXES=2
     : > "$CALLS"
     run "$U"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"2 gVisor box process(es) running"*"--force"* ]]
-    ! grep -q 'gvisor.tar.zstd$' "$CALLS" || return 1
-    [ "$("$R/usr/local/bin/runsc" --version)" = "runsc version release-20261019.0" ]
+    [[ "$output" == *"2 gVisor box process(es) running"*"stop"*"--force"* ]]
+    grep -qxF 'pgrep -c -f ^runsc-(sandbox|gofer)( |$)' "$CALLS"
+    ! tar_fetched || return 1
+    grep -qx 'release release-20261019.0' "$S"
     run "$U" --force
     [ "$status" -eq 0 ]
-    [[ "$output" == *"WARNING: 2 gVisor box process(es) running"* ]]
-    [[ "$output" == *"installed runsc release-20261026.0"* ]]
+    [[ "$output" == *"WARNING: 2 gVisor box process(es) running"*"installed runsc release-20261026.0"* ]]
+}
+
+@test "a box started during the download stops the update before anything is replaced" {
+    release release-20261019.0
+    "$U" >/dev/null
+    release release-20261026.0
+    printf '0\n1\n' > "$T/boxes"; export BOXES="$T/boxes"
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"1 gVisor box process(es) running"* ]]
+    tar_fetched
+    grep -qx 'release release-20261019.0' "$S"
+    [ "$(cat "$R/usr/local/bin/containerd-shim-runsc-v1")" = "shim release-20261019.0" ]
+}
+
+@test "pgrep failing is a stop, not 'no boxes'" {
+    release release-20261019.0
+    export PGREP_RC=3
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"pgrep failed (exit 3)"* ]]
+    [ ! -e "$R/usr/local/bin/runsc" ]
 }
 
 @test "--check with boxes running still reports (it replaces nothing)" {
-    installed release-20261019.0
+    release release-20261019.0
+    "$U" >/dev/null
     release release-20261026.0
     export BOXES=1
     run "$U" --check
     [ "$status" -eq 10 ]
 }
 
-@test "a tarball that doesn't match its checksum: refused, nothing installed or recorded" {
+@test "the tarball itself is checked: a mismatch, or a checksum file naming another file, installs nothing" {
     release release-20261026.0
     echo tampered > "$BUCKET/gvisor.tar.zstd"
     run "$U"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"does not match its checksum"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"does not match its checksum"* ]]
     [ ! -e "$R/usr/local/bin/runsc" ]
-    [ ! -e "$R/var/lib/claude-airlock/update-runsc.sha512" ]
+    echo something > "$T/other"
+    echo "$(sha512sum < "$T/other" | cut -d' ' -f1)  $T/other" > "$BUCKET/gvisor.tar.zstd.sha512"
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"does not match its checksum"* ]]
+    [ ! -e "$R/usr/local/bin/runsc" ] && [ ! -e "$S" ]
+}
+
+@test "a tarball holding anything but runsc, its shim and gvisor-bin/ helpers installs nothing" {
+    release release-20261026.0 ls
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"holds ls, which isn't runsc"* ]]
+    [ ! -e "$R/usr/local/bin/runsc" ] && [ ! -e "$R/usr/local/bin/ls" ]
+    release release-20261026.0 lib/x
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"holds lib/x"* ]]
+    release release-20261026.0 gvisor-bin/extra
+    run "$U"
+    [ "$status" -eq 0 ]; [ -f "$R/usr/local/bin/gvisor-bin/extra" ]
 }
 
 @test "a checksum file that isn't a sha512: refused before any download" {
@@ -142,21 +241,23 @@ installed() {  # installed <name>: a runsc of that release in place
     run "$U"
     [ "$status" -eq 1 ]
     [[ "$output" == *"not a sha512"* ]]
-    ! grep -q 'gvisor.tar.zstd$' "$CALLS" || return 1
+    ! tar_fetched || return 1
 }
 
-@test "an unpacked runsc that reports no version: refused, nothing installed" {
+@test "an unpacked runsc that reports no version, or fails to run, is refused with a message" {
     release ""
     run "$U"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"reports no version"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"reports no version"* ]]
+    release release-20261026.0
+    VERSION_RC=1 run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"reports no version"* ]]
     [ ! -e "$R/usr/local/bin/runsc" ]
 }
 
 @test "a failed fetch says so and installs nothing" {
     run "$U"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"could not fetch the checksum"* ]]
+    [[ "$output" == *"could not fetch gvisor.tar.zstd.sha512"* ]]
 }
 
 @test "not root and no test root: refused; unknown arguments: usage, exit 2" {
