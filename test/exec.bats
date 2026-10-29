@@ -43,7 +43,7 @@ box_cmd() { engine_args | sed -n '/^claude-airlock:dev$/,/^ENGINE_INVOKED=/p' | 
   sleep 300 3>&- & peer=$!
   PEER=$peer
   _launch "$p" session register "$peer" airlock >/dev/null 2>&1
-  : > "$ENGINE_ARGS_FILE"; run _launch "$p"                     # control: claude stops (no answer)
+  : > "$ENGINE_ARGS_FILE"; run _launch "$p" --continue          # control: claude stops (no answer)
   if engine_args | grep -q '^ENGINE_INVOKED='; then kill "$peer"; echo "claude launched past the prompt"; return 1; fi
   : > "$ENGINE_ARGS_FILE"; run _launch "$p" exec -- true
   kill "$peer"
@@ -107,13 +107,18 @@ share_rw = shr"
   if engine_args | grep -qx -- --init; then echo "claude got --init"; return 1; fi
 }
 
-@test "a live peer session: a headless claude -p is refused without reading its input" {
+@test "a live peer session: a headless claude -p --continue is refused without reading its input" {
   p="$(mkproj expeer)"
   sleep 300 3>&- & PEER=$!
   _launch "$p" session register "$PEER" airlock >/dev/null 2>&1
   _launch_env
   : > "$ENGINE_ARGS_FILE"
-  run bash -c 'cd "$1" && shift && printf "yes\n" | env -i "$@"' _ "$p" "${LAUNCH_ENV[@]}" bash "$AIRLOCK" -p
+  run bash -c 'cd "$1" && shift && printf "yes\n" | env -i "$@"' _ "$p" "${LAUNCH_ENV[@]}" bash "$AIRLOCK" -p --continue
   [ "$status" -eq 1 ] && [[ "$output" == *"Aborted."* ]]
   if engine_args | grep -q '^ENGINE_INVOKED='; then echo "launched"; return 1; fi
+  # a new conversation next to it is not asked about: it launches
+  : > "$ENGINE_ARGS_FILE"
+  run bash -c 'cd "$1" && shift && printf "yes\n" | env -i "$@"' _ "$p" "${LAUNCH_ENV[@]}" bash "$AIRLOCK" -p
+  kill "$PEER" 2>/dev/null || true
+  [ "$status" -eq 0 ]; engine_args | grep -q '^ENGINE_INVOKED='
 }
