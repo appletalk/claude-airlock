@@ -40,8 +40,9 @@ alpaste() {
 }
 
 # Lock-aware host Claude (guard only — runs your normal claude, no sandbox).
-# Warns if an airlock (or another host) session is already live for this project,
-# so you don't run the same session twice and corrupt shared --resume history.
+# Asks first when this would open a conversation another live session (box or host) has
+# open: --continue while one is live, or --resume of an id one recorded. Two sessions
+# writing one conversation fork its history; separate conversations are fine.
 # Kernel start-time token for a pid (field 22 of /proc/<pid>/stat), empty if it is gone.
 # Mirrors _airlock_proc_start in the launcher: comm can contain spaces and parens, so
 # strip through the FINAL ") " before indexing.
@@ -84,18 +85,28 @@ claude() {
     fi
   fi
   lock="$HOME/.config/claude-airlock/state/$slug/session.lock"
-  if [[ -f "$lock" ]]; then
+  # Who has the conversation these arguments open (the launcher answers from the registry),
+  # plus, for --continue, a live lock holder that never registered (its conversation is
+  # unknown, and --continue takes the newest).
+  local holders conv=""
+  holders="$("$_AIRLOCK_LAUNCHER" session holders $$ "$@" 2>/dev/null)"
+  local a; for a in "$@"; do [[ "$a" == (-c|--continue) ]] && conv=continue; done
+  for a in "$@"; do [[ "$a" == --fork-session ]] && conv=""; done
+  if [[ "$conv" == continue && -z "$holders" && -f "$lock" ]]; then
     read -r pid kind _ start < "$lock"
     # Identity, not just a number: a recycled pid would otherwise prompt on every launch
     # forever. Locks from older versions carry no 4th field, so fall back to a bare check.
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+    if [[ -n "$pid" && "$pid" != $$ ]] && kill -0 "$pid" 2>/dev/null \
        && { [[ -z "$start" ]] || [[ "$start" == "$(_airlock_pstart $pid)" ]] }; then
-      print -u2 "claude: a ${kind} session for this project may already be open (pid $pid)."
-      print -u2 "Two live sessions on one project can corrupt shared --resume history."
-      print -n -u2 "Continue anyway? [y/N] "
-      if ! read -r ans || [[ "$ans" != (y|Y|yes|YES) ]]; then
-        print -u2 "Aborted."; return 1
-      fi
+      holders="$pid"
+    fi
+  fi
+  if [[ -n "$holders" ]]; then
+    print -u2 "claude: this would open a conversation another live session may have open (pid(s): $holders)."
+    print -u2 "Two sessions writing one conversation fork its history."
+    print -n -u2 "Continue anyway? [y/N] "
+    if ! read -r ans || [[ "$ans" != (y|Y|yes|YES) ]]; then
+      print -u2 "Aborted."; return 1
     fi
   fi
   mkdir -p "${lock:h}" || return 1
@@ -145,7 +156,7 @@ claude() {
   # container engine on PATH, AIRLOCK_TMP_BASE set in the config) leaves this session
   # unregistered, and a box may then remove $AIRLOCK_TMP out from under it. That is the
   # exact failure this registration exists to prevent, so it must not be invisible.
-  if ! "$_AIRLOCK_LAUNCHER" session register $$ 2>/dev/null; then
+  if ! "$_AIRLOCK_LAUNCHER" session register $$ host "$@" 2>/dev/null; then
     print -u2 "claude: could not join the shared-mount refcount for this project."
     print -u2 "  A box may remove $AIRLOCK_TMP while this session is still using it."
     print -u2 "  Check: $_AIRLOCK_LAUNCHER session peers"

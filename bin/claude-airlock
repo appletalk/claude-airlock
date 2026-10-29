@@ -189,24 +189,45 @@ _airlock_release_artifacts() {
   rmdir "$dir/artifacts-created" 2>/dev/null || true
 }
 
-# True when a live session other than $2 in registry $1 WRITES SHELL HISTORY - i.e. any
-# kind except `shell`. Deliberately a different population from _airlock_peers_in: that one
-# answers "who holds the mounts" (an `airlock shell` does), this one answers "who can
-# corrupt --resume history" (an `airlock shell` cannot, it runs bash). Conflating the two
-# makes a shell session warn about history it never touches. Prunes nothing - the caller
-# runs _airlock_peers_in first, which does.
-_airlock_history_peers() {
-  local dir="$1" self="$2" f pid kind rc=1
+# The conversation a claude command line opens, for the registry and the collision check:
+# "continue" for -c/--continue (the project's newest), the id given to --resume/-r or
+# --session-id, else nothing: a new conversation, the /resume picker, or a fork
+# (--fork-session gives a resumed conversation a new id, so it can't collide).
+_airlock_conv_of() {
+  local a prev="" conv="" fork=0
+  for a in "$@"; do
+    case "$prev" in -r|--resume|--session-id) case "$a" in -*|'') ;; *) conv="$a" ;; esac ;; esac
+    case "$a" in
+      -c|--continue) conv="continue" ;;
+      --resume=*|--session-id=*) conv="${a#*=}" ;;
+      --fork-session) fork=1 ;;
+    esac
+    prev="$a"
+  done
+  [ "$fork" = 0 ] || conv=""
+  case "$conv" in *[!A-Za-z0-9._-]*) conv="" ;; esac   # one word: it's a field in a registry line
+  printf '%s' "$conv"
+}
+
+# The live history writers (not `shell`) other than $2 in registry $1 that a session opening
+# conversation $3 would share a conversation with, as "pid pid ...". "continue" opens the
+# newest conversation, which may be any of theirs; an id collides only with a peer recorded
+# on that same id. A peer that recorded none (a new conversation, an older launcher or
+# wrapper) is on its own conversation as far as anyone can tell. Prunes nothing - the
+# caller runs _airlock_peers_in first, which does.
+_airlock_conv_holders() {
+  local dir="$1" self="$2" want="$3" f pid kind conv out=""
+  [ -n "$want" ] || return 0
   for f in "$dir"/*; do
     [ -e "$f" ] || continue
     pid="${f##*/}"
     [ "$pid" = "$self" ] && continue
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kind=""; read -r _ kind < "$f" 2>/dev/null || true
+    kind=""; conv=""; read -r _ kind conv _ < "$f" 2>/dev/null || true
     [ "${kind:-}" = shell ] && continue
-    rc=0
+    if [ "$want" = continue ] || [ "${conv:-}" = "$want" ]; then out="$out$pid "; fi
   done
-  return $rc
+  printf '%s' "${out% }"
 }
 
 # `airlock session register|release <pid>` — the host `claude` wrapper's hook into the
@@ -223,9 +244,17 @@ if [ "${1:-}" = "session" ]; then
     register)
       [ -n "$_xpid" ] || { echo "usage: airlock session register <pid>" >&2; exit 1; }
       mkdir -p "$_xdir"
-      # "<starttime> <kind>". The kind is what lets the concurrent-session warning tell a
-      # history writer from an `airlock shell`, which holds the mounts but not history.
-      printf '%s %s\n' "$(_airlock_proc_start "$_xpid")" "${4:-host}" > "$_xdir/$_xpid" ;;
+      # "<starttime> <kind> [<conversation>]". The kind tells a history writer from an
+      # `airlock shell`, which holds the mounts but not history; the conversation (the host
+      # wrapper's `airlock session register <pid> host <claude args...>`) is what a later
+      # session is checked against.
+      _xconv="$(_airlock_conv_of "${@:5}")"
+      printf '%s %s%s\n' "$(_airlock_proc_start "$_xpid")" "${4:-host}" "${_xconv:+ $_xconv}" > "$_xdir/$_xpid" ;;
+    holders)   # the host wrapper's collision check: who has the conversation these args open
+      [ -n "$_xpid" ] || { echo "usage: airlock session holders <pid> [claude args...]" >&2; exit 1; }
+      [ -d "$_xdir" ] || exit 0
+      _airlock_peers_in "$_xdir" "$_xpid" || true
+      _airlock_conv_holders "$_xdir" "$_xpid" "$(_airlock_conv_of "${@:4}")"; echo ;;
     release)
       [ -n "$_xpid" ] || { echo "usage: airlock session release <pid>" >&2; exit 1; }
       rm -f "$_xdir/$_xpid"
@@ -240,7 +269,7 @@ if [ "${1:-}" = "session" ]; then
       fi ;;
     peers)   # diagnostic: does anyone else hold this project's shared dirs?
       if _airlock_peers_in "$_xdir" "${_xpid:-0}"; then echo "peers: yes"; else echo "peers: none"; fi ;;
-    *) echo "usage: airlock session <register|release|peers> <pid>" >&2; exit 1 ;;
+    *) echo "usage: airlock session <register|release|peers|holders> <pid>" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -1776,7 +1805,10 @@ SESS_DIR="$STATE_DIR/sessions"
 mkdir -p "$SESS_DIR"
 SESS_FILE="$SESS_DIR/$$"
 if [ "$AIRLOCK_SHELL" = 1 ]; then _selfkind=shell; else _selfkind=airlock; fi
-printf '%s %s\n' "$SELF_START" "$_selfkind" > "$SESS_FILE"
+# The conversation this session opens, when the arguments say (the collision check below).
+_selfconv=""
+[ "$AIRLOCK_SHELL" = 1 ] || [ ${#AIRLOCK_EXEC[@]} -gt 0 ] || _selfconv="$(_airlock_conv_of "$@")"
+printf '%s %s%s\n' "$SELF_START" "$_selfkind" "${_selfconv:+ $_selfconv}" > "$SESS_FILE"
 
 # One implementation, shared with the host wrapper via `airlock session` - see the
 # primitives above the subcommand dispatch.
@@ -1793,7 +1825,7 @@ STORE_OWNED=()   # artifact stores this session holds read-write; released on ex
 
 # Cleanup runs from here on. Installed immediately after registration rather than after
 # the prompts: the egress-approval and concurrent-session reads sit between, and
-# answering N to "Open another anyway?" used to exit leaving this session's pidfile and
+# answering N to "Open it anyway?" used to exit leaving this session's pidfile and
 # its token-bearing env-file behind.
 _airlock_cleanup() {
   # Deaf while cleaning. A second signal arriving mid-cleanup used to re-enter here, hit
@@ -1806,10 +1838,9 @@ _airlock_cleanup() {
   # second pass a file can already belong to a different session.
   [ "${CLEANUP_DONE:-0}" = 1 ] && return 0
   CLEANUP_DONE=1
-  # Only if the lock is still OURS. A second session overwrites it with its own pid after
-  # the user answers y - the normal path when two boxes on one project is the design - and
-  # the first to exit would otherwise delete the live session's lock, leaving a third
-  # session with no concurrent-session warning at all.
+  # Only if the lock is still OURS. A second session overwrites it with its own pid (two
+  # boxes on one project is normal), and the first to exit would otherwise delete the live
+  # session's lock, leaving an unregistered peer invisible to the --continue check.
   if [ "$LOCK_HELD" = 1 ] && [ -f "$LOCK" ]; then
     local _lpid
     read -r _lpid _ < "$LOCK" 2>/dev/null || true
@@ -2151,23 +2182,19 @@ elif ! command -v jq >/dev/null 2>&1; then
   echo "airlock: WARNING: jq not found; the box's settings.json was not checked (the mounted managed settings still apply)" >&2
 fi
 
-# --- Concurrent-session guard: warn if this project is already open ---
-# Answered from the sessions/ REGISTRY, not from session.lock. The lock is a single slot:
-# a second session overwrote it with its own pid, so the first to exit destroyed the live
-# session's record and a third session got no warning at all - and it could only ever
-# describe ONE peer. The registry holds an entry per live participant, box and raw host
-# alike, is already start-time qualified against recycled pids, and prunes its own dead
-# entries. Our own pidfile is written well above this, hence the explicit self-exclusion.
+# --- Concurrent-session guard: two sessions on ONE conversation ---
+# Several sessions on one project are normal (each conversation is its own transcript, as
+# with two `claude` terminals in one folder on a host), so they go on without a word. What
+# is asked about is two sessions writing the SAME conversation, which forks its history:
+# this launch continues the newest conversation (--continue) while any other session is
+# live, or resumes an id a live session recorded. Answered from the sessions/ REGISTRY:
+# one entry per live participant, start-time qualified against recycled pids, dead entries
+# pruned; each records the conversation its arguments named (_airlock_conv_of).
 #
-# The lock is still written below, unchanged in format, AND still read here as a fallback
-# - because the registry is only complete if every peer registers, and an older zsh
-# wrapper does not. That is not a transient upgrade state: every already-open terminal
-# keeps the old `claude` function until it is re-sourced, and a wrapper pasted into an rc
-# file never registers at all. Reading the registry alone made this launcher blind to
-# those sessions, which main detected. The fallback is strictly ADDITIVE - the lock can
-# only contribute a peer the registry missed, never suppress one - so it cannot bring back
-# the single-slot problems that motivated the move. It is skipped when the lock's pid is
-# already registered, so a modern peer is never counted twice.
+# session.lock is still written below, and read here as a fallback for a peer that never
+# registers (an older zsh wrapper, one pasted into an rc file): such a peer's conversation
+# is unknown, so it counts only against --continue. Skipped when the lock's pid is already
+# registered, so a modern peer is never counted twice.
 if [ "$AIRLOCK_SHELL" != 1 ]; then
   _airlock_peers_in "$SESS_DIR" "$$" || true      # prunes dead entries as a side effect
   _lockpeer=""
@@ -2181,23 +2208,17 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
       _lockpeer="$_lp"
     fi
   fi
-  if _airlock_history_peers "$SESS_DIR" "$$" || [ -n "$_lockpeer" ]; then
-    # Name only the peers that actually triggered this: a `shell` peer holds the mounts
-    # but writes no history, so listing it here would be a lie about why we stopped.
-    _peers=""
-    for _pf in "$SESS_DIR"/*; do
-      [ -e "$_pf" ] || continue
-      _pfp="${_pf##*/}"
-      [ "$_pfp" = "$$" ] && continue
-      case "$_pfp" in ''|*[!0-9]*) continue ;; esac
-      _pfk=""; read -r _ _pfk < "$_pf" 2>/dev/null || true
-      [ "${_pfk:-}" = shell ] && continue
-      _peers="$_peers$_pfp "
-    done
-    [ -n "$_lockpeer" ] && _peers="$_peers$_lockpeer "
-    echo "claude-airlock: another session for this project is already open (pid(s): ${_peers% })." >&2
-    echo "Two live sessions on one project can corrupt shared --resume history." >&2
-    printf "Open another anyway? [y/N] " >&2
+  _peers="$(_airlock_conv_holders "$SESS_DIR" "$$" "$_selfconv")"
+  [ "$_selfconv" != continue ] || [ -z "$_lockpeer" ] || _peers="${_peers:+$_peers }$_lockpeer"
+  if [ -n "$_peers" ]; then
+    if [ "$_selfconv" = continue ]; then
+      echo "claude-airlock: --continue opens this project's newest conversation, which may be one" >&2
+      echo "  another live session has open (pid(s): $_peers)." >&2
+    else
+      echo "claude-airlock: conversation $_selfconv is already open in session(s) $_peers." >&2
+    fi
+    echo "Two sessions writing one conversation fork its history." >&2
+    printf "Open it anyway? [y/N] " >&2
     ans=""; _airlock_answer ans
     case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted." >&2; exit 1 ;; esac
   fi
@@ -2411,12 +2432,10 @@ for d in $AIRLOCK_ARTIFACT_DIRS; do
   if [ -n "$owner_pid" ] && [ "$owner_pid" != "$$" ] \
      && [ -n "$(_airlock_proc_start "$owner_pid")" ] \
      && { [ -z "${owner_start:-}" ] || [ "$owner_start" = "$(_airlock_proc_start "$owner_pid")" ]; }; then
-    echo "claude-airlock: $d is already held read-write by session $owner_pid; mounting it READ-ONLY here." >&2
-    echo "  Two sessions installing into one $d at the same time corrupts it silently." >&2
-    # Mounts are fixed at container start, so this box stays read-only for its whole life -
-    # closing the other session does NOT upgrade it.
-    echo "  Installs in this box will fail. Run them in session $owner_pid, or close that" >&2
-    echo "  session and RESTART this box. Ownership is recorded in $owner." >&2
+    # Two sessions installing into one $d at the same time corrupt it silently. Mounts are
+    # fixed at container start, so this box stays read-only for its whole life: closing the
+    # other session does NOT upgrade it.
+    echo "claude-airlock: $d is read-only here (session $owner_pid holds it; install there, or restart this box after it closes)." >&2
     args+=( -v "$store:$host_path:ro" )
   else
     # Written atomically: a plain redirect truncates at open, so a peer starting inside

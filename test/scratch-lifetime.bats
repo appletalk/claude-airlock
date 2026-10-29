@@ -263,14 +263,13 @@ EOF
 
 @test "declining the concurrent-session prompt leaves nothing behind" {
   proj="$(mkproj abort)"
-  # A HISTORY-writing peer: the warning is answered from the registry now, and only a
-  # session that can corrupt --resume history triggers it. A `shell` peer holds the same
-  # mounts and deliberately does not.
+  # A HISTORY-writing peer, and a launch that would continue the newest conversation: the
+  # one case that prompts. A `shell` peer holds the same mounts and deliberately does not.
   register_history_peer "$proj"
   # The lock is ALSO read as an additive fallback, for peers that register nothing.
   printf '%s airlock 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
   # _launch feeds /dev/null on stdin, so the prompt reads EOF and takes the abort branch.
-  run _launch "$proj"
+  run _launch "$proj" --continue
   [ "$status" -ne 0 ]
   # The peer's lock must survive - this session never took it.
   [ -e "$(state_dir "$proj")/session.lock" ]
@@ -286,8 +285,8 @@ EOF
 @test "a session does not delete a lock another session took over" {
   proj="$(mkproj lockown)"
   # The engine stub stands in for this session being up; meanwhile a SECOND session
-  # prompts, the user answers y, and it overwrites the lock with its own pid. That is
-  # the normal path when two boxes on one project is the design - so the first to exit
+  # starts and overwrites the lock with its own pid. Two boxes on one project is
+  # normal - so the first to exit
   # must not delete the live session's lock.
   cat > "$STUBBIN/podman" <<'EOF'
 #!/usr/bin/env bash
@@ -317,11 +316,10 @@ EOF
   # name, but registers no pidfile - so "no registered peers" is not "nobody there".
   mkdir -p "$(scratch_dir "$proj")" "$(sessions_dir "$proj")"
   sleep 300 & PEER_PID=$!
-  # A history-writing peer in the REGISTRY - that is what the warning reads now. The lock
-  # is still written for cross-tool compatibility but nothing consults it.
+  # A history-writing peer in the REGISTRY, and a --continue launch: that prompts.
   printf '%s host\n' "$(proc_start "$PEER_PID")" > "$(sessions_dir "$proj")/$PEER_PID"
   printf '%s claude 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
-  run _launch "$proj"                  # stdin is /dev/null -> prompt reads EOF -> abort
+  run _launch "$proj" --continue       # stdin is /dev/null -> prompt reads EOF -> abort
   [ "$status" -ne 0 ]
   # This run mounted nothing, so it has no business removing that session's scratch dir.
   [ -d "$(scratch_dir "$proj")" ]

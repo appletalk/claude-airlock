@@ -99,9 +99,9 @@ It gives you:
 
 - `airlock`: Claude Code in the box;
 - `alpaste`: a shortcut for `airlock paste --copy`;
-- `claude`: your normal host Claude, which warns if an airlock session for the same project
-  is already open (two live sessions can corrupt shared `--resume` history). `command
-  claude` bypasses the guard.
+- `claude`: your normal host Claude, which asks first when it would open a conversation a
+  live airlock or host session of the same project has open (below). `command claude`
+  bypasses the guard.
 
 ### 4. Auth (one-time)
 
@@ -131,6 +131,14 @@ airlock               # Claude Code, contained, for this directory
 
 The box mounts the project read-write at its real path. By default it can reach only
 Anthropic until you grant more.
+
+Several sessions on one project at once are fine: boxes and host sessions share its
+conversation history, and each conversation is its own transcript. They also share the
+project's Claude settings, and only the first box installs into `.venv` and `node_modules`
+(later ones get them read-only, and say so). What forks a history is two sessions writing
+the same conversation, so that alone asks first: `--continue` while another session is
+live, or `--resume <id>` of a conversation another session has open. `--fork-session` starts
+a new one and never asks; the `/resume` picker inside a session is not checked.
 
 ## Why rootless Podman
 

@@ -35,7 +35,7 @@ _host_claude() {
   cat > "$STUBBIN/claude" <<EOF
 #!/usr/bin/env bash
 for f in "\$HOME"/.config/claude-airlock/state/*/sessions/*; do
-  [ -e "\$f" ] && printf 'MID=%s\n' "\${f##*/}" >> "$BATS_TEST_TMPDIR/midrun"
+  [ -e "\$f" ] && printf 'MID=%s\nENT=%s\n' "\${f##*/}" "\$(cat "\$f")" >> "$BATS_TEST_TMPDIR/midrun"
 done
 printf 'LOCK=%s\n' "\$(cat "\$HOME"/.config/claude-airlock/state/*/session.lock 2>/dev/null)" >> "$BATS_TEST_TMPDIR/midrun"
 exit 0
@@ -177,8 +177,7 @@ EOF
   printf '%s %s\n' "$PEER_PID" "$(proc_start "$PEER_PID")" \
     > "$(state_dir "$proj")/artifacts/.venv.owner"
   run _launch "$proj"
-  [[ "$output" == *"READ-ONLY"* ]]
-  [[ "$output" == *"corrupts it silently"* ]]
+  [[ "$output" == *".venv is read-only here (session $PEER_PID holds it"* ]]
   run engine_args
   [[ "$output" == *"artifacts/.venv:$proj/.venv:ro"* ]]
   [[ "$output" != *"artifacts/.venv:$proj/.venv:rw"* ]]
@@ -415,16 +414,56 @@ EOF
 
 # --- the concurrent-session warning comes from the registry (S1/S2) -------------------
 
-@test "a live HOST session triggers the concurrent-session warning" {
+@test "another live session on its own conversation: no prompt, no message" {
   proj="$(mkproj warnhost)"
+  sleep 60 & P1=$!
+  sleep 60 & P2=$!
+  # Several sessions on one project are normal: each conversation is its own transcript.
+  _launch "$proj" session register "$P1" host
+  _launch "$proj" session register "$P2" airlock --session-id 11111111-1111-4111-8111-111111111111
+  for a in "" "--session-id 22222222-2222-4222-8222-222222222222" "--resume 33333333-3333-4333-8333-333333333333" "--resume" "-p hi"; do
+    # shellcheck disable=SC2086
+    run _launch "$proj" $a
+    [ "$status" -eq 0 ] || { echo "args: $a"; echo "$output"; return 1; }
+    [[ "$output" != *"$P1"* && "$output" != *"$P2"* ]] || { echo "args: $a"; echo "$output"; return 1; }
+  done
+  kill "$P1" "$P2" 2>/dev/null || true
+}
+
+@test "a live HOST session on the conversation this launch resumes: asked first" {
+  proj="$(mkproj warnhostsame)"
   sleep 60 & PEER_PID=$!
   # S1: a raw host claude took the single-slot lock but was otherwise invisible. It now
-  # registers, so the warning sees it like any other participant.
-  _launch "$proj" session register "$PEER_PID" host
-  run _launch "$proj"
-  [ "$status" -ne 0 ]                       # stdin is /dev/null, so the prompt aborts
-  [[ "$output" == *"already open"* ]]
-  [[ "$output" == *"$PEER_PID"* ]]
+  # registers, with the conversation its arguments named.
+  id=44444444-4444-4444-8444-444444444444
+  _launch "$proj" session register "$PEER_PID" host --resume "$id"
+  for a in "--resume $id" "-r $id" "--resume=$id" "--session-id $id"; do
+    # shellcheck disable=SC2086
+    run _launch "$proj" $a
+    [ "$status" -ne 0 ] || { echo "args: $a"; return 1; }   # stdin is /dev/null, so the prompt aborts
+    [[ "$output" == *"conversation $id is already open in session(s) $PEER_PID"* ]]
+  done
+  # a fork of it gets a new id: no collision
+  run _launch "$proj" --resume "$id" --fork-session
+  [ "$status" -eq 0 ]
+  kill "$PEER_PID" 2>/dev/null || true
+}
+
+@test "the airlock launcher records the conversation its arguments name" {
+  proj="$(mkproj recordconv)"
+  # the engine stub runs while the launcher is up: copy its own registry entry out
+  cat > "$STUBBIN/podman" <<EOF
+#!/usr/bin/env bash
+cat "\$HOME"/.config/claude-airlock/state/*/sessions/* > "$BATS_TEST_TMPDIR/entry" 2>/dev/null
+exit 0
+EOF
+  cp "$STUBBIN/podman" "$STUBBIN/docker"; chmod +x "$STUBBIN/podman" "$STUBBIN/docker"
+  _launch "$proj" --remote-control --name p.main --resume 55555555-5555-4555-8555-555555555555
+  [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock\ 55555555-5555-4555-8555-555555555555$ ]]
+  _launch "$proj" --continue
+  [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock\ continue$ ]]
+  _launch "$proj"
+  [[ "$(cat "$BATS_TEST_TMPDIR/entry")" =~ ^[0-9]+\ airlock$ ]]
 }
 
 @test "an airlock shell peer does NOT trigger the history warning" {
@@ -444,8 +483,10 @@ EOF
   _launch "$proj" session register "$P1" host
   _launch "$proj" session register "$P2" airlock
   # S2: the single-slot lock could only ever describe one peer, and a second session
-  # overwrote the first's record entirely.
-  run _launch "$proj"
+  # overwrote the first's record entirely. --continue may take any of theirs.
+  run _launch "$proj" --continue
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--continue opens this project's newest conversation"* ]]
   [[ "$output" == *"$P1"* ]]
   [[ "$output" == *"$P2"* ]]
   kill "$P1" "$P2" 2>/dev/null || true
@@ -586,7 +627,7 @@ EOF
   sleep 60 & SHELLP=$!
   _launch "$proj" session register "$HOSTP" host
   _launch "$proj" session register "$SHELLP" shell
-  run _launch "$proj"
+  run _launch "$proj" --continue
   # The shell peer holds the same mounts but writes no history, so naming it would be a
   # lie about why we stopped.
   [[ "$output" == *"$HOSTP"* ]]
@@ -629,9 +670,14 @@ EOF
   # detected this; the registry-only warning did not, which made the branch worse than
   # main for that case.
   printf '%s host 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
+  # Its conversation is unknown, so it counts against --continue only.
   run _launch "$proj"
+  [ "$status" -eq 0 ]
+  # (that launch took the single-slot lock over and removed it on exit: the old wrapper's again)
+  printf '%s host 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
+  run _launch "$proj" --continue
   [ "$status" -ne 0 ]                        # stdin is /dev/null, so the prompt aborts
-  [[ "$output" == *"already open"* ]]
+  [[ "$output" == *"--continue opens"* ]]
   [[ "$output" == *"$PEER_PID"* ]]
 }
 
@@ -650,9 +696,54 @@ EOF
   mkdir -p "$(state_dir "$proj")"
   _launch "$proj" session register "$PEER_PID" host
   printf '%s host 0\n' "$PEER_PID" > "$(state_dir "$proj")/session.lock"
-  run _launch "$proj"
-  [[ "$output" == *"already open"* ]]
+  run _launch "$proj" --continue
+  [[ "$output" == *"--continue opens"* ]]
   # named once, not twice
   run bash -c 'grep -o "'"$PEER_PID"'" <<< "$1" | wc -l' _ "$output"
   [ "$output" -eq 1 ]
+}
+
+# --- the host wrapper asks only about a shared conversation ---------------------------------
+
+@test "host claude next to a live box on another conversation: no prompt, and it runs" {
+  proj="$(mkproj hostquiet)"
+  sleep 60 & PEER_PID=$!
+  _launch "$proj" session register "$PEER_PID" airlock --session-id 66666666-6666-4666-8666-666666666666
+  run _host_claude "$proj"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$PEER_PID"* ]]
+  midrun | grep -q '^MID='                         # claude ran
+  kill "$PEER_PID" 2>/dev/null || true
+}
+
+@test "host claude --resume of the id a live box has open: asked, and declined runs nothing" {
+  proj="$(mkproj hostsame)"
+  sleep 60 & PEER_PID=$!
+  id=77777777-7777-4777-8777-777777777777
+  _launch "$proj" session register "$PEER_PID" airlock --resume "$id"
+  run _host_claude "$proj" --resume "$id"
+  [ "$status" -ne 0 ]                              # stdin is /dev/null: the prompt aborts
+  [[ "$output" == *"another live session may have open (pid(s): $PEER_PID)"* ]]
+  [ -z "$(midrun)" ]                               # claude never ran
+  kill "$PEER_PID" 2>/dev/null || true
+}
+
+@test "host claude --continue next to a lock-only peer (old wrapper): asked" {
+  proj="$(mkproj hostcontinue)"
+  sleep 60 & PEER_PID=$!
+  mkdir -p "$(state_dir "$proj")"
+  printf '%s host 0 %s\n' "$PEER_PID" "$(proc_start "$PEER_PID")" > "$(state_dir "$proj")/session.lock"
+  run _host_claude "$proj" --continue
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"(pid(s): $PEER_PID)"* ]]
+  rm -f "$BATS_TEST_TMPDIR/midrun"
+  run _host_claude "$proj" --continue --fork-session   # a fork is a new conversation
+  [ "$status" -eq 0 ]
+  kill "$PEER_PID" 2>/dev/null || true
+}
+
+@test "host claude registers the conversation it opens" {
+  proj="$(mkproj hostrecord)"
+  _host_claude "$proj" --resume 88888888-8888-4888-8888-888888888888
+  midrun | grep -qE '^ENT=[0-9]+ host 88888888-8888-4888-8888-888888888888$' || { midrun; return 1; }
 }
