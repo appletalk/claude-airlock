@@ -140,8 +140,9 @@ the same conversation, so that alone asks first: `--continue` while another sess
 live, or `--resume <id or name>` of a conversation another live session was started with
 (`--resume`, `--session-id` or `--name`, as agent sessions are). A session started without
 one (a new conversation, or `--continue`) has no id the check knows, so resuming its
-conversation by id elsewhere is not caught; neither are the `/resume` picker, a bare
-`--resume`, `--from-pr`, or a `--bg` session after its launch returns. `--fork-session`
+conversation by id elsewhere is not caught; neither are names with characters outside
+letters, digits and `._-` (spaces, say), the `/resume` picker, a bare `--resume`,
+`--from-pr`, or a `--bg` session after its launch returns. `--fork-session`
 starts a new conversation and never asks.
 
 ## Why rootless Podman

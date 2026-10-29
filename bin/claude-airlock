@@ -197,7 +197,7 @@ _airlock_release_artifacts() {
 # `--resume <name>` is matched too. Short flags may be clustered (-cp, -pr <id>, -r<id>), as
 # claude's option parser allows: the first letter that takes a value takes the rest.
 _airlock_conv_of() {
-  local a v prev="" conv="" name="" fork=0 i ch
+  local a v prev="" conv="" name="" fork=0 cont=0 i ch
   # claude's subcommands are no session; a prompt word ahead of the options is (claude reads
   # options after positionals). Nothing after `--` is claude's.
   case "${1:-}" in
@@ -214,7 +214,7 @@ _airlock_conv_of() {
     esac
     prev="$a"
     case "$a" in
-      -c|--continue) conv="continue" ;;
+      -c|--continue) cont=1 ;;
       --resume=*|--session-id=*) conv="${a#*=}" ;;
       --name=*) name="${a#*=}" ;;
       --fork-session|--fork-session=*) fork=1 ;;
@@ -223,8 +223,8 @@ _airlock_conv_of() {
         for (( i = 1; i < ${#a}; i++ )); do
           ch="${a:i:1}"
           case "$ch" in
-            c) conv="continue" ;;
-            r|n|d) v="${a:i+1}"   # takes a value: the rest, or the next argument
+            c) cont=1 ;;
+            r|n|d|w) v="${a:i+1}"   # takes a value: the rest, or the next argument
                    if [ -n "$v" ]; then
                      case "$ch" in r) conv="$v" ;; n) name="$v" ;; esac; prev=""
                    else prev="-$ch"; fi
@@ -233,6 +233,8 @@ _airlock_conv_of() {
         done ;;
     esac
   done
+  # -c anywhere counts, whatever else is given: asking is the safe reading.
+  [ "$cont" = 0 ] || conv="continue"
   [ "$fork" = 0 ] || conv=""
   # One word each: they are fields of a registry line.
   case "$conv" in ''|-*|*[!A-Za-z0-9._-]*) conv=- ;; esac
@@ -241,15 +243,17 @@ _airlock_conv_of() {
 }
 
 # The live history writers (not `shell`) other than $2 in registry $1 that a session opening
-# conversation $3 would share a conversation with, as "pid pid ...". "continue" opens the
-# newest conversation, which may be any of theirs; an id or name collides only with a peer
-# that recorded it (as its conversation or its --name). A peer that recorded neither (a new
+# conversation $3 (named $4, if it is) would share a conversation with, as "pid pid ...".
+# "continue" opens the newest conversation, which may be any of theirs; an id or name
+# collides with a peer that recorded it (as its conversation or its --name), and a resume
+# under name N with a peer that resumed N itself (an agent restarting by id while someone
+# looks in on it by name). A peer that recorded neither (a new
 # conversation, an older launcher or wrapper) is on its own conversation as far as anyone
 # can tell, and so is one that recorded "continue" against a later --resume of an id: which
 # conversation --continue picked isn't known. Prunes nothing - the caller runs
 # _airlock_peers_in first, which does.
 _airlock_conv_holders() {
-  local dir="$1" self="$2" want="$3" f pid kind conv name out=""
+  local dir="$1" self="$2" want="$3" mine="${4:--}" f pid kind conv name out=""
   case "$want" in ''|-) return 0 ;; esac
   for f in "$dir"/*; do
     [ -e "$f" ] || continue
@@ -259,7 +263,8 @@ _airlock_conv_holders() {
     kind=""; conv=""; name=""; read -r _ kind conv name _ < "$f" 2>/dev/null || true
     [ "${kind:-}" = shell ] && continue
     if [ "$want" = continue ] || { [ "${conv:-}" != - ] && [ "${conv:-}" = "$want" ]; } \
-       || { [ "$want" != continue ] && [ "${name:--}" != - ] && [ "$name" = "$want" ]; }; then
+       || { [ "$want" != continue ] && [ "${name:--}" != - ] && [ "$name" = "$want" ]; } \
+       || { [ "$want" != continue ] && [ "$mine" != - ] && [ "${conv:-}" = "$mine" ]; }; then
       out="$out$pid "
     fi
   done
@@ -289,10 +294,10 @@ if [ "${1:-}" = "session" ]; then
       printf '%s %s%s\n' "$(_airlock_proc_start "$_xpid")" "${4:-host}" "${_xconv:+ $_xconv}" > "$_xdir/$_xpid" ;;
     holders)   # the host wrapper's collision check: who has the conversation these args open
       [ -n "$_xpid" ] || { echo "usage: airlock session holders <pid> [claude args...]" >&2; exit 1; }
-      _xconv="$(_airlock_conv_of "${@:4}")" _xh=""; _xconv="${_xconv% *}"
+      _xrec="$(_airlock_conv_of "${@:4}")" _xh=""; _xconv="${_xrec% *}"
       if [ -d "$_xdir" ]; then
         _airlock_peers_in "$_xdir" "$_xpid" || true
-        _xh="$(_airlock_conv_holders "$_xdir" "$_xpid" "$_xconv")"
+        _xh="$(_airlock_conv_holders "$_xdir" "$_xpid" "$_xconv" "${_xrec#* }")"
       fi
       # and, for --continue, a live lock holder that never registered (conversation unknown)
       _xlock="${_xdir%/sessions}/session.lock"
@@ -2261,7 +2266,7 @@ if [ "$AIRLOCK_SHELL" != 1 ]; then
       _lockpeer="$_lp"
     fi
   fi
-  _peers="$(_airlock_conv_holders "$SESS_DIR" "$$" "$_selfconv")"
+  _peers="$(_airlock_conv_holders "$SESS_DIR" "$$" "$_selfconv" "${_selfrec#* }")"
   [ "$_selfconv" != continue ] || [ -z "$_lockpeer" ] || _peers="${_peers:+$_peers }$_lockpeer"
   if [ -n "$_peers" ]; then
     if [ "$_selfconv" = continue ]; then

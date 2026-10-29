@@ -805,6 +805,20 @@ EOF
   [ -z "$(holders --name abc-123)" ]                  # a new conversation NAMED like an id: no
   [ -z "$(holders -nc)" ]                             # -n c: a name, not --continue
   [ -z "$(holders doctor -c)" ]                       # a subcommand
+  [ "$(holders --session-id=abc-123)" = "$P" ]
+  [ -z "$(holders -dc)" ] && [ -z "$(holders -wc)" ]  # -d c, -w c: values, not --continue
+  [ "$(holders -c -r proj.other)" = "$P" ]            # -c wherever it is: asked
+  kill "$P" 2>/dev/null || true
+}
+
+@test "an agent restarting by id sees a session that resumed it by name" {
+  proj="$(mkproj convbyname)"
+  sleep 60 & P=$!
+  _launch "$proj" session register "$P" host --resume proj.main   # someone looking in on it
+  holders() { _launch "$proj" session holders "$$" "$@" | sed -n 's/^airlock-holders://p'; }
+  [ "$(holders --remote-control --name proj.main --resume abc-123)" = "$P" ]
+  [ -z "$(holders --remote-control --name proj.review --resume abc-456)" ]
+  [ -z "$(holders --name proj.main)" ]              # a NEW conversation under that name: no
   kill "$P" 2>/dev/null || true
 }
 
