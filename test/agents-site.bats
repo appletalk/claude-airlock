@@ -9,7 +9,10 @@ setup() {
     A="$REPO/agents/airlock-agents-apply"
     # The manager drop-in hides the operator's cgroup by uid: getent gives any operator uid 1000 here.
     mkdir -p "$T/bin"; printf '#!/bin/sh\n[ "$1" = passwd ] && [ -n "$2" ] && [ "$2" != ghost ] && echo "$2:x:1000:1000::/home/$2:/bin/sh"\n' > "$T/bin/getent"
-    chmod +x "$T/bin/getent"; export PATH="$T/bin:$PATH"
+    chmod +x "$T/bin/getent"
+    # systemd before 258 here (the render reads the real systemctl: the host's must not decide)
+    printf '#!/bin/sh\necho "systemd 256 (256.1)"\n' > "$T/bin/systemctl"; chmod +x "$T/bin/systemctl"
+    export PATH="$T/bin:$PATH"
 }
 site() { printf '%b' "$1" > "$T/site"; }
 refuses() {  # refuses <expected message part> <site text>
@@ -85,7 +88,7 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     grep -qx 'a /srv/claude-inbox/airlock  -    -     -    -   u::rwx,g::r-x,o::---,d:u::rwx,d:g::r-x,d:o::---' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"
     [ "$(grep -c 'meta skuid' "$T/r/etc/airlock-agents.nft")" = 2 ]
     d="$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
-    # no other agents to hide (systemd unknown here, so by path): the operator's, the system's, the VMs'
+    # no other agents to hide (systemd 256 here, so by path): the operator's, the system's, the VMs'
     grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/system.slice -/sys/fs/cgroup/machine.slice' "$d"
     grep -qx 'After=user-1000.slice' "$d"
     run "$A" --user-conf claude "$T/site"

@@ -287,10 +287,19 @@ for spec in $users; do
         mcheck missing denied "user@$n: $o's cgroups hidden" "$u" list "/sys/fs/cgroup/user.slice/user-$on.slice"
     done
     mcheck missing denied "user@$n: no $OP's home" "$u" list "$OP_HOME"
-    # nor the operator's, the system's or the VMs' cgroup names (by namespace on systemd 257+)
-    for cg in "/sys/fs/cgroup/user.slice/user-$(id -u "$OP").slice" /sys/fs/cgroup/system.slice /sys/fs/cgroup/machine.slice; do
+    # nor the operator's, the system's or the VMs' cgroup names (by namespace on systemd 258+)
+    opuid="$(id -u "$OP")" || { fail "user@$n: no uid for the operator $OP"; opuid=none; }
+    for cg in "/sys/fs/cgroup/user.slice/user-$opuid.slice" /sys/fs/cgroup/system.slice /sys/fs/cgroup/machine.slice; do
         [ -d "$cg" ] && mcheck missing denied "user@$n: ${cg#/sys/fs/cgroup/} hidden" "$u" list "$cg"
     done
+    # ...and, in its own cgroup namespace, its own tree is there (not an empty or broken /sys/fs/cgroup):
+    # a unit it starts sits under /app.slice at the namespace root
+    if grep -qx 'ProtectControlGroups=private' "/etc/systemd/system/user@$n.service.d/10-airlock-agents.conf" 2>/dev/null; then
+        mcheck ok "user@$n: control: its own cgroup tree (app.slice) is there" "$u" list /sys/fs/cgroup/app.slice
+        cg="$(systemd-run --user -M "$u@" --wait --pipe --quiet --collect -- cat /proc/self/cgroup 2>/dev/null)"
+        [[ "$cg" == 0::/app.slice/* ]] && pass "user@$n: its units sit under /app.slice in its own cgroup namespace" \
+            || fail "user@$n: a unit's cgroup from inside is '$cg', want 0::/app.slice/... (namespace root wrong?)"
+    fi
     # Nothing of /mnt (WSL: the Windows drives, WSLg's sockets), no hypervisor devices, no vsock
     if [ -d /mnt ]; then
         mcheck ok "user@$n: /mnt is empty here (on WSL: no drives, no WSLg sockets)" "$u" empty /mnt

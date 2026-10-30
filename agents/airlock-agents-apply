@@ -226,12 +226,14 @@ EOF
 
 render_manager() {  # the user manager's sandbox for role $1
     local r=$1 u=${NAME[$1]} id=${UID_OF[$1]} o slices="" rw opu="${OP_UID:-}" cgns=0
-    [ -n "$opu" ] || opu="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
-    [[ "$opu" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator): its cgroup can't be hidden from $u"
-    # systemd 257+: a cgroup namespace of its own hides every cgroup but its own subtree.
-    # Before: the others' cgroup directories are hidden by path, so they must exist when it starts.
-    [ "$(systemd_version)" -ge 257 ] && cgns=1
+    # systemd 258+: a cgroup namespace of its own hides every cgroup but its own subtree. (257 has
+    # ProtectControlGroups=private too, but with user@.service's DelegateSubgroup= its namespace
+    # root lands on init.scope; fixed in 258.) Before: the others' cgroup directories are hidden
+    # by path, so they must exist when it starts, the operator's included (found by its uid).
+    [ "$(systemd_version)" -ge 258 ] && cgns=1
     if [ "$cgns" = 0 ]; then
+        [ -n "$opu" ] || opu="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
+        [[ "$opu" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator): on systemd before 258 its cgroup is hidden from $u by uid"
         for o in $(others_of "$r"); do slices="$slices user-$o.slice"; done
         slices="$slices user-$opu.slice"
     fi
@@ -328,7 +330,7 @@ EOF
         local ia=" -/sys/fs/cgroup/user.slice/user-$opu.slice"
         for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
         echo "# (A slice removed while it runs, the operator's at logout, comes back visible: the kernel drops"
-        echo "# a mount on a removed directory. systemd 257+ hides by namespace instead.)"
+        echo "# a mount on a removed directory. systemd 258+ hides by namespace instead.)"
         echo "InaccessiblePaths=${ia# } -/sys/fs/cgroup/system.slice -/sys/fs/cgroup/machine.slice"
     fi
     cat <<EOF
@@ -718,9 +720,12 @@ if [ "$mode" = render ]; then
     [ -n "$out" ] || die "--render needs a directory"
     # A directory of its own, made now: writing into one that exists could follow a link someone
     # left there (and as root, anywhere).
-    # The manager drop-ins hide the operator's cgroup by its uid: the operator must exist here.
-    OP_UID="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
-    [[ "$OP_UID" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator) here: the agents' managers hide its cgroup by uid"
+    # Before systemd 258 the manager drop-ins hide the operator's cgroup by its uid: the operator
+    # must exist here (checked before anything is written).
+    if [ "$(systemd_version)" -lt 258 ]; then
+        OP_UID="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
+        [[ "$OP_UID" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator) here: before systemd 258 the agents' managers hide its cgroup by uid"
+    fi
     mkdir -m 0755 "$out" 2>/dev/null || die "--render wants a new directory: $out exists (or can't be made)"
     while read -r p m; do
         mkdir -p "$out$(dirname "$p")"

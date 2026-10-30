@@ -21,7 +21,7 @@ env_set() { sed -i "s#^$1=.*#$1=$2#" "$AIRLOCK_AGENTS_ENV"; }
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; export REPO
     T="$BATS_TEST_TMPDIR"
-    export AIRLOCK_AGENTS_ROOT="$T/root" LOG="$T/calls" AIRLOCK_AGENTS_SYSTEMD_VERSION=257
+    export AIRLOCK_AGENTS_ROOT="$T/root" LOG="$T/calls" AIRLOCK_AGENTS_SYSTEMD_VERSION=258
     R="$AIRLOCK_AGENTS_ROOT"
     # The site file and each user's claude-airlock config, where apply reads them (under the root).
     E="$R/etc/claude-airlock/agents"; mkdir -p "$E"
@@ -1527,9 +1527,10 @@ Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
     done
 }
 
-@test "before systemd 257 the managers hide cgroups by path: the others', the operator's, the system's, the VMs'" {
-    AIRLOCK_AGENTS_SYSTEMD_VERSION=256 PATH="$T/bin:$PATH" "$REPO/agents/airlock-agents-apply" --render "$T/r256" >/dev/null
-    d="$T/r256/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+@test "before systemd 258 the managers hide cgroups by path: the others', the operator's, the system's, the VMs'" {
+    # 257 too: its ProtectControlGroups=private roots the namespace at user@.service's init.scope
+    AIRLOCK_AGENTS_SYSTEMD_VERSION=257 PATH="$T/bin:$PATH" "$REPO/agents/airlock-agents-apply" --render "$T/r257" >/dev/null
+    d="$T/r257/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
     run grep -c '^ProtectControlGroups=' "$d"; [ "$output" = 0 ]
     # the slices exist before the manager starts (the operator's too), so the paths are found
     grep -qx 'Wants=user-1101.slice user-1102.slice user-1000.slice' "$d"
