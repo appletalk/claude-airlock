@@ -25,7 +25,8 @@
 #
 # Running boxes: a gVisor box holds runsc open and keeps working after it is replaced, but the
 # box's later stop and cleanup run the new runsc against state the old one made. It refuses
-# while any are running (checked before the download and again before the files are replaced);
+# while any are running (any process running one of the installed files; checked before the
+# download and again before the files are replaced);
 # stop them first, or pass --force. Boxes that are created but stopped aren't seen: remove them.
 set -euo pipefail
 umask 022
@@ -36,6 +37,7 @@ URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
 DEST="$ROOT/usr/local/bin"
 STATE="$ROOT/var/lib/claude-airlock/update-runsc.state"
 LOG="$ROOT/var/log/update-runsc.log"
+PROC="$ROOT/proc"
 # What the tarball may hold: the runtime and its containerd shim, and gVisor's helpers in their
 # own directory (never anything else on root's PATH).
 allowed() { case "$1" in runsc|containerd-shim-runsc-v1|gvisor-bin/[A-Za-z0-9]*) [[ "$1" =~ ^[A-Za-z0-9/._-]+$ && "$1" != *..* ]] ;; *) false ;; esac; }
@@ -75,13 +77,23 @@ intact() {
     done < <(awk '$1 == "file"' "$STATE")
     [ "$n" -gt 0 ] && [ -n "$(rec release)" ]
 }
-# gVisor box processes: the sandbox re-executes runsc as runsc-sandbox, its file proxy as
-# runsc-gofer. pgrep exits 1 for none; anything else means it can't tell, which is a stop.
+# gVisor box processes: any process running a file of this install (runsc, or a gvisor-bin/
+# helper such as gvisor_sentry), also one an update since replaced ("(deleted)"). By the
+# executable, never by name: runsc's sandbox and gofer processes are named after whatever it
+# execs (gvisor_sentry, exe, runsc-fd-parking...), which changes between releases. Root reads every
+# process's exe link; processes without one (kernel threads) are skipped. No /proc to read means
+# it can't tell, which is a stop.
 boxes() {
-    local n rc=0
-    command -v pgrep >/dev/null || die "pgrep is missing: can't tell whether gVisor boxes are running"
-    n="$(pgrep -c -f '^runsc-(sandbox|gofer)( |$)')" || rc=$?
-    case "$rc" in 0|1) echo "${n:-0}" ;; *) die "pgrep failed (exit $rc): can't tell whether gVisor boxes are running" ;; esac
+    local n=0 p x
+    if ! { [ -d "$PROC" ] && compgen -G "$PROC/[0-9]*" >/dev/null; }; then
+        die "can't read $PROC: can't tell whether gVisor boxes are running"
+    fi
+    for p in "$PROC"/[0-9]*; do
+        x="$(readlink "$p/exe" 2>/dev/null)" || continue
+        x="${x% (deleted)}"
+        case "$x" in "$DEST/runsc"|"$DEST/gvisor-bin/"*) n=$((n + 1)) ;; esac
+    done
+    echo "$n"
 }
 no_boxes() {
     local n; n="$(boxes)"

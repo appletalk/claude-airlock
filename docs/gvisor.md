@@ -33,7 +33,8 @@ counts as not installed, and the next run reinstalls it. The downloaded runsc is
 version as `nobody`, not as root.
 
 It refuses while gVisor boxes are running (checked before the download and again before any
-file is replaced): a box keeps the old binary open and works on, but its stop and cleanup would
+file is replaced; a box is any process running one of the installed files, whatever gVisor
+names its processes, also one whose file an update since replaced): a box keeps the old binary open and works on, but its stop and cleanup would
 run the new one against state the old one made. Stop them first (the agents' sessions:
 `<command> stop`, and `<command> web stop` with web research), or pass `--force`. Boxes that
 are created but stopped aren't seen; remove them before an update. `--check` changes nothing; a

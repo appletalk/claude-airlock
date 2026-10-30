@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
-# bin/update-runsc: install and update gVisor's runsc from the release bucket. curl, tar and pgrep
-# are stubbed (the "bucket" is two files here); file paths go under AIRLOCK_RUNSC_ROOT.
+# bin/update-runsc: install and update gVisor's runsc from the release bucket. curl, tar and setpriv
+# are stubbed, and /proc is a tree of this test's own (the "bucket" is two files here); file paths go under AIRLOCK_RUNSC_ROOT.
 
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     T="$BATS_TEST_TMPDIR"
-    export AIRLOCK_RUNSC_ROOT="$T/root" CALLS="$T/calls" BUCKET="$T/bucket" BOXES=0 RAN="$T/ran"
+    export AIRLOCK_RUNSC_ROOT="$T/root" CALLS="$T/calls" BUCKET="$T/bucket" RAN="$T/ran"
     R="$AIRLOCK_RUNSC_ROOT"
     mkdir -p "$R/usr/local/bin" "$BUCKET" "$T/bin"
     U="$REPO/bin/update-runsc"
@@ -32,17 +32,12 @@ echo "shim $v" > "$d/containerd-shim-runsc-v1"
 echo "helper $v" > "$d/gvisor-bin/helper"
 tail -n +2 "$tb" | while read -r f; do [ -n "$f" ] && mkdir -p "$d/$(dirname "$f")" && echo x > "$d/$f"; done
 chmod 0700 "$d/runsc"
+# a box started meanwhile (during the download), when asked
+[ -z "${BOX_DURING:-}" ] || { mkdir -p "$BOX_DURING" && ln -sfn "$AIRLOCK_RUNSC_ROOT/usr/local/bin/gvisor-bin/gvisor_sentry" "$BOX_DURING/exe"; }
 EOF
-    # pgrep: the pattern it was given goes to $CALLS; BOXES boxes (a file: one count per call);
-    # PGREP_RC: fail like pgrep does on an error
-    cat > "$T/bin/pgrep" <<'EOF'
-#!/bin/bash
-echo "pgrep $*" >> "$CALLS"
-[ -z "${PGREP_RC:-}" ] || { echo "pgrep: some error" >&2; exit "$PGREP_RC"; }
-n=$BOXES
-if [ -f "$BOXES" ]; then n="$(head -n 1 "$BOXES")"; sed -i 1d "$BOXES"; fi
-echo "${n:-0}"; [ "${n:-0}" -gt 0 ]
-EOF
+    # /proc: unrelated processes (a shell, a kernel thread without an exe)
+    mkdir -p "$R/proc/1" "$R/proc/2"
+    ln -s /usr/bin/bash "$R/proc/1/exe"
     # setpriv OPTIONS... CMD...: records its options, runs CMD (as the caller: no root here)
     cat > "$T/bin/setpriv" <<'EOF'
 #!/bin/bash
@@ -61,6 +56,9 @@ release() {  # release <name> [extra file...]: what the bucket serves now
     (cd "$BUCKET" && sha512sum gvisor.tar.zstd > gvisor.tar.zstd.sha512)
 }
 tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
+proc() {  # proc <pid> <exe target>: a process running that file
+    mkdir -p "$R/proc/$1"; ln -sfn "$2" "$R/proc/$1/exe"
+}
 
 @test "a first install: the allowed files, 0755, the record (tarball, release, each file's sha256) and the log" {
     release release-20261019.0
@@ -175,28 +173,30 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     [ "$(sha256sum < "$R/usr/local/bin/runsc")" = "$good" ]
 }
 
-@test "running gVisor boxes: refused before the download; the pattern is runsc's sandbox and gofer; --force goes ahead with a warning" {
+@test "running gVisor boxes, known by the file they run (any name): refused before the download; --force goes ahead with a warning" {
     release release-20261019.0
     "$U" >/dev/null
     release release-20261026.0
-    export BOXES=2
+    proc 4001 "$R/usr/local/bin/gvisor-bin/gvisor_sentry"
+    proc 4002 "$R/usr/local/bin/runsc"
+    proc 4003 "$R/usr/local/bin/runsc (deleted)"          # one an earlier update replaced
+    proc 4004 /usr/bin/podman; proc 4005 "$T/elsewhere/runsc"
     : > "$CALLS"
     run "$U"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"2 gVisor box process(es) running"*"stop"*"--force"* ]]
-    grep -qxF 'pgrep -c -f ^runsc-(sandbox|gofer)( |$)' "$CALLS"
+    [[ "$output" == *"3 gVisor box process(es) running"*"stop"*"--force"* ]]
     ! tar_fetched || return 1
     grep -qx 'release release-20261019.0' "$S"
     run "$U" --force
     [ "$status" -eq 0 ]
-    [[ "$output" == *"WARNING: 2 gVisor box process(es) running"*"installed runsc release-20261026.0"* ]]
+    [[ "$output" == *"WARNING: 3 gVisor box process(es) running"*"installed runsc release-20261026.0"* ]]
 }
 
 @test "a box started during the download stops the update before anything is replaced" {
     release release-20261019.0
     "$U" >/dev/null
     release release-20261026.0
-    printf '0\n1\n' > "$T/boxes"; export BOXES="$T/boxes"
+    export BOX_DURING="$R/proc/4100"
     run "$U"
     [ "$status" -eq 1 ]; [[ "$output" == *"1 gVisor box process(es) running"* ]]
     tar_fetched
@@ -204,11 +204,11 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     [ "$(cat "$R/usr/local/bin/containerd-shim-runsc-v1")" = "shim release-20261019.0" ]
 }
 
-@test "pgrep failing is a stop, not 'no boxes'" {
+@test "no /proc to read is a stop, not 'no boxes'" {
     release release-20261019.0
-    export PGREP_RC=3
+    rm -rf "$R/proc"
     run "$U"
-    [ "$status" -eq 1 ]; [[ "$output" == *"pgrep failed (exit 3)"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"can't read $R/proc"* ]]
     [ ! -e "$R/usr/local/bin/runsc" ]
 }
 
@@ -216,7 +216,7 @@ tar_fetched() { grep -q 'gvisor.tar.zstd ' "$CALLS"; }
     release release-20261019.0
     "$U" >/dev/null
     release release-20261026.0
-    export BOXES=1
+    proc 4001 "$R/usr/local/bin/runsc"
     run "$U" --check
     [ "$status" -eq 10 ]
 }
