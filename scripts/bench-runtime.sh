@@ -24,7 +24,8 @@
 set -uo pipefail
 export LC_ALL=C
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The real directory: an installed copy is reached through the `current` symlink.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ENGINE=podman
 IMAGE="${AIRLOCK_IMAGE:-claude-airlock:dev}"
 RUNSC="${BENCH_RUNSC:-/usr/local/bin/runsc}"          # test hooks: never set in use
@@ -149,7 +150,7 @@ if git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
   git clone -q --no-hardlinks "$REPO_DIR" "$W/src" || die "can't copy the repository into $W"
   history="$(git -C "$W/src" rev-list --count HEAD) commits"
 else
-  if ! { cp -a "$REPO_DIR" "$W/src" && git -C "$W/src" init -q && git -C "$W/src" add -A \
+  if ! { mkdir "$W/src" && cp -a "$REPO_DIR/." "$W/src/" && git -C "$W/src" init -q && git -C "$W/src" add -A \
       && git -C "$W/src" -c user.name=bench -c user.email=bench@localhost commit -qm bench; }; then
     die "can't copy the repository into $W"
   fi

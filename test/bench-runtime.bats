@@ -109,3 +109,26 @@ results() { printf 'variant\tworkload\trun\tvalue\tstatus\n'; printf '%b' "$1"; 
     run bash -c 'source "$1"; W=$2; t files-tar-stat 1 files' _ "$T/fns.sh" "$W"
     [[ "$output" == $'files-tar-stat\t1\t'*$'\tok' ]] || { echo "$output"; return 1; }
 }
+
+@test "run from an installed copy (no checkout, reached through a current -> versions/<rev> symlink): the work tree is that copy's files" {
+    # an install laid out as the installer does it
+    mkdir -p "$T/install/versions"
+    mkdir -p "$T/install/versions/abc123"
+    cp -a "$BATS_TEST_DIRNAME/../scripts" "$BATS_TEST_DIRNAME/../image" "$T/install/versions/abc123/"
+    ln -s versions/abc123 "$T/install/current"
+    # an engine whose boxes never start: the bench prepares its work tree, then records the failure
+    mkdir -p "$T/bin"
+    cat > "$T/bin/podman" <<'S'
+#!/bin/bash
+case " $* " in *" --version "*) echo "podman version 5 (fake)" ;; *" image exists "*|*" rm "*) ;; *" image inspect "*) echo sha256:0 ;; *) exit 1 ;; esac
+S
+    chmod +x "$T/bin/podman"
+    python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$T/s.sock"
+    PATH="$T/bin:$PATH" BENCH_RUNSC="$T/none" AIRLOCK_EGRESS_PROXY="$T/s.sock" XDG_CACHE_HOME="$T/cache" \
+        run bash "$T/install/current/scripts/bench-runtime.sh" --quick
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    d="$(ls -d "$T"/cache/airlock-bench/*/)"
+    grep -q '^work tree   1 commit (not a checkout)$' "$d/facts.txt"
+    [ -f "$d/work/src/scripts/bench-runtime.sh" ] && [ ! -L "$d/work/src" ]
+    grep -qx $'crun\tcheck-inner-run\t1\tboxes do not start\tfail' "$d/results.tsv"
+}
