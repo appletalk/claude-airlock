@@ -8,5 +8,6 @@
       "RemoteTrigger"
     ]
   },
-  "crossSessionInbound": "refuse"
+  "crossSessionInbound": "refuse",
+  "allowManagedHooksOnly": true
 }

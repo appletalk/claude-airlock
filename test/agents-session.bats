@@ -213,7 +213,8 @@ stop() { PATH="$T/sb:$PATH" run "$S" "$@"; }
 }
 
 @test "the unit stops through session-stop, with time for its wait" {
-    "$REPO/agents/airlock-agents-apply" --render "$T/render" "$REPO/agents/agents.conf.example" >/dev/null
+    mkdir -p "$T/gbin"; printf '#!/bin/sh\n[ "$1 $2" = "passwd alice" ] && echo "alice:x:1000:1000::/home/alice:/bin/sh"\n' > "$T/gbin/getent"; chmod +x "$T/gbin/getent"
+    PATH="$T/gbin:$PATH" "$REPO/agents/airlock-agents-apply" --render "$T/render" "$REPO/agents/agents.conf.example" >/dev/null
     u="$T/render/etc/systemd/user/claude-session@.service"
     grep -qx 'ExecStop=/usr/local/lib/airlock-agents/session-stop %t/claude-%i.sock %t/claude-%i.cg' "$u"
     grep -qx 'TimeoutStopSec=90' "$u"

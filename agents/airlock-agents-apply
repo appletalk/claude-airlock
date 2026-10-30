@@ -272,7 +272,7 @@ ProtectHome=tmpfs
 BindPaths=/home/$u /run/user/$id
 # It writes nowhere but its home, runtime dir and its queue dirs: no cron or at spool, no
 # world-writable spot such as /var/spool/mail, nothing that runs it outside this manager
-# (cron and at also deny it in cron.deny and at.deny).
+# (where cron or at is installed, cron.deny and at.deny also name it).
 ProtectSystem=strict
 ReadWritePaths=/home/$u /run/user/$id${rw:+ $rw}
 # SSSD's NSS socket lives outside /run (directory lookups, AD recon).
@@ -282,6 +282,14 @@ InaccessiblePaths=-/var/lib/sss/pipes
 # paravirtualization and vsock into Windows; absent elsewhere, so ignored).
 TemporaryFileSystem=/mnt:ro
 InaccessiblePaths=-/dev/dxg -/dev/vsock
+# No device nodes but the pseudo-devices (null, zero, full, random, urandom, tty, ptmx, pts) and
+# the tun device pasta needs for a box with a network: no GPU render nodes, KVM, vhost or VFIO,
+# each a large driver in the kernel. The device controller checks every open of a device node,
+# wherever it sits, so this also closes a binderfs an agent mounts in its own user namespace
+# (its binder-control is a device node). Applies to every process under this manager, the
+# boxes included.
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
 EOF
     if [ "$(systemd_version)" -ge 255 ]; then cat <<EOF
 # Sockets of the families boxes and the manager use, nothing else: no AF_VSOCK to the Windows
@@ -301,9 +309,14 @@ EOF
 # boxes' own seccomp refuses it.)
 EOF
     fi
-    local ia=""
+    # Cgroup names others chose: the other agents', the operator's (its unit, scope and app names,
+    # activity and resource use) and the system's (every service name).
+    local opu="${OP_UID:-}" ia
+    [ -n "$opu" ] || opu="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
+    [[ "$opu" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator): its cgroup can't be hidden from $u"
+    ia=" -/sys/fs/cgroup/user.slice/user-$opu.slice"
     for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
-    [ -z "$ia" ] || echo "InaccessiblePaths=${ia# }"
+    echo "InaccessiblePaths=${ia# } -/sys/fs/cgroup/system.slice"
     cat <<EOF
 # Its claude-airlock config is root's: changed only by the operator.
 Environment=AIRLOCK_CONFIG=$ETC/$u.conf

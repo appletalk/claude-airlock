@@ -30,8 +30,6 @@ setup() {
     # The operator command's names, as apply renders them (its inbox and queue under the test dir).
     export AIRLOCK_AGENTS_ENV="$T/agents.env"
     "$REPO/agents/airlock-agents-apply" --env > "$AIRLOCK_AGENTS_ENV"
-    # Every file apply renders for this site (the tests read them here).
-    RENDER="$T/render"; "$REPO/agents/airlock-agents-apply" --render "$RENDER" >/dev/null
     # Each user's default claude-airlock config (what install writes on the first run).
     UC="$T/userconf"; mkdir -p "$UC"
     for u in agent agent-web agent-guard; do "$REPO/agents/airlock-agents-apply" --user-conf "$u" > "$UC/$u.conf"; done
@@ -48,6 +46,9 @@ db=$1 key=${2:-}; f=$PASSWD; [ "$db" = group ] && f=$GROUP
 { [ "$db" = group ] && echo "alice:x:1000:" || echo "alice:x:1000:1000::/home/alice:/bin/zsh"; cat "$f"; } \
     | awk -F: -v k="$key" 'k == "" || $1 == k || $3 == k { print; found = 1 } END { exit !found }'
 S
+    chmod +x "$T/bin/getent"
+    # Every file apply renders for this site (the tests read them here; the operator's uid from getent).
+    RENDER="$T/render"; PATH="$T/bin:$PATH" "$REPO/agents/airlock-agents-apply" --render "$RENDER" >/dev/null
     cat > "$T/bin/useradd" <<'S'
 #!/bin/bash
 echo "useradd $*" >> "$LOG"; n=$2; u="${*: -1}"; echo "$u:x:$n:$n::/home/$u:/bin/bash" >> "$PASSWD"
@@ -996,7 +997,9 @@ S
     grep -qx 'ProtectHome=tmpfs' "$d"
     grep -qx 'BindPaths=/home/agent /run/user/1100' "$d"
     grep -qx 'TemporaryFileSystem=/run:mode=0755,nosuid,nodev' "$d"
-    grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice' "$d"
+    grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice -/sys/fs/cgroup/system.slice' "$d"
+    # no device nodes but the pseudo-devices and tun (GPU, KVM, vhost, VFIO, a binderfs: closed)
+    grep -qx 'DevicePolicy=closed' "$d"; grep -qx 'DeviceAllow=/dev/net/tun rw' "$d"
     grep -qx 'After=user-1101.slice user-1102.slice' "$d"
     grep -qx 'ProtectSystem=strict' "$d"
     c="$UC/agent.conf"
@@ -1483,14 +1486,16 @@ ReadWritePaths=/home/agent /run/user/1100 -/srv/agent-web/requests
 InaccessiblePaths=-/var/lib/sss/pipes
 TemporaryFileSystem=/mnt:ro
 InaccessiblePaths=-/dev/dxg -/dev/vsock
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=~io_uring_setup:ENOSYS io_uring_enter:ENOSYS io_uring_register:ENOSYS
-InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice
+InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice -/sys/fs/cgroup/system.slice
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
-    for spec in agent-web:1101:"-/srv/agent-web/held -/srv/agent-web/reports -/srv/agent-web/log/agent-web":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1102.slice":"user-1100.slice user-1102.slice" \
-                agent-guard:1102:"-/srv/agent-web/answers -/srv/agent-web/quarantine -/srv/agent-web/log/agent-guard":"-/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1101.slice":"user-1100.slice user-1101.slice"; do
+    for spec in agent-web:1101:"-/srv/agent-web/held -/srv/agent-web/reports -/srv/agent-web/log/agent-web":"-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1102.slice -/sys/fs/cgroup/system.slice":"user-1100.slice user-1102.slice" \
+                agent-guard:1102:"-/srv/agent-web/answers -/srv/agent-web/quarantine -/srv/agent-web/log/agent-guard":"-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/system.slice":"user-1100.slice user-1101.slice"; do
         IFS=: read -r u n rw cg af <<<"$spec"
         want="[Unit]
 RequiresMountsFor=/home/$u
@@ -1512,6 +1517,8 @@ ReadWritePaths=/home/$u /run/user/$n $rw
 InaccessiblePaths=-/var/lib/sss/pipes
 TemporaryFileSystem=/mnt:ro
 InaccessiblePaths=-/dev/dxg -/dev/vsock
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=~io_uring_setup:ENOSYS io_uring_enter:ENOSYS io_uring_register:ENOSYS
@@ -2260,7 +2267,8 @@ S
     [[ "$output" == *"could not be emptied"* ]]; [ ! -e "$T/started" ]
 }
 
-@test "agent-web's and agent-guard's boxes: no project hooks, and the worker empties the box's memory before a run" {
+@test "every agent's boxes run managed hooks only; the web and guard workers empty the box's memory before a run" {
+    python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["allowManagedHooksOnly"] is True' "$REPO/agents/share/managed-settings-agent.json"
     for u in agent-web agent-guard; do
         python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["allowManagedHooksOnly"] is True' "$REPO/agents/share/managed-settings-${u#agent-}.json"
     done

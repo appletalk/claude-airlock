@@ -7,6 +7,9 @@ setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     T="$BATS_TEST_TMPDIR"
     A="$REPO/agents/airlock-agents-apply"
+    # The manager drop-in hides the operator's cgroup by uid: getent gives any operator uid 1000 here.
+    mkdir -p "$T/bin"; printf '#!/bin/sh\n[ "$1" = passwd ] && [ -n "$2" ] && echo "$2:x:1000:1000::/home/$2:/bin/sh"\n' > "$T/bin/getent"
+    chmod +x "$T/bin/getent"; export PATH="$T/bin:$PATH"
 }
 site() { printf '%b' "$1" > "$T/site"; }
 refuses() {  # refuses <expected message part> <site text>
@@ -82,7 +85,8 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     grep -qx 'a /srv/claude-inbox/airlock  -    -     -    -   u::rwx,g::r-x,o::---,d:u::rwx,d:g::r-x,d:o::---' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"
     [ "$(grep -c 'meta skuid' "$T/r/etc/airlock-agents.nft")" = 2 ]
     d="$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
-    run grep -c '^InaccessiblePaths=-/sys' "$d"; [ "$output" = 0 ]
+    # no other agents to hide: only the operator's and the system's cgroups
+    grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/system.slice' "$d"
     run grep -c '^After=' "$d"; [ "$output" = 0 ]
     run "$A" --user-conf claude "$T/site"
     [ "$status" -eq 0 ]; [[ "$output" != *AIRLOCK_EXTRA_MOUNTS* ]]
