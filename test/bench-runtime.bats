@@ -16,13 +16,13 @@ setup() {
     [ "$output" = $'crun\tpodman --runtime crun run ...' ]
 }
 
-@test "runsc and a usable /dev/kvm: systrap, systrap without directfs, kvm; every runsc box has ignore-cgroups and host-uds=open" {
+@test "runsc and a usable /dev/kvm: systrap, systrap without directfs, kvm; every runsc box has ignore-cgroups, host-uds=open and network=none" {
     run "$B" --list
     [ "$status" -eq 0 ]
     [ "$(cut -f1 <<< "$output" | tr '\n' ' ')" = "crun runsc-systrap runsc-systrap-nodirectfs runsc-kvm " ]
-    grep -qx $'runsc-systrap\tpodman --runtime '"$T"'/runsc --runtime-flag ignore-cgroups --runtime-flag host-uds=open run ...' <<< "$output"
+    grep -qx $'runsc-systrap\tpodman --runtime '"$T"'/runsc --runtime-flag ignore-cgroups --runtime-flag host-uds=open --runtime-flag network=none run ...' <<< "$output"
     grep -q $'^runsc-systrap-nodirectfs\t.* --runtime-flag directfs=false run' <<< "$output"
-    grep -q $'^runsc-kvm\t.*host-uds=open --runtime-flag platform=kvm run' <<< "$output"
+    grep -q $'^runsc-kvm\t.*network=none --runtime-flag platform=kvm run' <<< "$output"
 }
 
 @test "no usable /dev/kvm: no kvm variant, and asking for it is refused" {

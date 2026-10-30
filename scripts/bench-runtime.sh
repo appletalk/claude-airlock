@@ -109,11 +109,14 @@ fi
 # The engine's global arguments for a variant: the runtime and its flags. runsc can't apply
 # cgroups under rootless podman yet (it asks the system manager), so ignore-cgroups; the box
 # reaches the proxy through a host Unix socket, which gVisor refuses unless host-uds=open.
+# network=none: gVisor's own network stack with loopback only. Its default (sandbox) takes over
+# the interfaces of podman's network namespace, which rootless runsc may not enter: the box then
+# has no network at all, not even the loopback the proxy bridge listens on.
 runtime_args() {
   case "$1" in
     crun) echo "--runtime crun" ;;
     runsc-*)
-      local a="--runtime $RUNSC --runtime-flag ignore-cgroups --runtime-flag host-uds=open"
+      local a="--runtime $RUNSC --runtime-flag ignore-cgroups --runtime-flag host-uds=open --runtime-flag network=none"
       case "$1" in
         runsc-systrap-nodirectfs) a="$a --runtime-flag directfs=false" ;;
         runsc-kvm) a="$a --runtime-flag platform=kvm" ;;

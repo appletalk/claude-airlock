@@ -67,7 +67,13 @@ crun and under each gVisor platform this host can run:
 
 Every runsc box runs with `ignore-cgroups` (runsc can't set up cgroups under rootless podman
 yet, so a box has no per-box memory or process limit of its own; an agent user's slice limits
-still hold) and `host-uds=open` (the box reaches the proxy through a host Unix socket).
+still hold), `host-uds=open` (the box reaches the proxy through a host Unix socket) and
+`network=none` (gVisor's own loopback-only network; its default takes over the network namespace
+podman made, which rootless runsc may not enter, and the box is left without even a loopback).
+
+Where `kernel.yama.ptrace_scope` is 2 (only processes with CAP_SYS_PTRACE may attach), systrap
+starts only with directfs on: `runsc-systrap-nodirectfs` fails ("initialize systrap: unable to
+attach: operation not permitted"), and so would `runsc-ptrace`.
 
 The work: box start-up, a burst of 2000 short processes, git (status, log, clone, gc), a copy
 and stat of many small files, node and `claude --version`, a Python venv and compileall, two
