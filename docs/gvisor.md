@@ -62,7 +62,7 @@ crun and under each gVisor platform this host can run:
 | `crun` | always (today's runtime, the baseline) |
 | `runsc-systrap` | runsc installed (gVisor's default platform) |
 | `runsc-systrap-nodirectfs` | runsc installed (directfs off: slower file metadata, avoids a rootless directfs bug) |
-| `runsc-kvm` | `/dev/kvm` usable by this user |
+| `runsc-kvm` | `/dev/kvm` usable by this user (never an agent user: their managers open no device nodes but the pseudo-devices and tun) |
 | `runsc-ptrace` | WSL (systrap is reported to fail there) |
 
 Every runsc box runs with `ignore-cgroups` (runsc can't set up cgroups under rootless podman

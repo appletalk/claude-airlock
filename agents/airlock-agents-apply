@@ -65,7 +65,7 @@ site="${site:-$ROOT$ETC/agents.conf}"
 
 # ---- parse ------------------------------------------------------------------------------------
 
-OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on
+OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on OP_UID="" OP_GID=""
 ROLES=(agent web guard)
 declare -A NAME=() UID_OF=() SUB=() SIZE=() MEMHIGH=() MEMMAX=() TASKS=() CPU=()
 INTERNAL_NAMES=() INTERNAL_HOSTS=()
@@ -267,7 +267,7 @@ BindReadOnlyPaths=/run/systemd/notify -/run/systemd/journal/socket -/run/systemd
 ProtectProc=invisible
 Environment=CONTAINERS_CONF_OVERRIDE=$SHARE/containers.conf
 # Its view of the host is its own: no other user's home or runtime dir, no system bus (pid 1
-# would list other units' processes and command lines), no cgroup names the other agents chose.
+# would list other units' processes and command lines), and (below) no cgroup names others chose.
 ProtectHome=tmpfs
 BindPaths=/home/$u /run/user/$id
 # It writes nowhere but its home, runtime dir and its queue dirs: no cron or at spool, no
@@ -704,6 +704,9 @@ if [ "$mode" = render ]; then
     [ -n "$out" ] || die "--render needs a directory"
     # A directory of its own, made now: writing into one that exists could follow a link someone
     # left there (and as root, anywhere).
+    # The manager drop-ins hide the operator's cgroup by its uid: the operator must exist here.
+    OP_UID="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
+    [[ "$OP_UID" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator) here: the agents' managers hide its cgroup by uid"
     mkdir -m 0755 "$out" 2>/dev/null || die "--render wants a new directory: $out exists (or can't be made)"
     while read -r p m; do
         mkdir -p "$out$(dirname "$p")"

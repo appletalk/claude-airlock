@@ -8,7 +8,7 @@ setup() {
     T="$BATS_TEST_TMPDIR"
     A="$REPO/agents/airlock-agents-apply"
     # The manager drop-in hides the operator's cgroup by uid: getent gives any operator uid 1000 here.
-    mkdir -p "$T/bin"; printf '#!/bin/sh\n[ "$1" = passwd ] && [ -n "$2" ] && echo "$2:x:1000:1000::/home/$2:/bin/sh"\n' > "$T/bin/getent"
+    mkdir -p "$T/bin"; printf '#!/bin/sh\n[ "$1" = passwd ] && [ -n "$2" ] && [ "$2" != ghost ] && echo "$2:x:1000:1000::/home/$2:/bin/sh"\n' > "$T/bin/getent"
     chmod +x "$T/bin/getent"; export PATH="$T/bin:$PATH"
 }
 site() { printf '%b' "$1" > "$T/site"; }
@@ -150,4 +150,11 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     # and the working tree as it is now (uncommitted edits too)
     run bash -c 'git ls-files -z | xargs -0 cat -- 2>/dev/null | tr -d "\000" | grep -aciE -- "$1"' _ "$pat"
     [ "$output" = 0 ] || { echo "site-specific names in the working tree ($output lines)"; return 1; }
+}
+
+@test "--render needs the operator on this host (its uid hides its cgroup) and writes nothing without it" {
+    site 'operator ghost\nagent claude uid 1100 subuid 1100000 home 30G\n'
+    run "$A" --render "$T/r" "$T/site"
+    [ "$status" -ne 0 ]; [[ "$output" == *"no user ghost (the operator) here"* ]]
+    [ ! -e "$T/r" ]
 }

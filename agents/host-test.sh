@@ -297,6 +297,12 @@ for spec in $users; do
     for dv in /dev/dxg /dev/vsock; do
         [ -e "$dv" ] && mcheck missing denied "user@$n: $dv can't be opened" "$u" read "$dv"
     done
+    # DevicePolicy=closed: no device nodes but the pseudo-devices and tun (control: /dev/null, tun)
+    mcheck ok "user@$n: control: /dev/null opens" "$u" read /dev/null
+    [ -e /dev/net/tun ] && mcheck ok "user@$n: control: /dev/net/tun opens (pasta)" "$u" read /dev/net/tun
+    for dv in /dev/kvm /dev/vhost-net /dev/vhost-vsock /dev/vfio/vfio /dev/fuse /dev/dri/renderD* /dev/dri/card*; do
+        [ -e "$dv" ] && mcheck denied "user@$n: $dv can't be opened (device policy)" "$u" read "$dv"
+    done
     if ! grep -q '^RestrictAddressFamilies=' "/etc/systemd/system/user@$n.service.d/10-airlock-agents.conf" 2>/dev/null; then
         echo "     (no RestrictAddressFamilies for $u: systemd before 255, see its drop-in; vsock is open to it)"
     elif python3 -I -c 'import socket; socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM).close()' 2>/dev/null; then
