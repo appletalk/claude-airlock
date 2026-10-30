@@ -292,13 +292,15 @@ for spec in $users; do
     for cg in "/sys/fs/cgroup/user.slice/user-$opuid.slice" /sys/fs/cgroup/system.slice /sys/fs/cgroup/machine.slice; do
         [ -d "$cg" ] && mcheck missing denied "user@$n: ${cg#/sys/fs/cgroup/} hidden" "$u" list "$cg"
     done
-    # ...and, in its own cgroup namespace, its own tree is there (not an empty or broken /sys/fs/cgroup):
-    # a unit it starts sits under /app.slice at the namespace root
+    # ...and, in its own cgroup namespace, rooted at user@N.service: the manager's own init.scope sits
+    # at the root (a root on init.scope itself, systemd 257's bug, would show no init.scope there;
+    # app.slice would look the same either way), and a unit it starts is under /app.slice
     if grep -qx 'ProtectControlGroups=private' "/etc/systemd/system/user@$n.service.d/10-airlock-agents.conf" 2>/dev/null; then
+        mcheck ok "user@$n: its namespace is rooted at the manager's service (init.scope at the root)" "$u" list /sys/fs/cgroup/init.scope
         mcheck ok "user@$n: control: its own cgroup tree (app.slice) is there" "$u" list /sys/fs/cgroup/app.slice
-        cg="$(systemd-run --user -M "$u@" --wait --pipe --quiet --collect -- cat /proc/self/cgroup 2>/dev/null)"
-        [[ "$cg" == 0::/app.slice/* ]] && pass "user@$n: its units sit under /app.slice in its own cgroup namespace" \
-            || fail "user@$n: a unit's cgroup from inside is '$cg', want 0::/app.slice/... (namespace root wrong?)"
+        unitcg="$(systemd-run --user -M "$u@" --wait --pipe --quiet --collect -- cat /proc/self/cgroup 2>/dev/null)"
+        [[ "$unitcg" == 0::/app.slice/* ]] && pass "user@$n: its units sit under /app.slice in its own cgroup namespace" \
+            || fail "user@$n: a unit's cgroup from inside is '$unitcg', want 0::/app.slice/..."
     fi
     # Nothing of /mnt (WSL: the Windows drives, WSLg's sockets), no hypervisor devices, no vsock
     if [ -d /mnt ]; then

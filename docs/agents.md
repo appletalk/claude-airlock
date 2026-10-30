@@ -121,7 +121,9 @@ If your config repo already manages the firewall, polkit or shell profile, say s
 live result instead (polkit must let you open a shell as each agent user; the firewall must drop
 each one with a rule of its own, in an `inet` table's output chain, before any rule there that
 accepts, even `ct state established`). `airlock-agents-apply --render ~/agents-render` (as yourself, into a new directory) shows
-what each part must provide, under `external/`.
+what each part must provide, under `external/`. It renders for the machine it runs on: its systemd
+version decides the user managers' drop-ins (from 258 a cgroup namespace each; before, hidden paths
+that need the operator's uid), so render on the host the files are for.
 
 Files the toolkit owns aren't edited locally: changes come with a toolkit update.
 

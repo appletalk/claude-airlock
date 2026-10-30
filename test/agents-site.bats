@@ -4,6 +4,7 @@
 # (--env, --render, --user-conf); nothing here touches the system.
 
 setup() {
+    unset AIRLOCK_AGENTS_ROOT AIRLOCK_AGENTS_SYSTEMD_VERSION   # the caller's environment decides nothing here
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     T="$BATS_TEST_TMPDIR"
     A="$REPO/agents/airlock-agents-apply"
@@ -155,9 +156,21 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     [ "$output" = 0 ] || { echo "site-specific names in the working tree ($output lines)"; return 1; }
 }
 
-@test "--render needs the operator on this host (its uid hides its cgroup) and writes nothing without it" {
+@test "before systemd 258 --render needs the operator here (its uid hides its cgroup) and writes nothing without it" {
     site 'operator ghost\nagent claude uid 1100 subuid 1100000 home 30G\n'
-    run "$A" --render "$T/r" "$T/site"
-    [ "$status" -ne 0 ]; [[ "$output" == *"no user ghost (the operator) here"* ]]
-    [ ! -e "$T/r" ]
+    for v in 256 257; do
+        printf '#!/bin/sh\necho "systemd %s (%s.1)"\n' "$v" "$v" > "$T/bin/systemctl"
+        run "$A" --render "$T/r$v" "$T/site"
+        [ "$status" -ne 0 ]; [[ "$output" == *"no user ghost (the operator) here"* ]]
+        [ ! -e "$T/r$v" ]
+    done
+}
+
+@test "from systemd 258 --render needs no operator uid: the cgroup namespace hides every cgroup but its own" {
+    site 'operator ghost\nagent claude uid 1100 subuid 1100000 home 30G\n'
+    printf '#!/bin/sh\necho "systemd 262 (262.1)"\n' > "$T/bin/systemctl"
+    "$A" --render "$T/r" "$T/site" >/dev/null
+    d="$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+    grep -qx 'ProtectControlGroups=private' "$d"
+    run grep -c '^InaccessiblePaths=-/sys\|^After=' "$d"; [ "$output" = 0 ]
 }

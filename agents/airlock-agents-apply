@@ -66,6 +66,8 @@ site="${site:-$ROOT$ETC/agents.conf}"
 # ---- parse ------------------------------------------------------------------------------------
 
 OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on OP_UID="" OP_GID=""
+# The first systemd whose ProtectControlGroups=private works for user@.service (render_manager).
+CGNS_SYSTEMD=258
 ROLES=(agent web guard)
 declare -A NAME=() UID_OF=() SUB=() SIZE=() MEMHIGH=() MEMMAX=() TASKS=() CPU=()
 INTERNAL_NAMES=() INTERNAL_HOSTS=()
@@ -230,7 +232,7 @@ render_manager() {  # the user manager's sandbox for role $1
     # ProtectControlGroups=private too, but with user@.service's DelegateSubgroup= its namespace
     # root lands on init.scope; fixed in 258.) Before: the others' cgroup directories are hidden
     # by path, so they must exist when it starts, the operator's included (found by its uid).
-    [ "$(systemd_version)" -ge 258 ] && cgns=1
+    [ "$(systemd_version)" -ge "$CGNS_SYSTEMD" ] && cgns=1
     if [ "$cgns" = 0 ]; then
         [ -n "$opu" ] || opu="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
         [[ "$opu" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator): on systemd before 258 its cgroup is hidden from $u by uid"
@@ -722,7 +724,7 @@ if [ "$mode" = render ]; then
     # left there (and as root, anywhere).
     # Before systemd 258 the manager drop-ins hide the operator's cgroup by its uid: the operator
     # must exist here (checked before anything is written).
-    if [ "$(systemd_version)" -lt 258 ]; then
+    if [ "$(systemd_version)" -lt "$CGNS_SYSTEMD" ]; then
         OP_UID="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
         [[ "$OP_UID" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator) here: before systemd 258 the agents' managers hide its cgroup by uid"
     fi

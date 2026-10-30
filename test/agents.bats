@@ -997,7 +997,7 @@ S
     grep -qx 'ProtectHome=tmpfs' "$d"
     grep -qx 'BindPaths=/home/agent /run/user/1100' "$d"
     grep -qx 'TemporaryFileSystem=/run:mode=0755,nosuid,nodev' "$d"
-    # systemd 257+: its own cgroup namespace (no other cgroup names), so no slice ordering either
+    # systemd 258+: its own cgroup namespace (no other cgroup names), so no slice ordering either
     grep -qx 'ProtectControlGroups=private' "$d"
     run grep -c '^InaccessiblePaths=-/sys' "$d"; [ "$output" = 0 ]
     # no device nodes but the pseudo-devices and tun (GPU, KVM, vhost, VFIO, a binderfs: closed)
