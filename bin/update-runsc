@@ -80,21 +80,32 @@ intact() {
 # gVisor box processes: any process running a file of this install (runsc, or a gvisor-bin/
 # helper such as gvisor_sentry), also one an update since replaced ("(deleted)"). By the
 # executable, never by name: runsc's sandbox and gofer processes are named after whatever it
-# execs (gvisor_sentry, exe, runsc-fd-parking...), which changes between releases. Root reads every
-# process's exe link; processes without one (kernel threads) are skipped. No /proc to read means
-# it can't tell, which is a stop.
+# execs (gvisor_sentry, exe, runsc-fd-parking...), which changes between releases. A process
+# counts when its exe link names an installed path (as written, or canonical: the kernel gives
+# canonical paths, and /usr/local may be a symlink), or when the file it runs is one of the
+# installed files (device and inode: the path a sandbox's exe shows can differ after its
+# pivot_root). Processes without an exe link (kernel threads) don't count. Reading other
+# processes' exe links takes CAP_SYS_PTRACE: if even pid 1's can't be read, it can't tell,
+# which is a stop, as is no /proc.
 boxes() {
-    local n=0 p x
-    if ! { [ -d "$PROC" ] && compgen -G "$PROC/[0-9]*" >/dev/null; }; then
-        die "can't read $PROC: can't tell whether gVisor boxes are running"
+    local canon ids
+    if ! { [ -d "$PROC" ] && compgen -G "$PROC/[0-9]*" >/dev/null && readlink "$PROC/1/exe" >/dev/null 2>&1; }; then
+        die "can't read the processes in $PROC: can't tell whether gVisor boxes are running"
     fi
-    for p in "$PROC"/[0-9]*; do
-        x="$(readlink "$p/exe" 2>/dev/null)" || continue
-        x="${x% (deleted)}"
-        case "$x" in "$DEST/runsc"|"$DEST/gvisor-bin/"*) n=$((n + 1)) ;; esac
-    done
-    echo "$n"
+    canon="$(readlink -f -- "$DEST")"
+    ids="$(find -L "$DEST/runsc" "$DEST/gvisor-bin" -maxdepth 1 -type f -printf '%D:%i ' 2>/dev/null || true)"
+    {
+        # per process: its exe link's target, and the device:inode of the file it runs
+        find "$PROC" -mindepth 2 -maxdepth 2 -path "$PROC/[0-9]*/exe" -printf 'path\t%h\t%l\n' 2>/dev/null || true
+        find -L "$PROC" -mindepth 2 -maxdepth 2 -path "$PROC/[0-9]*/exe" -type f -printf 'id\t%h\t%D:%i\n' 2>/dev/null || true
+    } | awk -F'\t' -v d="$DEST" -v c="$canon" -v ids="$ids" '
+        BEGIN { n = split(ids, a, " "); for (k = 1; k <= n; k++) want[a[k]] = 1 }
+        $1 == "path" { p = $3; sub(/ \(deleted\)$/, "", p)
+                       if (p == d "/runsc" || p == c "/runsc" || index(p, d "/gvisor-bin/") == 1 || index(p, c "/gvisor-bin/") == 1) box[$2] = 1 }
+        $1 == "id" && ($3 in want) { box[$2] = 1 }
+        END { for (k in box) m++; print m + 0 }'
 }
+
 no_boxes() {
     local n; n="$(boxes)"
     [ "$n" -gt 0 ] || return 0

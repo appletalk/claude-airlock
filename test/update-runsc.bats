@@ -208,8 +208,36 @@ proc() {  # proc <pid> <exe target>: a process running that file
     release release-20261019.0
     rm -rf "$R/proc"
     run "$U"
-    [ "$status" -eq 1 ]; [[ "$output" == *"can't read $R/proc"* ]]
+    [ "$status" -eq 1 ]; [[ "$output" == *"can't read the processes in $R/proc"* ]]
     [ ! -e "$R/usr/local/bin/runsc" ]
+    mkdir "$R/proc"                                   # there, but no processes in it
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"can't read the processes in $R/proc"* ]]
+    proc 7 /usr/bin/bash                              # processes, but pid 1's exe unreadable
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"can't read the processes in $R/proc"* ]]
+    [ ! -e "$R/usr/local/bin/runsc" ]
+}
+
+@test "a box is found by the canonical path the kernel shows (/usr/local a symlink), and by the file itself" {
+    mkdir -p "$R/var/usrlocal"; mv "$R/usr/local/bin" "$R/var/usrlocal/bin"; rmdir "$R/usr/local"
+    ln -s ../var/usrlocal "$R/usr/local"
+    release release-20261019.0
+    "$U" >/dev/null
+    release release-20261026.0
+    proc 4001 "$R/var/usrlocal/bin/gvisor-bin/gvisor_sentry"     # as /proc/<pid>/exe shows it
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"1 gVisor box process(es) running"* ]] || { echo "$output"; return 1; }
+    rm -rf "$R/proc/4001"
+    proc 4003 "$R/var/usrlocal/bin/runsc (deleted)"              # replaced since: only its path is left
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"1 gVisor box process(es) running"* ]] || { echo "$output"; return 1; }
+    rm -rf "$R/proc/4003"
+    # the same file under a path that matches nothing (a sandbox's view after its pivot_root)
+    mkdir -p "$T/elsewhere"; ln "$R/var/usrlocal/bin/runsc" "$T/elsewhere/sandbox-view"
+    proc 4002 "$T/elsewhere/sandbox-view"
+    run "$U"
+    [ "$status" -eq 1 ]; [[ "$output" == *"1 gVisor box process(es) running"* ]] || { echo "$output"; return 1; }
 }
 
 @test "--check with boxes running still reports (it replaces nothing)" {
