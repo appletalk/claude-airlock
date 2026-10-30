@@ -225,8 +225,16 @@ EOF
 }
 
 render_manager() {  # the user manager's sandbox for role $1
-    local r=$1 u=${NAME[$1]} id=${UID_OF[$1]} o slices="" rw
-    for o in $(others_of "$r"); do slices="$slices user-$o.slice"; done
+    local r=$1 u=${NAME[$1]} id=${UID_OF[$1]} o slices="" rw opu="${OP_UID:-}" cgns=0
+    [ -n "$opu" ] || opu="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
+    [[ "$opu" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator): its cgroup can't be hidden from $u"
+    # systemd 257+: a cgroup namespace of its own hides every cgroup but its own subtree.
+    # Before: the others' cgroup directories are hidden by path, so they must exist when it starts.
+    [ "$(systemd_version)" -ge 257 ] && cgns=1
+    if [ "$cgns" = 0 ]; then
+        for o in $(others_of "$r"); do slices="$slices user-$o.slice"; done
+        slices="$slices user-$opu.slice"
+    fi
     cat <<EOF
 # Rendered by airlock-agents-apply: $u (uid $id, the $r user). Its user manager, so every box
 # and session it starts, gets its own network namespace (loopback only: boxes reach out
@@ -236,8 +244,8 @@ render_manager() {  # the user manager's sandbox for role $1
 RequiresMountsFor=/home/$u
 EOF
     [ -z "$slices" ] || {
-        echo "# The other agents' slices exist before it starts, so InaccessiblePaths below finds them"
-        echo "# (ordered on the slices, not on the other managers: those would order back on this one)."
+        echo "# The other agents' and the operator's slices exist before it starts, so InaccessiblePaths below"
+        echo "# finds them (ordered on the slices, not on the other managers: those would order back on this one)."
         echo "Wants=${slices# }"
         echo "After=${slices# }"
     }
@@ -310,13 +318,19 @@ EOF
 EOF
     fi
     # Cgroup names others chose: the other agents', the operator's (its unit, scope and app names,
-    # activity and resource use) and the system's (every service name).
-    local opu="${OP_UID:-}" ia
-    [ -n "$opu" ] || opu="$(getent passwd "$OPERATOR" | cut -d: -f3)" || true
-    [[ "$opu" =~ ^[0-9]+$ ]] || die "no user $OPERATOR (the operator): its cgroup can't be hidden from $u"
-    ia=" -/sys/fs/cgroup/user.slice/user-$opu.slice"
-    for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
-    echo "InaccessiblePaths=${ia# } -/sys/fs/cgroup/system.slice"
+    # activity and resource use), the system's (every service name) and the VMs' and containers'.
+    if [ "$cgns" = 1 ]; then cat <<EOF
+# Its own cgroup namespace with a private, writable /sys/fs/cgroup (its delegation needs writing):
+# it sees its own subtree and nothing else, whoever logs in or out.
+ProtectControlGroups=private
+EOF
+    else
+        local ia=" -/sys/fs/cgroup/user.slice/user-$opu.slice"
+        for o in $(others_of "$r"); do ia="$ia -/sys/fs/cgroup/user.slice/user-$o.slice"; done
+        echo "# (A slice removed while it runs, the operator's at logout, comes back visible: the kernel drops"
+        echo "# a mount on a removed directory. systemd 257+ hides by namespace instead.)"
+        echo "InaccessiblePaths=${ia# } -/sys/fs/cgroup/system.slice -/sys/fs/cgroup/machine.slice"
+    fi
     cat <<EOF
 # Its claude-airlock config is root's: changed only by the operator.
 Environment=AIRLOCK_CONFIG=$ETC/$u.conf

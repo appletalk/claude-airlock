@@ -997,10 +997,12 @@ S
     grep -qx 'ProtectHome=tmpfs' "$d"
     grep -qx 'BindPaths=/home/agent /run/user/1100' "$d"
     grep -qx 'TemporaryFileSystem=/run:mode=0755,nosuid,nodev' "$d"
-    grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice -/sys/fs/cgroup/system.slice' "$d"
+    # systemd 257+: its own cgroup namespace (no other cgroup names), so no slice ordering either
+    grep -qx 'ProtectControlGroups=private' "$d"
+    run grep -c '^InaccessiblePaths=-/sys' "$d"; [ "$output" = 0 ]
     # no device nodes but the pseudo-devices and tun (GPU, KVM, vhost, VFIO, a binderfs: closed)
     grep -qx 'DevicePolicy=closed' "$d"; grep -qx 'DeviceAllow=/dev/net/tun rw' "$d"
-    grep -qx 'After=user-1101.slice user-1102.slice' "$d"
+    run grep -c '^After=' "$d"; [ "$output" = 0 ]
     grep -qx 'ProtectSystem=strict' "$d"
     c="$UC/agent.conf"
     grep -qx 'AIRLOCK_EGRESS_PROXY=/run/airlock-envoy/agent/agent-anthropic.sock' "$c"
@@ -1355,7 +1357,7 @@ PY
             agent-guard) want="/home/agent-guard /run/user/1102 /srv/agent-web/answers /srv/agent-web/log/agent-guard /srv/agent-web/quarantine " ;;
         esac
         [ "$rw" = "$want" ] || { echo "$u writes: $rw"; return 1; }
-        grep -q "^InaccessiblePaths=.*user-1100.slice" "$d"
+        grep -qx 'ProtectControlGroups=private' "$d"
         grep -qE '^MemoryMax=[0-9]+[MG]$' "$RENDER/etc/systemd/system/user-$n.slice.d/10-airlock-agents.conf"
         grep -qE '^CPUQuota=[0-9]+%$' "$RENDER/etc/systemd/system/user-$n.slice.d/10-airlock-agents.conf"
         c="$UC/$u.conf"
@@ -1468,8 +1470,6 @@ PY
     got() { grep -v '^#' "$1" | grep -v '^$'; }
     want1100='[Unit]
 RequiresMountsFor=/home/agent
-Wants=user-1101.slice user-1102.slice
-After=user-1101.slice user-1102.slice
 [Service]
 PrivateNetwork=yes
 PrivateTmp=yes
@@ -1491,7 +1491,7 @@ DeviceAllow=/dev/net/tun rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=~io_uring_setup:ENOSYS io_uring_enter:ENOSYS io_uring_register:ENOSYS
-InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice -/sys/fs/cgroup/system.slice
+ProtectControlGroups=private
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
     [ "$(got "$d/user@1100.service.d/10-airlock-agents.conf")" = "$want1100" ] || { diff <(echo "$want1100") <(got "$d/user@1100.service.d/10-airlock-agents.conf"); return 1; }
     for spec in agent-web:1101:"-/srv/agent-web/held -/srv/agent-web/reports -/srv/agent-web/log/agent-web":"-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1100.slice -/sys/fs/cgroup/user.slice/user-1102.slice -/sys/fs/cgroup/system.slice":"user-1100.slice user-1102.slice" \
@@ -1499,8 +1499,6 @@ Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/agent.conf'
         IFS=: read -r u n rw cg af <<<"$spec"
         want="[Unit]
 RequiresMountsFor=/home/$u
-Wants=$af
-After=$af
 [Service]
 PrivateNetwork=yes
 PrivateTmp=yes
@@ -1522,11 +1520,22 @@ DeviceAllow=/dev/net/tun rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=~io_uring_setup:ENOSYS io_uring_enter:ENOSYS io_uring_register:ENOSYS
-InaccessiblePaths=$cg
+ProtectControlGroups=private
 Environment=AIRLOCK_CONFIG=/etc/claude-airlock/agents/$u.conf"
         f="$d/user@$n.service.d/10-airlock-agents.conf"
         [ "$(got "$f")" = "$want" ] || { diff <(echo "$want") <(got "$f"); return 1; }
     done
+}
+
+@test "before systemd 257 the managers hide cgroups by path: the others', the operator's, the system's, the VMs'" {
+    AIRLOCK_AGENTS_SYSTEMD_VERSION=256 PATH="$T/bin:$PATH" "$REPO/agents/airlock-agents-apply" --render "$T/r256" >/dev/null
+    d="$T/r256/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+    run grep -c '^ProtectControlGroups=' "$d"; [ "$output" = 0 ]
+    # the slices exist before the manager starts (the operator's too), so the paths are found
+    grep -qx 'Wants=user-1101.slice user-1102.slice user-1000.slice' "$d"
+    grep -qx 'After=user-1101.slice user-1102.slice user-1000.slice' "$d"
+    grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/user.slice/user-1101.slice -/sys/fs/cgroup/user.slice/user-1102.slice -/sys/fs/cgroup/system.slice -/sys/fs/cgroup/machine.slice' "$d"
+    grep -qx 'DevicePolicy=closed' "$d"
 }
 
 @test "the agents' podman runs crun (root's config, loaded last); provision wants crun installed" {

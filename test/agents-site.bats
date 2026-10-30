@@ -85,9 +85,9 @@ OK='operator alice\nagent claude uid 1100 subuid 1100000 home 30G\n'
     grep -qx 'a /srv/claude-inbox/airlock  -    -     -    -   u::rwx,g::r-x,o::---,d:u::rwx,d:g::r-x,d:o::---' "$T/r/etc/tmpfiles.d/airlock-agents-inbox.conf"
     [ "$(grep -c 'meta skuid' "$T/r/etc/airlock-agents.nft")" = 2 ]
     d="$T/r/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
-    # no other agents to hide: only the operator's and the system's cgroups
-    grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/system.slice' "$d"
-    run grep -c '^After=' "$d"; [ "$output" = 0 ]
+    # no other agents to hide (systemd unknown here, so by path): the operator's, the system's, the VMs'
+    grep -qx 'InaccessiblePaths=-/sys/fs/cgroup/user.slice/user-1000.slice -/sys/fs/cgroup/system.slice -/sys/fs/cgroup/machine.slice' "$d"
+    grep -qx 'After=user-1000.slice' "$d"
     run "$A" --user-conf claude "$T/site"
     [ "$status" -eq 0 ]; [[ "$output" != *AIRLOCK_EXTRA_MOUNTS* ]]
 }

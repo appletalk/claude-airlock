@@ -287,6 +287,10 @@ for spec in $users; do
         mcheck missing denied "user@$n: $o's cgroups hidden" "$u" list "/sys/fs/cgroup/user.slice/user-$on.slice"
     done
     mcheck missing denied "user@$n: no $OP's home" "$u" list "$OP_HOME"
+    # nor the operator's, the system's or the VMs' cgroup names (by namespace on systemd 257+)
+    for cg in "/sys/fs/cgroup/user.slice/user-$(id -u "$OP").slice" /sys/fs/cgroup/system.slice /sys/fs/cgroup/machine.slice; do
+        [ -d "$cg" ] && mcheck missing denied "user@$n: ${cg#/sys/fs/cgroup/} hidden" "$u" list "$cg"
+    done
     # Nothing of /mnt (WSL: the Windows drives, WSLg's sockets), no hypervisor devices, no vsock
     if [ -d /mnt ]; then
         mcheck ok "user@$n: /mnt is empty here (on WSL: no drives, no WSLg sockets)" "$u" empty /mnt
