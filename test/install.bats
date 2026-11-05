@@ -139,10 +139,17 @@ EOF
   df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
   grep -qE '^ARG ANSIBLE_WINDOWS_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$df"
   grep -qE '^ARG ANSIBLE_WINDOWS_SHA256=[0-9a-f]{64}$' "$df"
-  # the tarball is checked before install, the install takes no dependencies, and nothing
-  # on those lines can swallow a failure (the RUN is `set -e`)
-  awk '/ARG ANSIBLE_WINDOWS_VERSION/{f=1} f&&/set -eux/{e=1} f&&/sha256sum -c -/{if(!i)ok=1} f&&/collection install --no-deps/{i=1} f&&/collection list/{exit} END{exit !(e&&ok&&i)}' "$df"
-  [ "$(awk '/ARG ANSIBLE_WINDOWS_VERSION/{f=1} f{print} f&&/collection list/{exit}' "$df" | grep -c '||')" -eq 0 ]
+  block="$(awk '/^ARG ANSIBLE_WINDOWS_VERSION/{f=1} f{print} f&&/collection list/{exit}' "$df")"
+  # the versioned tarball is fetched to $t, checked against the pinned sha256, and that
+  # same file is installed, without dependencies, in that order
+  grep -qF 'ansible-windows-${ANSIBLE_WINDOWS_VERSION}.tar.gz" -o "$t"; \' <<<"$block"
+  grep -qxF '    echo "${ANSIBLE_WINDOWS_SHA256}  $t" | sha256sum -c -; \' <<<"$block"
+  grep -qxF '    ansible-galaxy collection install --no-deps --offline -p /usr/share/ansible/collections "$t"; \' <<<"$block"
+  awk '/sha256sum -c -/{c=NR} /collection install/{i=NR} END{exit !(c && i && c < i)}' <<<"$block"
+  # ...under `set -e`, with nothing that could swallow a failure. A guard against
+  # accidental edits, not a proof: the build itself is the behavioural test.
+  grep -qxF 'RUN set -eux; \' <<<"$block"
+  refute grep -qE 'set \+e|\|\||\btrue\b|^ *: ' <<<"$block"
 }
 
 @test "the ansible venv installs only hash-pinned packages" {
