@@ -46,7 +46,10 @@ the components and reports usage upstream). They fail rather than lie. A project
 really needs one opens a narrow `egress =` in `.airlock/config` for a one-time fetch, and
 caches the result with `artifact_dirs` (e.g. `.terraform`), which persists across sessions.
 `ansible.windows` is the one collection the image carries itself: ansible-core has no
-Windows modules, and without it every `win_*` task fails syntax-check.
+Windows modules, and without it every `win_*` task fails syntax-check. It lives in Ansible's default
+collection path, `/usr/share/ansible/collections`: a project whose `ansible.cfg` sets
+`collections_path` (or that exports `ANSIBLE_COLLECTIONS_PATH`) must keep that directory in
+the list, or the collection disappears.
 
 **Two settings are load-bearing:**
 

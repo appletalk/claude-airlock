@@ -135,6 +135,16 @@ EOF
   awk '/ARG NODE_VERSION/{f=1} f&&/sha256sum -c/{ok=1} f&&/node --version/{exit} END{exit !ok}' "$df"
 }
 
+@test "ansible.windows is pinned by version and sha256, and the pin is checked" {
+  df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  grep -qE '^ARG ANSIBLE_WINDOWS_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$df"
+  grep -qE '^ARG ANSIBLE_WINDOWS_SHA256=[0-9a-f]{64}$' "$df"
+  # the tarball is checked before install, the install takes no dependencies, and nothing
+  # on those lines can swallow a failure (the RUN is `set -e`)
+  awk '/ARG ANSIBLE_WINDOWS_VERSION/{f=1} f&&/set -eux/{e=1} f&&/sha256sum -c -/{if(!i)ok=1} f&&/collection install --no-deps/{i=1} f&&/collection list/{exit} END{exit !(e&&ok&&i)}' "$df"
+  [ "$(awk '/ARG ANSIBLE_WINDOWS_VERSION/{f=1} f{print} f&&/collection list/{exit}' "$df" | grep -c '||')" -eq 0 ]
+}
+
 @test "the ansible venv installs only hash-pinned packages" {
   df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
   req="$BATS_TEST_DIRNAME/../image/dev/ansible-requirements.txt"

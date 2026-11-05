@@ -199,6 +199,7 @@ RUN set -eux; \
 #   terraform fmt -check             HCL syntax + formatting (exit 3 = drift, 2 = syntax error)
 #   tflint                           the terraform ruleset bundled INSIDE the binary
 #   ansible-lint                     playbook/role lint, offline (see ANSIBLE_LINT_NODEPS)
+#   ansible-playbook --syntax-check  with ansible.windows: win_* module names (not arguments)
 #   vector validate --no-environment config parse + topology, no component/health checks
 #   alloy fmt -t / alloy validate    Alloy syntax + component/argument schema check
 #   Invoke-ScriptAnalyzer            PowerShell script lint
@@ -398,13 +399,15 @@ RUN set -eux; \
 ARG ANSIBLE_WINDOWS_VERSION=3.9.2
 ARG ANSIBLE_WINDOWS_SHA256=d1452eb1fa6b55ec75a81be32daa08e9ab0d5086dc3ad5ec8687e3a80b366422
 RUN set -eux; \
+    export ANSIBLE_HOME=/tmp/ansible-home; \
     t="/tmp/ansible-windows-${ANSIBLE_WINDOWS_VERSION}.tar.gz"; \
     curl -fsSL "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/ansible-windows-${ANSIBLE_WINDOWS_VERSION}.tar.gz" -o "$t"; \
     echo "${ANSIBLE_WINDOWS_SHA256}  $t" | sha256sum -c -; \
     ansible-galaxy collection install --no-deps --offline -p /usr/share/ansible/collections "$t"; \
-    rm -f "$t"; \
     chmod -R a+rX /usr/share/ansible; \
-    ansible-galaxy collection list ansible.windows -p /usr/share/ansible/collections | grep -E "^ansible\.windows +${ANSIBLE_WINDOWS_VERSION} *\$"
+    ansible-galaxy collection list ansible.windows -p /usr/share/ansible/collections \
+      | awk -v v="$ANSIBLE_WINDOWS_VERSION" '$1 == "ansible.windows" && $2 == v {ok=1} END {exit !ok}'; \
+    rm -rf "$t" "$ANSIBLE_HOME"
 
 # ============================================================================
 # Infra clients - kubectl, helm, sops, tea, drill.

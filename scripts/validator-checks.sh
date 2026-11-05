@@ -99,11 +99,20 @@ expect_fail "flags an unnamed, non-FQCN task"             ansible-lint --offline
 # so it cannot be the name check. The good fixture is also the presence check: without
 # the collection, syntax-check rejects every win_* task, valid or not. Module ARGUMENTS
 # are not checked by anything offline: ansible-lint's args rule skips PowerShell modules.
+# ansible-doc and ansible-lint both exit 0 on a module they cannot find, so those two
+# checks assert on the output instead of the exit status.
 hdr "ansible.windows collection (offline)"
+# Invoked indirectly through expect_ok, which shellcheck cannot follow.
+# shellcheck disable=SC2317,SC2329
+{
+unresolved() { local out; out="$(ansible-playbook --syntax-check "$1" 2>&1)"; grep -q "couldn't resolve module/action" <<<"$out"; }
+doc_options() { ansible-doc -j "$1" | python3 -I -c 'import json, sys; sys.exit("path" not in json.load(sys.stdin)[sys.argv[1]]["doc"]["options"])' "$1"; }
+lint_resolves() { local out; out="$(ansible-lint --offline "$1" 2>&1)" || { printf '%s\n' "$out"; return 1; }; ! grep -q 'Unable to load module' <<<"$out"; }
+}
 expect_ok   "syntax-check resolves ansible.windows modules"     ansible-playbook --syntax-check ansible/windows-good.yml
-expect_fail "syntax-check rejects an unknown win_* module"      ansible-playbook --syntax-check ansible/windows-bad-module.yml
-expect_ok   "ansible-doc reads a module's options"              ansible-doc ansible.windows.win_file
-expect_ok   "ansible-lint accepts a clean Windows play"         ansible-lint --offline ansible/windows-good.yml
+expect_ok   "syntax-check rejects an unknown win_* module"      unresolved ansible/windows-bad-module.yml
+expect_ok   "ansible-doc reads win_file's options"              doc_options ansible.windows.win_file
+expect_ok   "ansible-lint resolves and passes a Windows play"   lint_resolves ansible/windows-good.yml
 
 # PSScriptAnalyzer reports findings as OBJECTS and still exits 0, so exit status
 # is meaningless here -- assert on the finding count instead.
