@@ -49,22 +49,45 @@ xrc="${PIPESTATUS[1]}"
 # pairs it never ran have no .rc and must fail the run below, as must xargs failing.
 rc=0
 [ "$xrc" -eq 0 ] || rc=1
+# Each `!!` line is printed where it happens and again in the summary at the bottom.
+problems=()
+note() { echo "$2"; problems+=("  [$1] $2"); }
 for e in $ENGINES; do
   echo "==> bats (ENGINE=$e)"
   tests=0; failed=0
   for f in "${files[@]}"; do
     log="$out/$e.$(basename "$f").tap"
-    [ -f "$log.rc" ] || { echo "!! $f did not run"; rc=1; continue; }
+    [ -f "$log.rc" ] || { note "$e" "!! $f did not run"; rc=1; continue; }
     cat "$log"
     tests=$((tests + $(grep -cE '^(not )?ok ' "$log")))
     failed=$((failed + $(grep -cE '^not ok ' "$log")))
     case "$(cat "$log.rc")" in
       0)       ;;
-      124)     rc=1; echo "!! $f timed out after ${TIMEOUT}s (output above is as far as it got)" ;;
-      137)     rc=1; echo "!! $f was killed (rc=137: a timeout that ignored TERM, or e.g. an OOM kill)" ;;
-      *)       rc=1; [ -s "$log" ] || echo "!! $f produced no output" ;;
+      124)     rc=1; note "$e" "!! $f timed out after ${TIMEOUT}s (output above is as far as it got)" ;;
+      137)     rc=1; note "$e" "!! $f was killed (rc=137: a timeout that ignored TERM, or e.g. an OOM kill)" ;;
+      *)       rc=1; [ -s "$log" ] || note "$e" "!! $f produced no output" ;;
     esac
   done
   echo "==> ENGINE=$e: $tests tests, $failed failed"
 done
+
+# Repeat every failure at the bottom, so a long log needs no searching: the `not ok` line,
+# its file, and the `#` diagnostic lines bats prints under it (the failed command, output).
+summary="$(for e in $ENGINES; do
+  for f in "${files[@]}"; do
+    log="$out/$e.$(basename "$f").tap"
+    [ -f "$log" ] || continue
+    awk -v where="$e $f" '
+      /^not ok /    { print "  [" where "] " $0; d=1; next }
+      d && /^# /    { print "      " $0; next }
+                    { d=0 }
+    ' "$log"
+  done
+done)"
+if [ -n "$summary" ] || [ ${#problems[@]} -gt 0 ]; then
+  echo
+  echo "==> FAILED"
+  [ -z "$summary" ] || printf '%s\n' "$summary"
+  [ ${#problems[@]} -eq 0 ] || printf '%s\n' "${problems[@]}"
+fi
 exit "$rc"

@@ -149,7 +149,7 @@ EOF
   # ...under `set -e`, with nothing that could swallow a failure. A guard against
   # accidental edits, not a proof: the build itself is the behavioural test.
   grep -qxF 'RUN set -eux; \' <<<"$block"
-  refute grep -qE 'set \+e|\|\||\btrue\b|^ *: ' <<<"$block"
+  ! grep -qE 'set \+e|\|\||\btrue\b|^ *: ' <<<"$block" || false
 }
 
 @test "the ansible venv installs only hash-pinned packages" {

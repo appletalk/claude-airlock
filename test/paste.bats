@@ -357,6 +357,16 @@ EOF
 @test "filenames have ONE shape, so list order is creation order reversed" {
   p="$(mkproj)"; export AIRLOCK_PASTE_PROJECT="$p" WAYLAND_DISPLAY=wayland-0 CLIPTEST=png
   stub_clipboard
+  # A clock that only moves forward, one second per call, through the real date (so the
+  # name's shape is still date's). The order under test is the code's, not the runner's
+  # clock: three real pastes milliseconds apart are reordered by any backward clock step.
+  cat > "$STUBBIN/date" <<EOF
+#!/usr/bin/env bash
+n="\$(cat "$BATS_TEST_TMPDIR/clock" 2>/dev/null || echo 0)"
+echo "\$((n + 1))" > "$BATS_TEST_TMPDIR/clock"
+exec $(command -v date) -u -d "@\$((1767225600 + n))" "\$@"
+EOF
+  chmod +x "$STUBBIN/date"
   run _paste "$p"; first="$output"
   run _paste "$p"; second="$output"
   run _paste "$p"; third="$output"
@@ -365,6 +375,7 @@ EOF
     [[ "$(basename "$f")" =~ ^[0-9]{8}-[0-9]{9}\.png$ ]]   # YYYYMMDD-HHMMSSmmm.png
   done
   run _paste "$p" list 3
+  printf 'created: %s\n' "$first" "$second" "$third"; printf 'listed:\n%s\n' "$output"   # shown on failure
   [ "${lines[0]}" = "$third" ]
   [ "${lines[1]}" = "$second" ]
   [ "${lines[2]}" = "$first" ]
