@@ -1,0 +1,9 @@
+---
+- name: Example Windows play
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Ensure a directory exists
+      ansible.windows.win_file:
+        path: C:\Temp\example
+        state: directory

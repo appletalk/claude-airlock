@@ -94,6 +94,17 @@ hdr "ansible-lint (offline, ANSIBLE_LINT_NODEPS=1)"
 expect_ok   "accepts a clean play"                        ansible-lint --offline ansible/good.yml
 expect_fail "flags an unnamed, non-FQCN task"             ansible-lint --offline ansible/bad.yml
 
+# ansible.windows is baked in (image/dev/Dockerfile). Module names are checked by
+# syntax-check: ansible-lint only WARNS on a module it cannot resolve and still passes,
+# so it cannot be the name check. The good fixture is also the presence check: without
+# the collection, syntax-check rejects every win_* task, valid or not. Module ARGUMENTS
+# are not checked by anything offline: ansible-lint's args rule skips PowerShell modules.
+hdr "ansible.windows collection (offline)"
+expect_ok   "syntax-check resolves ansible.windows modules"     ansible-playbook --syntax-check ansible/windows-good.yml
+expect_fail "syntax-check rejects an unknown win_* module"      ansible-playbook --syntax-check ansible/windows-bad-module.yml
+expect_ok   "ansible-doc reads a module's options"              ansible-doc ansible.windows.win_file
+expect_ok   "ansible-lint accepts a clean Windows play"         ansible-lint --offline ansible/windows-good.yml
+
 # PSScriptAnalyzer reports findings as OBJECTS and still exits 0, so exit status
 # is meaningless here -- assert on the finding count instead.
 hdr "PSScriptAnalyzer"

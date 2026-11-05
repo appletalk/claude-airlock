@@ -5,7 +5,8 @@
 #
 # This is the default image for real work. Toolchains that need to DOWNLOAD a
 # per-project dependency graph before they can do anything (Terraform providers,
-# Ansible collections, tflint ruleset plugins) are deliberately NOT enabled here:
+# Ansible collections other than ansible.windows, tflint ruleset plugins) are
+# deliberately NOT enabled here:
 # see the "config validators" section below for exactly what is and is not in
 # scope. Genuinely heavy, specialized stacks (Playwright browsers) still go in
 # opt-in images layered on top of THIS one.
@@ -211,7 +212,7 @@ RUN set -eux; \
 # A project that needs those opens a narrow `egress =` in .airlock/config for a
 # one-time fetch and caches the result via `artifact_dirs` (e.g. `.terraform`),
 # which persists across sessions. It is not this image's job to guess a provider
-# or collection set.
+# or collection set (ansible.windows, below, is the one exception).
 #
 # Downloads are pinned by version AND sha256 (per arch). Unlike the Node layer
 # above, which trusts TLS alone, these pins also detect an upstream re-tag: a
@@ -385,6 +386,25 @@ RUN set -eux; \
       > /usr/local/bin/ansible-lint; \
     chmod 0555 /usr/local/bin/ansible-lint; \
     ansible-lint --version
+
+# ansible.windows: the one collection baked in (the scope note above keeps every other
+# collection per project). Ansible ships no Windows modules in ansible-core, so without it
+# `--syntax-check` rejects every win_* task and ansible-lint quietly skips them; with it a
+# box can check Windows playbooks' module names offline. Only the collection: pywinrm and
+# Kerberos are for connecting to a Windows host, which a box has no path to. No collection
+# dependencies. Pinned like the downloads below: version + sha256 of Galaxy's tarball.
+# Bump: pick a release at least 7 days old, take the sha256 from Galaxy's v3 API, and
+# check it against `curl -fsSL <download_url> | sha256sum`.
+ARG ANSIBLE_WINDOWS_VERSION=3.9.2
+ARG ANSIBLE_WINDOWS_SHA256=d1452eb1fa6b55ec75a81be32daa08e9ab0d5086dc3ad5ec8687e3a80b366422
+RUN set -eux; \
+    t="/tmp/ansible-windows-${ANSIBLE_WINDOWS_VERSION}.tar.gz"; \
+    curl -fsSL "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/ansible-windows-${ANSIBLE_WINDOWS_VERSION}.tar.gz" -o "$t"; \
+    echo "${ANSIBLE_WINDOWS_SHA256}  $t" | sha256sum -c -; \
+    ansible-galaxy collection install --no-deps --offline -p /usr/share/ansible/collections "$t"; \
+    rm -f "$t"; \
+    chmod -R a+rX /usr/share/ansible; \
+    ansible-galaxy collection list ansible.windows -p /usr/share/ansible/collections | grep -E "^ansible\.windows +${ANSIBLE_WINDOWS_VERSION} *\$"
 
 # ============================================================================
 # Infra clients - kubectl, helm, sops, tea, drill.

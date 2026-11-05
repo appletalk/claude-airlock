@@ -1,0 +1,8 @@
+---
+- name: Example Windows play
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Call a module the collection does not have
+      ansible.windows.win_doesnotexist:
+        path: C:\Temp\example

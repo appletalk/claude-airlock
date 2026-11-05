@@ -29,6 +29,7 @@ provider downloads, no collection resolution, no plugin fetches. Syntax and lint
 | `terraform fmt -check` | HCL syntax and formatting (exit 3 = drift, 2 = syntax error) |
 | `tflint` | the `terraform` ruleset bundled inside the binary |
 | `ansible-lint` | playbook and role lint (`ANSIBLE_LINT_NODEPS=1` is set image-wide, see below) |
+| `ansible-playbook --syntax-check`, `ansible-doc` with `ansible.windows` | the one baked-in collection: Windows playbooks' `win_*` module names resolve offline, and `ansible-doc` shows their options. Arguments are not checked: ansible-lint's `args` rule skips PowerShell modules. pywinrm is not included (a box cannot reach a Windows host) |
 | `vector validate --no-environment` | config parse and topology, no component or health checks |
 | `alloy fmt -t`, `alloy validate` | Alloy syntax and formatting, component references and argument schemas |
 | `envoy --mode validate -c` | Envoy config schema, references and filters, no listener opened. The binary also runs a whole proxy against local upstreams (`--disable-hot-restart`), to test a config end to end |
@@ -44,6 +45,8 @@ a no-op in a box: `terraform init` / `validate`, `tflint --init` (external rules
 the components and reports usage upstream). They fail rather than lie. A project that
 really needs one opens a narrow `egress =` in `.airlock/config` for a one-time fetch, and
 caches the result with `artifact_dirs` (e.g. `.terraform`), which persists across sessions.
+`ansible.windows` is the one collection the image carries itself: ansible-core has no
+Windows modules, and without it every `win_*` task fails syntax-check.
 
 **Two settings are load-bearing:**
 
@@ -68,6 +71,7 @@ with npm and Playwright's own installer, at whatever version is current.
 
 - Node, by tarball checksum;
 - the ansible-lint venv, by a hash for every package (`image/dev/ansible-requirements.txt`);
+- the `ansible.windows` collection, by Galaxy tarball checksum;
 - Claude Code, through a vendored copy of its installer (`image/claude-install.sh`), which
   checks the binary against the release manifest. `make claude-installer-diff` shows what
   upstream has changed; see [install.md](install.md#the-claude-code-installer-is-vendored).
