@@ -160,6 +160,7 @@ hdr "distro python modules (no PyPI needed)"
 expect_ok   "cryptography binding loads"       python3 -c 'from cryptography.hazmat.primitives.asymmetric import rsa; rsa.generate_private_key(public_exponent=65537, key_size=2048)'
 expect_ok   "requests imports"                 python3 -c 'import requests'
 expect_ok   "openpyxl builds a workbook"       python3 -c 'import lxml.etree, openpyxl; openpyxl.Workbook()'
+expect_ok   "jinja2 renders a template"        python3 -c 'import jinja2, sys; sys.exit(jinja2.Template("{{ x }}").render(x="ok") != "ok")'
 
 # The infra clients' offline halves (image/dev/Dockerfile, "Infra clients"). Each client
 # is otherwise only useful against an endpoint a project grants, so these are the parts
