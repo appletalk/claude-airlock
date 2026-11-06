@@ -1,8 +1,10 @@
 # Egress through a host proxy: `airlock egress proxy`
 
-The third egress posture, beside `minimal` and `dev`. The box gets **no network at all**.
-Its only way out is one host proxy's Unix socket, and the proxy decides what is reachable
-(and can log every connection).
+The third egress posture, beside `minimal` and `dev`, and the recommended one with
+[airlock-envoy](https://github.com/appletalk/airlock-envoy) as the proxy
+([setup.md](setup.md), level 2). The box gets **no network at all**. Its only way out is one
+host proxy's Unix socket, and the proxy decides what is reachable (and can log every
+connection).
 
 ## Use it
 

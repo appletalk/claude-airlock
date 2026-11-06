@@ -10,6 +10,12 @@ so auto mode, `--dangerously-skip-permissions` and internet access are contained
 The container and firewall are the moat. The launcher, `airlock`, assembles the container
 command line and keeps grants on the host, where the box cannot tamper with them.
 
+**Recommended: run boxes behind [airlock-envoy](https://github.com/appletalk/airlock-envoy).**
+The box then has no network at all. Its only way out is a host proxy socket with its own
+allowlist, every connection is logged, and service credentials (GitHub, git, a cluster) are
+added by the proxy, so they never enter the box. It runs as a systemd service you install as
+root. The in-box firewall alone (setup step 2) is the quick start.
+
 ## What it protects against
 
 Assume the agent may misbehave: a prompt injection, a bad tool call.
@@ -81,9 +87,10 @@ This links `airlock` into `~/.local/bin`, writes a default host config, builds t
 real throwaway box and makes it *prove* containment: an allowed host must be reachable and
 a denied host must not be. If that fails, the install says so loudly.
 
-This is level 1 of [docs/setup.md](docs/setup.md), which
-lists the optional levels above it: airlock-envoy, then agent users. It also covers locking down
-the Claude you run directly on the host, which every level relies on.
+This is level 1 of [docs/setup.md](docs/setup.md). Level 2, airlock-envoy, is the
+recommended setup: boxes with no network except a proxy you control, and credentials kept
+outside the box. Agent users come after it. setup.md also covers locking down the Claude you
+run directly on the host, which every level relies on.
 
 What the install does in detail, and how updates work: [docs/install.md](docs/install.md).
 

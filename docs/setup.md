@@ -1,11 +1,12 @@
 # Setup
 
-Install in levels. Stop at the one that gives you what you need.
+Install in levels. **Level 2, airlock-envoy, is the recommended setup**; level 1 alone is the
+quick start. The levels above it add agents.
 
 | Level | You get | Install |
 |---|---|---|
 | 1. claude-airlock | Claude in a sandboxed container, with a firewall | `make install-airlock` |
-| 2. airlock-envoy | boxes with no network except a proxy you control; credentials kept outside the box | airlock-envoy's install |
+| 2. airlock-envoy (recommended) | boxes with no network except a proxy you control; credentials kept outside the box | airlock-envoy's install |
 | 3. Agent users | the agent in its own Unix account, with sessions you attach to | `sudo make install-agents` |
 | 4. Web research | a separate user researches the web for the agent; answers are checked first | the same install, answering yes |
 
