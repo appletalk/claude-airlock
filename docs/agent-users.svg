@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-label="Three Unix users, each running Claude in its own airlock box: claude, the agent you attach to; claude-web, which researches the web for it; and claude-guard, which checks each answer before the agent sees it. A question goes from claude to claude-web, the report to claude-guard, and the checked answer back. airlock-envoy gives each user its own listeners, and the agent never gets the open web.">
+<defs>
+<marker id="a-box" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+<marker id="a-envoy" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6366f1"/></marker>
+<marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+<marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#059669"/></marker>
+<marker id="a-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d97706"/></marker>
+<marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+<marker id="a-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#cbd5e1"/></marker>
+<marker id="a-pblue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+<marker id="a-pamber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d97706"/></marker>
+<marker id="a-pgreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#059669"/></marker>
+<marker id="a-mute" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+</defs>
+<rect x="1" y="1" width="1198" height="638" rx="24" fill="#f8fafc" stroke="#e2e8f0" stroke-width="2"/>
+<rect x="40" y="22" width="300" height="62" rx="14" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="2"/>
+<text x="190.0" y="49.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#334155" text-anchor="middle">You</text>
+<text x="190.0" y="69.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">claude-agent: start, attach, approve</text>
+<path d="M120,84 L120,128" fill="none" stroke="#64748b" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-mute)"/>
+<text x="128" y="112" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#64748b" text-anchor="start">attach</text>
+<text x="1160" y="46" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="end">every user: own uid, no network of its own,</text>
+<text x="1160" y="64" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="end">memory and CPU limits, a home it can't overfill</text>
+<rect x="40" y="130" width="320" height="222" rx="20" fill="#ffffff" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 6"/>
+<text x="200" y="162" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#1e3a8a" text-anchor="middle">claude</text>
+<text x="200" y="182" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">the agent</text>
+<rect x="60" y="200" width="280" height="70" rx="14" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="200.0" y="231.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#1e3a8a" text-anchor="middle">airlock box</text>
+<text x="200.0" y="251.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">Claude Code, your project</text>
+<text x="200" y="304" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">never gets the web</text>
+<text x="200" y="324" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">you attach to its sessions</text>
+<rect x="440" y="130" width="320" height="222" rx="20" fill="#ffffff" stroke="#d97706" stroke-width="2" stroke-dasharray="7 6"/>
+<text x="600" y="162" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#78350f" text-anchor="middle">claude-web</text>
+<text x="600" y="182" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">researches the web</text>
+<rect x="460" y="200" width="280" height="70" rx="14" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+<text x="600.0" y="231.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#78350f" text-anchor="middle">research box</text>
+<text x="600.0" y="251.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">WebSearch, WebFetch only</text>
+<text x="600" y="304" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="700" fill="#78350f" text-anchor="middle">a fresh box per question</text>
+<text x="600" y="324" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">no shell</text>
+<rect x="840" y="130" width="320" height="222" rx="20" fill="#ffffff" stroke="#059669" stroke-width="2" stroke-dasharray="7 6"/>
+<text x="1000" y="162" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#064e3b" text-anchor="middle">claude-guard</text>
+<text x="1000" y="182" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">checks every answer</text>
+<rect x="860" y="200" width="280" height="70" rx="14" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
+<text x="1000.0" y="231.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#064e3b" text-anchor="middle">gate</text>
+<text x="1000.0" y="251.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">scanner + Claude, no tools</text>
+<text x="1000" y="304" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="700" fill="#064e3b" text-anchor="middle">anything odd is held</text>
+<text x="1000" y="324" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">for you to release</text>
+<path d="M362,235 L438,235" fill="none" stroke="#d97706" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-amber)"/>
+<text x="400" y="225" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#d97706" text-anchor="middle">1 ask</text>
+<text x="400" y="256" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#475569" text-anchor="middle">checked first</text>
+<path d="M762,235 L838,235" fill="none" stroke="#059669" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-green)"/>
+<text x="800" y="225" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#059669" text-anchor="middle">2 report</text>
+<text x="800" y="256" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#475569" text-anchor="middle">untrusted</text>
+<path d="M1000,128 L1000,104 L300,104 L300,128" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-blue)"/>
+<text x="650" y="98" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#2563eb" text-anchor="middle">3 answer, read as data, never as instructions</text>
+<rect x="40" y="400" width="1120" height="218" rx="22" fill="#eef2ff" stroke="#6366f1" stroke-width="2"/>
+<rect x="60" y="428" width="280" height="66" rx="14" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="200.0" y="457.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#1e3a8a" text-anchor="middle">Anthropic</text>
+<text x="200.0" y="477.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">and hosts you list</text>
+<path d="M200,354 L200,426" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-blue)"/>
+<rect x="460" y="428" width="280" height="66" rx="14" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+<text x="600.0" y="457.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#78350f" text-anchor="middle">Anthropic + web</text>
+<text x="600.0" y="477.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">the public internet</text>
+<path d="M600,354 L600,426" fill="none" stroke="#d97706" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-amber)"/>
+<rect x="860" y="428" width="280" height="66" rx="14" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="1000.0" y="457.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#1e3a8a" text-anchor="middle">Anthropic</text>
+<text x="1000.0" y="477.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">nothing else</text>
+<path d="M1000,354 L1000,426" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-blue)"/>
+<text x="222" y="382" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#475569" text-anchor="start">own listeners</text>
+<text x="600" y="546" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#312e81" text-anchor="middle">airlock-envoy</text>
+<text x="600" y="570" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">each user gets its own sockets and allowlist; the agent's never include the web</text>
+<text x="600" y="590" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">service credentials are added by Envoy, so none of them enter a box</text>
+</svg>
