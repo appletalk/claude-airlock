@@ -170,12 +170,12 @@ RUN set -eux; \
 # the release); it used to float to "newest v24.x at build time" on TLS alone, the one
 # download in the image a re-tag or a bad mirror could change silently. Bump with the
 # other pins.
-ARG NODE_VERSION=24.22.1
+ARG NODE_VERSION=24.22.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) narch=x64;   sha=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ;; \
-      arm64) narch=arm64; sha=dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e ;; \
+      amd64) narch=x64;   sha=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75 ;; \
+      arm64) narch=arm64; sha=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${narch}.tar.xz" -o /tmp/node.tar.xz; \
@@ -221,12 +221,12 @@ RUN set -eux; \
 
 # promtool from the Prometheus release tarball. Only the promtool binary is
 # extracted; the prometheus server itself is ~half the tarball and we never run it.
-ARG PROMETHEUS_VERSION=3.15.1
+ARG PROMETHEUS_VERSION=3.16.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=amd64; sha=6a726885328ad9efebbf36e876ce2fb6225468a71fd1e7ce3ba666d5f4d97a84 ;; \
-      arm64) parch=arm64; sha=ceb6d21493c37ca0b4513b147642797c68cf39a0f50a444d50e1e80c74f21b26 ;; \
+      amd64) parch=amd64; sha=68727009472a2c02e1ff7f062fd5b3e637285bffc8fc2d340c76fb449d6e0f34 ;; \
+      arm64) parch=arm64; sha=fd8571b8162f4020232d886f17340bcf92e1722985ae3b4c1d096157826c0fbe ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     d="prometheus-${PROMETHEUS_VERSION}.linux-${parch}"; \
@@ -239,15 +239,15 @@ RUN set -eux; \
 
 # terraform: `fmt` only (see scope note above). tflint carries its terraform
 # ruleset inside the binary, so it lints with no plugin download.
-ARG TERRAFORM_VERSION=1.17.0
-ARG TFLINT_VERSION=0.65.0
+ARG TERRAFORM_VERSION=1.17.1
+ARG TFLINT_VERSION=0.66.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) tfsha=c168cab7c637a8769fdb90089ddd19de701bc6ff8aca64dc2e2185fe46f59f67; \
-             tlsha=d4c545ed2e29d6338604b586f34f544f380f70f243aa72f7b484713835eaec61 ;; \
-      arm64) tfsha=f32478134ffc6d710eec474bbd316652cdddc0f4e336973a3745e8d3a3309cdf; \
-             tlsha=843017c47a98be1de4d88fa038daa293770fe25cd01656c4f08b2e30d1d3b3a0 ;; \
+      amd64) tfsha=4638628058e71a55212b1c563712eac03b902128f40740f3dc8174df12135061; \
+             tlsha=22be11cadc25cd02401e94c0ccc91aa63467debb8485c2a755d98f4c0a9d1e2e ;; \
+      arm64) tfsha=988e950a1c23058093b0e66ab2d5fb53fc18345ecfbd5871acf51dbac9325edd; \
+             tlsha=1105a0a5ddee7cdac7957a3475571a946b839192ea1bc0c722c6c4686001067e ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${arch}.zip" -o /tmp/tf.zip; \
@@ -265,12 +265,12 @@ ENV CHECKPOINT_DISABLE=1
 
 # vector: the musl static build, so the binary carries its own libc and stays
 # decoupled from the Debian base.
-ARG VECTOR_VERSION=0.60.0
+ARG VECTOR_VERSION=0.61.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) varch=x86_64;  sha=9584f402e67fea7ff2dd846f0a8bbb56fa32951bded11749093ff3780e1513cf ;; \
-      arm64) varch=aarch64; sha=e2984f826aa61bf3ea98fba4cccde2437f645794b2f8a3d45c97df9594dcfbd1 ;; \
+      amd64) varch=x86_64;  sha=e1609b8a55ef1c1fc4fd88633e2bc6366e9a4022f6f1ae846cadd27af5237621 ;; \
+      arm64) varch=aarch64; sha=12d7e91db2e447003558c955c4f510b17ed1d77340757f3e591e5222e464675c ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/vectordotdev/vector/releases/download/v${VECTOR_VERSION}/vector-${VECTOR_VERSION}-${varch}-unknown-linux-musl.tar.gz" -o /tmp/vector.tgz; \
@@ -290,12 +290,12 @@ RUN set -eux; \
 # Note the size: this is a ~450MB binary (every component plus the embedded UI are
 # linked in, and Go binaries don't strip usefully). It is the single largest tool
 # in the image -- roughly promtool + terraform + vector combined.
-ARG ALLOY_VERSION=1.21.2
+ARG ALLOY_VERSION=1.21.3
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) sha=1eadb46a0640127184250173acd9b4145e4d590680db37ffe66fa8afd07f04cf ;; \
-      arm64) sha=3722a7494bce5ff100c18f0051e63799ad9e89546ca75022cb1dc8dc676af401 ;; \
+      amd64) sha=50d23af2d0f98c00beac6ce9a365693e60f87fb76b6cad6fe1d161e80588af6d ;; \
+      arm64) sha=ca2f383cc60491877b21aef50c54af6a198f6c861c2c4b80f41ec49ad73b1b93 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-${arch}.zip" -o /tmp/alloy.zip; \
