@@ -135,6 +135,15 @@ EOF
   awk '/ARG NODE_VERSION/{f=1} f&&/sha256sum -c/{ok=1} f&&/node --version/{exit} END{exit !ok}' "$df"
 }
 
+@test "Go is pinned by version and per-arch sha256, and never fetches another toolchain" {
+  df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
+  grep -qE '^ARG GO_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$df"
+  block="$(awk '/^ARG GO_VERSION/{f=1} f{print} f&&/^ENV GOTOOLCHAIN/{exit}' "$df")"
+  [ "$(grep -cE 'sha=[0-9a-f]{64} ;;' <<<"$block")" -eq 2 ]
+  grep -qF 'sha256sum -c -' <<<"$block"
+  grep -qF 'ENV GOTOOLCHAIN=local' <<<"$block"
+}
+
 @test "ansible.windows is pinned by version and sha256, and the pin is checked" {
   df="$BATS_TEST_DIRNAME/../image/dev/Dockerfile"
   grep -qE '^ARG ANSIBLE_WINDOWS_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$df"

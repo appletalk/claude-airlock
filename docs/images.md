@@ -6,7 +6,7 @@
 | --- | --- |
 | `claude-airlock:base` | Debian + Claude Code + the egress firewall and proxy bridge, and little else: curl, jq and a bare `python3` (no pip or venv). No git, gh or editor; those are in `:dev`. |
 | `claude-airlock:os` | The base without Claude Code (its `os` build stage). Not a box image: `:dev` builds on it and copies Claude Code from `:base` as its last layer. |
-| `claude-airlock:dev` *(default)* | Base + git, gh, make, less, vim, neovim, zsh, ripgrep, xxd, file, tree, sqlite3, moreutils, zstd, shfmt, Python (pip, venv), Node, PowerShell, build tools, PostgreSQL, YAML tooling, ACL tools (`setfacl`, `getfacl`), infra clients (kubectl, helm, sops, tea, drill; no credentials baked in), and the [offline config validators](#config-validators). |
+| `claude-airlock:dev` *(default)* | Base + git, gh, make, less, vim, neovim, zsh, ripgrep, xxd, file, tree, sqlite3, moreutils, zstd, shfmt, Python (pip, venv), Node, Go, PowerShell, build tools, PostgreSQL, YAML tooling, ACL tools (`setfacl`, `getfacl`), infra clients (kubectl, helm, sops, tea, drill; no credentials baked in), and the [offline config validators](#config-validators). |
 | `claude-airlock:playwright` | Dev + headless Chromium + the Playwright MCP. Not built by the install. |
 
 - **Choose an image** with `AIRLOCK_IMAGE` in the host config, or per project with
@@ -63,7 +63,9 @@ the list, or the collection disappears.
 minimal egress against a **known-bad** fixture, and fails if the tool accepts it. Checking
 only that valid input passes would not catch a validator that has quietly stopped
 validating. It also covers the offline halves of the infra clients (`kubectl kustomize`,
-`helm lint|template`, `sops filestatus`), plus node, pwsh and `airlock-pg-start`.
+`helm lint|template`, `sops filestatus`), plus node, pwsh, Go (`go test`, a short fuzz
+run, `go vet`, and `GOTOOLCHAIN=local` refusing to download a newer toolchain) and
+`airlock-pg-start`.
 
 ## What is pinned
 
@@ -73,6 +75,9 @@ else those images download. `:playwright` is not pinned: it installs Playwright 
 with npm and Playwright's own installer, at whatever version is current.
 
 - Node, by tarball checksum;
+- Go, by go.dev tarball checksum, with `GOTOOLCHAIN=local` so it never fetches another
+  toolchain (modules for a project with dependencies need `proxy.golang.org` and
+  `sum.golang.org` in its `egress =`);
 - the ansible-lint venv, by a hash for every package (`image/dev/ansible-requirements.txt`);
 - the `ansible.windows` collection, by Galaxy tarball checksum;
 - Claude Code, through a vendored copy of its installer (`image/claude-install.sh`), which

@@ -1,6 +1,6 @@
 # claude-airlock dev base (layer 1) - the base plus the developer tools (git, gh, make,
 # an editor and pager, ripgrep), the language runtimes most projects need to actually run
-# (Python, Node.js, PowerShell, a C build toolchain), and the config validators that lint
+# (Python, Node.js, Go, PowerShell, a C build toolchain), and the config validators that lint
 # infrastructure-as-code offline.
 #
 # This is the default image for real work. Toolchains that need to DOWNLOAD a
@@ -193,6 +193,35 @@ RUN set -eux; \
     tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
     rm /tmp/node.tar.xz; \
     node --version; npm --version
+
+# Go from the official go.dev release tarball, pinned by version + sha256 per arch (the
+# checksums are go.dev's own, from https://go.dev/dl/?mode=json&include=all). Enough to
+# test, vet and fuzz a Go project in a box: a stdlib-only module works at minimal egress;
+# one with dependencies opens proxy.golang.org and sum.golang.org with `egress =`, or
+# vendors them. The whole tree stays under /usr/local/go (go finds its GOROOT through
+# the symlink); only go and gofmt are put on PATH.
+#
+# GOTOOLCHAIN=local: never download a different toolchain because a go.mod asks for a
+# newer one. That would fetch and run an unpinned toolchain, and in a box it would stall
+# against the firewall anyway. A go.mod newer than this pin fails loudly; bump the pin.
+# GOFLAGS=-modcacherw: the module cache (under $HOME/go) is writable, so `rm -rf` works.
+ARG GO_VERSION=1.27.4
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
+      arm64) sha=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" -o /tmp/go.tgz; \
+    echo "${sha}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/go.tgz -C /usr/local --no-same-owner; \
+    rm /tmp/go.tgz; \
+    ln -s /usr/local/go/bin/go /usr/local/bin/go; \
+    ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
+    GOTOOLCHAIN=local go version | grep -qF "go${GO_VERSION} linux/${arch}"
+ENV GOTOOLCHAIN=local \
+    GOFLAGS=-modcacherw
 
 # ============================================================================
 # Config validators - SYNTAX AND LINT ONLY, and offline by construction.

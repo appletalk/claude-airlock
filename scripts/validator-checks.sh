@@ -231,6 +231,22 @@ expect_ok   "npm runs"                                      npm --version
 expect_ok   "pwsh runs a script"                            pwsh -NoProfile -NonInteractive -File powershell/good.ps1
 expect_fail "pwsh rejects a parse error"                    pwsh -NoProfile -NonInteractive -File powershell/parse-error.ps1
 
+# Go: a stdlib-only module must build, test, fuzz and vet at minimal egress. The go.mod
+# asking for a newer Go is the GOTOOLCHAIN=local check. A plain expect_fail could not
+# catch a regression there: with GOTOOLCHAIN=auto the blocked download fails too. So the
+# build must fail with go's own refusal, which names GOTOOLCHAIN=local (the timeout stops
+# a download attempt hanging against the firewall).
+# shellcheck disable=SC2317,SC2329
+go_toolchain_local() { command -v go >/dev/null || return 127
+                       local out; ! out="$(timeout 20 go build -C go/newer . 2>&1)" \
+                         && grep -qF 'GOTOOLCHAIN=local' <<<"$out"; }
+hdr "go (test, fuzz, vet, GOTOOLCHAIN=local)"
+expect_ok   "go test passes a stdlib-only module"           go test -C go/good ./...
+expect_ok   "go test -fuzz runs a fuzz target"              go test -C go/good -run '^$' -fuzz '^FuzzAdd$' -fuzztime 3s .
+expect_ok   "go vet accepts a clean module"                 go vet -C go/good ./...
+expect_fail "go vet rejects a bad Printf verb"              go vet -C go/bad-vet .
+expect_ok   "a go.mod newer than the toolchain is refused, no download" go_toolchain_local
+
 # airlock-pg-start is this repo's own script, so it gets a real round trip: start the
 # cluster over loopback (behind the raised firewall) and run a query through it.
 hdr "PostgreSQL (airlock-pg-start)"
