@@ -30,7 +30,7 @@ ARG APT_REFRESH=unkeyed
 LABEL org.claude-airlock.apt-refresh="$APT_REFRESH"
 # Only what running Claude Code and the airlock machinery needs: the firewall
 # (iptables, ipset, iproute2, dnsutils, aggregate, curl, jq), the privilege drop (gosu)
-# and the proxy bridge (socat). Developer tools (git, gh, make, less, vim, zsh, ripgrep)
+# and the proxy bridge (socat). Developer tools (git, gh, make, less, vim, neovim, zsh, ripgrep)
 # live in the dev image; Claude Code ships its own ripgrep. python3 (the bare
 # interpreter, no pip or venv) is here so helper scripts can run in a base-only box;
 # they run it isolated (`python3 -I`).

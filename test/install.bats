@@ -97,7 +97,7 @@ EOF
   for p in ca-certificates curl jq python3 iptables ipset iproute2 dnsutils aggregate gosu socat; do
     grep -qE "^[[:space:]]+$p \\\\\$" <<<"$base_pkgs" || { echo "base lacks $p"; false; }
   done
-  for p in git gh make less vim zsh ripgrep; do
+  for p in git gh make less vim neovim zsh ripgrep xxd file tree sqlite3 moreutils zstd shfmt; do
     refute grep -qE "^[[:space:]]+$p \\\\\$" <<<"$base_pkgs"
     grep -qE "^[[:space:]]+$p \\\\\$" <<<"$dev_pkgs" || { echo "dev lacks $p"; false; }
   done

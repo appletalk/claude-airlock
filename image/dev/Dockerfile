@@ -65,9 +65,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Every Debian package the dev image adds, in ONE layer (one index fetch, one snapshot of
 # the archive). What each group is for:
 #
-# Developer tools: git, gh, make, less, vim, zsh, ripgrep. The base keeps only what runs
+# Developer tools: git, gh, make, less, vim, neovim, zsh, ripgrep. The base keeps only what runs
 # Claude Code and the airlock machinery, so these come in here. git must stay in this
-# layer: the bats install below clones with it.
+# layer: the bats install below clones with it. Small helpers beside them: xxd, file, tree,
+# sqlite3, moreutils (sponge, ts), zstd, shfmt. None is setuid: each runs with the user's
+# own rights. Lua is luajit's (below); neovim embeds its own.
 #
 # Python + a C/C++ build toolchain (many pip packages compile native extensions).
 # python3-yaml + yamllint are the DISTRO packages (not pip), so they need no PyPI
@@ -101,8 +103,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       make \
       less \
       vim \
+      neovim \
       zsh \
       ripgrep \
+      xxd \
+      file \
+      tree \
+      sqlite3 \
+      moreutils \
+      zstd \
+      shfmt \
       python3 \
       python3-pip \
       python3-venv \
