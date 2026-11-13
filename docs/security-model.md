@@ -121,6 +121,27 @@ address and forwards no ports. Host loopback services were never reachable. This
 layer *under* the firewall: the box has no route to the host even if its own rules are
 wrong.
 
+### Mounts inside box-writable directories are walked for links
+
+Some mounts land inside another mount: the session history inside `~/.claude`, artifact
+dirs and git binds inside the workspace. The runtime resolves such a destination through
+the outer mount's source on the host, and it follows a symlink it finds there within the
+box's root. Those sources are box-writable, so a box could leave a link behind (for
+example `~/.claude/projects/<slug>` pointing at `/usr/local/bin`) and have the next launch
+mount a directory of its choosing over the image's entrypoint: its code as root before the
+firewall starts.
+
+So right before the engine starts, the launcher walks every nested destination on the host,
+below the outer mount's source, and refuses the launch if any part is a symlink or (before
+the last part) not a directory. It names the path and never deletes it. Artifact dirs are
+walked before the launcher creates them too, so `mkdir -p` never follows a planted link out
+of the workspace.
+
+Not closed: a second box, already running on the same project, could plant a link in the
+moment between this walk and the engine's own lookup. Mounting the history outside
+`~/.claude` and binding the entrypoint and firewall read-only from the install would close
+that too; it is a larger change.
+
 ### No host credentials unless you mount them
 
 - Auth is an OAuth token. The host's `~/.claude` credentials, the container engine socket
@@ -210,6 +231,9 @@ In the workspace and every `share_rw`, these are read-only:
 How it holds:
 
 - Each git directory is bound onto itself, so it cannot be renamed away and replaced.
+- Each bound path is pinned by device and inode and checked again right before the engine
+  starts, so one swapped for a link or another directory while a secret prompt waited
+  stops the launch.
 - The checks run on canonical paths and the binds land where the box sees them, so a
   symlinked parent or share base changes nothing.
 - A symlink, a hard link, an unreadable git directory, or a `commondir` pointing elsewhere
