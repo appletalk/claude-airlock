@@ -15,6 +15,8 @@
 load helper
 
 setup() { setup_airlock_env; }
+# A test may chmod 000 a directory; give bats its tmpdir back.
+teardown() { chmod -R u+rwx "$BATS_TEST_TMPDIR" 2>/dev/null || true; }
 
 mkrepo() { git init -q "$1"; }
 histslug() { printf '%s' "$1" | sed 's#[^a-zA-Z0-9]#-#g'; }
@@ -56,7 +58,7 @@ histslug() { printf '%s' "$1" | sed 's#[^a-zA-Z0-9]#-#g'; }
   mkdir -p "$dc"; : > "$dc/projects"
   run _launch "$p"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"$dc/projects is a symlink or not a directory"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"$dc/projects is a symlink, not a directory, or can't be searched"* ]] || { echo "$output"; return 1; }
   ! engine_args | grep -q '^ENGINE_INVOKED=' || false
 }
 
@@ -70,26 +72,61 @@ histslug() { printf '%s' "$1" | sed 's#[^a-zA-Z0-9]#-#g'; }
   ! engine_args | grep -q -- ':/home/dev/.claude/projects/' || false
 }
 
-@test "an artifact dir that is a link refuses the launch, and nothing is created through it" {
+@test "an artifact dir that is a link is skipped with a warning: not mounted through" {
   p="$(mkproj art)"
   mkdir -p "$BATS_TEST_TMPDIR/target"
   ln -s "$BATS_TEST_TMPDIR/target" "$p/.venv"
   write_config "$p" "artifact_dirs = .venv"
   run _launch "$p"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"refusing to start: $p/.venv is a symlink"*"artifact_dirs entry '.venv'"* ]] || { echo "$output"; return 1; }
-  ! engine_args | grep -q '^ENGINE_INVOKED=' || false
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"not shadowing artifact dir '.venv': $p/.venv is a symlink"* ]] || { echo "$output"; return 1; }
+  ! engine_args | grep -q -- ":$p/.venv:" || false
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/target")" ]
 }
 
-@test "an artifact dir below a linked parent refuses before mkdir follows the link" {
+@test "an artifact dir below a linked parent is skipped before mkdir follows the link" {
   p="$(mkproj art2)"
   mkdir -p "$BATS_TEST_TMPDIR/outside"
   ln -s "$BATS_TEST_TMPDIR/outside" "$p/a"
   write_config "$p" "artifact_dirs = a/bin"
   run _launch "$p"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"refusing to start: $p/a is a symlink"* ]] || { echo "$output"; return 1; }
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"not shadowing artifact dir 'a/bin': $p/a is a symlink"* ]] || { echo "$output"; return 1; }
   [ ! -e "$BATS_TEST_TMPDIR/outside/bin" ]
+  ! engine_args | grep -q -- ":$p/a/bin:" || false
+}
+
+@test "an artifact dir below a directory the host can't search is skipped" {
+  p="$(mkproj art4)"
+  mkdir -p "$p/a"; chmod 000 "$p/a"
+  write_config "$p" "artifact_dirs = a/bin"
+  run _launch "$p"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"not shadowing artifact dir 'a/bin': $p/a is a symlink, not a directory, or can't be searched"* ]] || { echo "$output"; return 1; }
+  ! engine_args | grep -q -- ":$p/a/bin:" || false
+}
+
+@test "a link hidden under a projects dir the host can't search refuses the launch" {
+  p="$(mkproj h1d)"
+  dc="$(state_dir "$p")/dot-claude"
+  mkdir -p "$dc/projects"
+  ln -s /usr/local/bin "$dc/projects/$(histslug "$p")"
+  chmod 000 "$dc/projects"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to start: $dc/projects is a symlink, not a directory, or can't be searched"* ]] || { echo "$output"; return 1; }
+  ! engine_args | grep -q '^ENGINE_INVOKED=' || false
+}
+
+@test "dot-claude itself unsearchable refuses the launch" {
+  p="$(mkproj h1e)"
+  dc="$(state_dir "$p")/dot-claude"
+  mkdir -p "$dc/projects"
+  ln -s /usr/local/bin "$dc/projects/$(histslug "$p")"
+  chmod 000 "$dc"
+  run _launch "$p"
+  chmod 700 "$dc"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   ! engine_args | grep -q '^ENGINE_INVOKED=' || false
 }
 
@@ -125,6 +162,28 @@ histslug() { printf '%s' "$1" | sed 's#[^a-zA-Z0-9]#-#g'; }
   [ "$status" -ne 0 ]
   [[ "$output" == *"git path $p/.git/hooks changed after it was checked"* ]] || { echo "$output"; return 1; }
   ! engine_args | grep -q '^ENGINE_INVOKED=' || false
+}
+
+@test "a git file that gains a second hard link while a secret prompt waited: the launch stops" {
+  p="$(mkproj glink)"; mkrepo "$p"
+  _launch "$p" secret set TOKEN pass:x/y >/dev/null
+  printf '#!/usr/bin/env bash\nln "%s" "%s"\necho secret\n' \
+    "$p/.git/config" "$p/config-alias" > "$STUBBIN/pass"
+  chmod +x "$STUBBIN/pass"
+  run _launch "$p"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"git path $p/.git/config changed after it was checked"* ]] || { echo "$output"; return 1; }
+  ! engine_args | grep -q '^ENGINE_INVOKED=' || false
+}
+
+@test "host git adding a directory under .git while a secret prompt waited still launches" {
+  p="$(mkproj gsub)"; mkrepo "$p"
+  _launch "$p" secret set TOKEN pass:x/y >/dev/null
+  printf '#!/usr/bin/env bash\nmkdir -p "%s"\necho secret\n' "$p/.git/rebase-merge" > "$STUBBIN/pass"
+  chmod +x "$STUBBIN/pass"
+  run _launch "$p"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  engine_args | grep -q '^ENGINE_INVOKED='
 }
 
 @test "a git repo with a secret prompt and nothing swapped still launches" {

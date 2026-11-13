@@ -2452,15 +2452,20 @@ args+=( -v "$WORKSPACE:$WORKSPACE:rw" )
 # box gets its OWN copy while the host's sits underneath, untouched — neither
 # side clobbers the other.
 # _airlock_link_below ROOT REL: walk REL (a relative path) below ROOT on the host; print the
-# first part that is a symlink, `..`, or (before the last part) exists and is no directory,
-# and return 0. Returns 1 when the path is clean (missing parts are fine). ROOT itself is not
-# checked: it is the mount source the launcher chose.
+# first part that is a symlink, `..`, (before the last part) exists and is no directory, or
+# is a directory we can't search, and return 0. Returns 1 when the path is clean (missing
+# parts are fine). ROOT is not checked for links (it is the mount source the launcher
+# chose) but must be searchable: a box owns the files below it and can `chmod 000` a
+# directory, and then every lookup inside fails and looks like "missing", while the
+# runtime, as the user namespace's root, still sees and follows what is there.
 _airlock_link_below() {
   local cur="$1" c n=0 parts
   IFS=/ read -r -a parts <<< "$2"
+  if [ -d "$cur" ] && [ ! -x "$cur" ]; then printf '%s\n' "$cur"; return 0; fi
   for c in "${parts[@]}"; do
     n=$((n + 1))
     [ -n "$c" ] && [ "$c" != . ] || continue
+    if [ -d "$cur" ] && [ ! -x "$cur" ]; then printf '%s\n' "$cur"; return 0; fi
     cur="$cur/$c"
     if [ "$c" = .. ] || [ -L "$cur" ] \
         || { [ "$n" -lt "${#parts[@]}" ] && [ -e "$cur" ] && [ ! -d "$cur" ]; }; then
@@ -2476,9 +2481,11 @@ for d in $AIRLOCK_ARTIFACT_DIRS; do
   # The box writes the workspace: `mkdir -p` below would follow a planted link out of it,
   # and the mount would land wherever the link points.
   if _bad="$(_airlock_link_below "$WORKSPACE" "$d")"; then
-    echo "claude-airlock: refusing to start: $_bad is a symlink or not a directory (artifact_dirs entry '$d')." >&2
-    echo "  A box can plant such a link to redirect the mount. Look at it, remove it if you didn't make it, relaunch." >&2
-    exit 1
+    # Skipped, not fatal: .venv and node_modules are defaults, and a host project may link
+    # one on purpose. Skipping mounts and creates nothing through the link.
+    echo "claude-airlock: not shadowing artifact dir '$d': $_bad is a symlink, not a directory, or can't be searched." >&2
+    echo "  (A box can plant such a link to redirect the mount; look at it if you didn't make it.)" >&2
+    continue
   fi
   store="$STATE_DIR/artifacts/$(printf '%s' "$d" | sed 's#/#__#g')"
   mkdir -p "$store"
@@ -2737,6 +2744,10 @@ _git_root_of() {   # the root holding canonical path $1, into _git_ri
   return 1
 }
 _git_bound=(); _git_pins=()
+# Identity a git bind is pinned to: device and inode, and for a file its link count too (a
+# second name would stay writable). Not for a directory, whose count is its subdirectories
+# and moves whenever host git adds one under .git.
+_git_pin_id() { if [ -d "$1" ]; then stat -c %d:%i -- "$1"; else stat -c %d:%i:%h -- "$1"; fi; }
 # Bind existing path $1 ($2 = ro|rw) at the path the box sees. It must be canonical (no
 # symlink anywhere in it) and, for a file, its only name: a second name would stay writable.
 _git_bind() {
@@ -2748,13 +2759,14 @@ _git_bind() {
   fi
   _git_root_of "$1" || return 0
   [ "$1" != "${_git_roots_c[$_git_ri]}" ] || return 0   # a root is mounted already (and can't be renamed)
-  if [ -f "$1" ] && [ "$(stat -c %h -- "$1")" != 1 ]; then echo "$1 has more than one hard link" >&2; return 1; fi
+  local id; id="$(_git_pin_id "$1")"   # one stat: the link count and the pin agree
+  if [ -f "$1" ] && [ "${id##*:}" != 1 ]; then echo "$1 has more than one hard link" >&2; return 1; fi
   d="${_git_roots_l[$_git_ri]}${1#"${_git_roots_c[$_git_ri]}"}"
   for b in "${_git_bound[@]:-}"; do [ "$b" = "$d" ] && return 0; done
   _git_bound+=("$d"); args+=( -v "$1:$d:$2" )
   # Re-checked right before the run (with the shares): a box on the same root could swap
   # this path for a symlink between here and the engine's own lookup.
-  _git_pins+=( "$(stat -c %d:%i -- "$1") $1" )
+  _git_pins+=( "$id $1" )
 }
 _git_readable_dir() { [ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ] || { echo "$1 can't be read (a box may have changed its permissions)" >&2; return 1; }; }
 # Read one config file and nothing else: from /, so git discovers no repository (from inside
@@ -3364,8 +3376,9 @@ done
 # The git binds the same way: still canonical (no symlink anywhere in the path), same inode.
 for _kp in "${_git_pins[@]}"; do
   _kpath="${_kp#* }"
+  # Same device and inode, and for a file the same link count (see _git_pin_id).
   if [ "$(realpath -e -- "$_kpath" 2>/dev/null)" != "$_kpath" ] \
-      || [ "$(stat -c %d:%i -- "$_kpath" 2>/dev/null)" != "${_kp%% *}" ]; then
+      || [ "$(_git_pin_id "$_kpath" 2>/dev/null)" != "${_kp%% *}" ]; then
     echo "claude-airlock: the git path $_kpath changed after it was checked; not launching" >&2
     exit 1
   fi
@@ -3379,7 +3392,7 @@ done
 # next launch mount its own directory over the image's entrypoint and firewall: box code
 # as root before the firewall starts. So walk every such path on the host, below the
 # parent's source, and refuse a symlink or a non-directory anywhere before the last part.
-# Run last, after every prompt, so nothing waits between this and the engine's lookup.
+# Run after every prompt and every mount: only the box-name lookup and its --name follow.
 _mnt_src=(); _mnt_dst=()
 _prev=""
 for _a in "${args[@]}"; do
@@ -3394,7 +3407,7 @@ for _i in "${!_mnt_dst[@]}"; do
     _pd="${_mnt_dst[$_j]%/}"
     case "${_mnt_dst[$_i]}" in "$_pd"/?*) ;; *) continue ;; esac
     if _bad="$(_airlock_link_below "${_mnt_src[$_j]}" "${_mnt_dst[$_i]#"$_pd"/}")"; then
-      echo "claude-airlock: refusing to start: $_bad is a symlink or not a directory," >&2
+      echo "claude-airlock: refusing to start: $_bad is a symlink, not a directory, or can't be searched," >&2
       echo "  and ${_mnt_dst[$_i]} is mounted through it (inside ${_mnt_dst[$_j]})." >&2
       echo "  A box can plant such a link to redirect the next launch's mount (for example" >&2
       echo "  over the image's entrypoint). Look at it, remove it if you didn't make it, relaunch." >&2
