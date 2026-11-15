@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # The box's name: airlock-<session name> (Claude's --name, as agent sessions pass it), else
 # airlock-<project>, so journal lines, `podman ps` and htop say which box is which. A name
-# still taken gets a suffix; nothing existing is replaced. And an interactive box's screen
-# never goes to the engine's log (journald): --log-driver none with a terminal.
+# still taken gets a suffix; nothing existing is replaced. And a box's output never goes to
+# the engine's log (journald): --log-driver none, with a terminal or without.
 
 load helper
 setup() {
@@ -50,10 +50,16 @@ launched() { engine_args | grep -q '^ENGINE_INVOKED='; }
   [ "$(box_name)" = airlock-proj-box-name ]
 }
 
-@test "box log: without a terminal (scripts, units) the engine's default stays; no -t either" {
+@test "box log: without a terminal (scripts, units) --log-driver none too, and no -t" {
   _launch "$P" >/dev/null 2>&1
-  ! engine_args | grep -qx -- --log-driver
+  [ "$(engine_args | grep -x -A1 -- --log-driver | tail -1)" = none ]
+  [ "$(engine_args | grep -cx -- --log-driver)" = 1 ]
   ! engine_args | grep -qx -- -t
+}
+
+@test "box log: an exec box (worker steps) runs with --log-driver none" {
+  _launch "$P" exec -- true >/dev/null 2>&1
+  [ "$(engine_args | grep -x -A1 -- --log-driver | tail -1)" = none ]
 }
 
 @test "box log: with a terminal, -t and --log-driver none (the screen stays out of the journal)" {
@@ -64,4 +70,5 @@ launched() { engine_args | grep -q '^ENGINE_INVOKED='; }
   script -qec "$cmd" /dev/null >/dev/null 2>&1 </dev/null || true
   engine_args | grep -qx -- -t
   [ "$(engine_args | grep -x -A1 -- --log-driver | tail -1)" = none ]
+  [ "$(engine_args | grep -cx -- --log-driver)" = 1 ]
 }

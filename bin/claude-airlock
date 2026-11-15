@@ -3249,13 +3249,14 @@ fi
 
 # A terminal only when there is one: a run from a script or a service unit (`claude -p`,
 # `airlock exec`) has none, and the engine refuses -t then.
-if [ -t 0 ] && [ -t 1 ]; then
-  args+=( -t )
-  # An interactive box's output is the session's screen: with a terminal the engine's default
-  # log driver (journald under podman on systemd) copies every screen update into the host
-  # journal (privacy, disk). The terminal is the only place it belongs.
-  args+=( --log-driver none )
-fi
+[ -t 0 ] && [ -t 1 ] && args+=( -t )
+# No engine log, terminal or not. The engine's default log driver (journald under podman on
+# systemd) copies the box's output into the host journal: an interactive box's every screen
+# update, a headless box's whole result. That is a second copy the caller never asked for
+# (privacy, disk), and a box that prints a lot fills the journal and pushes older host lines
+# out. The output still reaches the caller (the terminal, or the stdout and stderr of
+# `airlock -p` and `airlock exec`); only the engine's own log (`podman logs`) stays empty.
+args+=( --log-driver none )
 # An exec'd command is the box's PID 1, where a signal with no handler is ignored: stopping
 # the unit that ran it would wait out its timeout and leave the box running. An init (the
 # engine's own: catatonit under podman, docker-init under docker) passes signals on and reaps.
