@@ -3417,7 +3417,7 @@ for _i in "${!_mnt_dst[@]}"; do
   done
 done
 
-# The box's name, so journal lines, `podman ps` and htop say which box this is: the session's
+# The box's name, so podman's events, `podman ps` and htop say which box this is: the session's
 # (Claude's --name, which agent sessions pass as <project>.<name>), else the project's, as
 # airlock-<name>. One still taken (a crashed box still being removed, a second box of the
 # project) gets a suffix: nothing that exists is replaced or touched.

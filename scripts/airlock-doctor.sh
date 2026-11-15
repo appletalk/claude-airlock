@@ -225,7 +225,7 @@ fi
 while IFS= read -r ns; do
   if [ -n "$ns" ]; then net_args+=( "--dns=$ns" ); fi
 done < <(airlock_dns_forwarders "$ENGINE" "$PODMAN_NETWORK")
-if fw_out="$("$ENGINE" run --rm \
+if fw_out="$("$ENGINE" run --rm --log-driver none \
   "${net_args[@]}" \
   --cap-drop=ALL \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \

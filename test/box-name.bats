@@ -57,9 +57,30 @@ launched() { engine_args | grep -q '^ENGINE_INVOKED='; }
   ! engine_args | grep -qx -- -t
 }
 
-@test "box log: an exec box (worker steps) runs with --log-driver none" {
+# one_none: exactly one --log-driver, set to none, and before the image (an engine option, not
+# an argument for Claude or the command)
+one_none() {
+  [ "$(engine_args | grep -cx -- --log-driver)" = 1 ] || return 1
+  [ "$(engine_args | grep -x -A1 -- --log-driver | tail -1)" = none ] || return 1
+  local ld img
+  ld="$(engine_args | grep -nx -m1 -- --log-driver | cut -d: -f1)"
+  img="$(engine_args | grep -nxF -m1 -- claude-airlock:dev | cut -d: -f1)"   # helper.bash's image
+  [ -n "$img" ] && [ "$ld" -lt "$img" ]
+}
+
+@test "box log: an exec box (worker steps) runs with one --log-driver none" {
   _launch "$P" exec -- true >/dev/null 2>&1
-  [ "$(engine_args | grep -x -A1 -- --log-driver | tail -1)" = none ]
+  launched; one_none
+}
+
+@test "box log: a headless -p run (the workers' research and check boxes) too" {
+  _launch "$P" -p hello >/dev/null 2>&1
+  launched; one_none
+}
+
+@test "box log: a shell box too" {
+  _launch "$P" shell >/dev/null 2>&1
+  launched; one_none
 }
 
 @test "box log: with a terminal, -t and --log-driver none (the screen stays out of the journal)" {

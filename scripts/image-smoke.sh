@@ -31,7 +31,7 @@ printf '\033[1mimage smoke: %s (engine %s, egress minimal)\033[0m\n' "$IMAGE" "$
 # Same capability set the launcher and airlock-doctor use: enough to program
 # netfilter and drop privileges, nothing more. The firewall is raised as root and
 # the checks then run as the unprivileged dev user, exactly as a real session does.
-"$ENGINE" run --rm \
+"$ENGINE" run --rm --log-driver none \
   --cap-drop=ALL \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \
   --security-opt=no-new-privileges \

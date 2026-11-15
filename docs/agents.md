@@ -285,12 +285,14 @@ say you've decided.
 ## Good to know
 
 - Each box is named after its session: `airlock-<project>.<name>` (a web session's, its label),
-  so `podman ps`, the journal and `htop` say which session a box is. A name still taken (a box
+  so `podman ps`, podman's events in the journal and `htop` say which session a box is. A name still taken (a box
   still being removed after a crash) gets a suffix (`-2`, `-3`, ...); nothing is replaced.
   Boxes outside a session take `airlock-<project>`.
-- A box's output doesn't go to the journal (`--log-driver none`, with a terminal or without):
-  an interactive box's screen stays in the terminal, a headless box's output goes only to its
-  caller (a worker's result file, its unit's log for stderr). `podman logs` shows nothing.
+- The engine keeps no copy of a box's output (`--log-driver none`, with a terminal or
+  without), so it no longer reaches the journal on its own: an interactive box's screen stays
+  in the terminal, and a headless box's output goes where its caller sends it (a worker's result
+  file; what a worker leaves on stdout or stderr is its unit's log, which is the journal).
+  `podman logs` shows nothing.
 - The agent users must use `crun`, not `runc`. The install sets this up.
 - Switching an agent user from `runc` to `crun` leaves stale containers behind. Before removing
   `runc`, run `podman ps -a` as each agent user and `podman rm -f` the old ones.
