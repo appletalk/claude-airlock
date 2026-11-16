@@ -1014,7 +1014,7 @@ render_audit_redact() {
           # that value and nothing longer, then put back, so audit.redacted keeps meaning a box sent one.
           s = replace(s, r'\bGH_TOKEN=airlock-proxy-adds-the-credential(?P<e>$|[\s"\x27&])', "GH_TOKEN\u{1f}airlock-proxy-adds-the-credential${e}")
           s = replace(s, r'\b((?:[A-Z][A-Z0-9_]*_)?(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)(?:_[A-Z0-9_]*)?=)(?:"[^"]*"|\x27[^\x27]*\x27|[^\s"\x27&]+)', "${1}REDACTED")
-          s = replace(s, "GH_TOKEN\u{1f}airlock-proxy-adds-the-credential", "GH_TOKEN=airlock-proxy-adds-the-credential")
+          s = replace(s, r'GH_TOKEN\x1fairlock-proxy-adds-the-credential(?P<e>$|[\s"\x27&])', "GH_TOKEN=airlock-proxy-adds-the-credential${e}")
           s = replace(s, r'\b([Bb]earer|[Bb]asic|BEARER|BASIC)(\s+)[A-Za-z0-9+/=._~-]*[0-9+/=_~][A-Za-z0-9+/=._~-]*', "${1}${2}REDACTED")
           s = replace(s, r'(?i)((?:\b|_)(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|private-token)["\x27]?\s*[:=]\s*["\x27]?)([A-Za-z]+\s+)?[A-Za-z0-9+/=._~-]{8,}', "${1}${2}REDACTED")
           s = replace(s, r'(?i)(\b(?:set-)?cookie["\x27]?\s*:\s*)[^\r\n"]+', "${1}REDACTED")
@@ -1247,10 +1247,10 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       # audit.severity: a security rating for triage, apart from syslog's (high, medium, low,
       # info). An agent's privilege attempt or a dropped packet is high; a refusal, an unusual
       # login, a suppression of the agents' lines medium; a failing session or service low.
-      # logind's routine lines (by its own message, its unit proven): a session of class user
-      # and type tty low (the operator command's machinectl shell; an SSH login with a terminal
-      # looks the same here, and shows high by sshd's own line); a user manager's session and
-      # every session's end info. sshd accepting an agent: high.
+      # logind's routine lines (by its own message, its unit proven): a c-numbered session of class
+      # user and type tty (the operator command's machinectl shell), a user manager's session and
+      # every session's end info; any other tty session (a console or SSH login, numbered by its
+      # audit session) medium. sshd accepting an agent: high. A box-drop medium.
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
@@ -1268,9 +1268,10 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       } else if k == "login" && unit == "systemd-logind.service" &&
           match(to_string(.message) ?? "", r'^(Session \S+ logged out\. |Removed session \S+\.$|New session \S+ of user \S+ with class .manager. )') { sev = "info"
       } else if k == "login" && unit == "systemd-logind.service" &&
-          match(to_string(.message) ?? "", r'^New session \S+ of user \S+ with class .user. and type .tty.\.$') {
-        # the operator command's shell as the agent (machinectl shell). An SSH login with a terminal
-        # looks the same here and is rated high by sshd's own Accepted line, so this one adds nothing.
+          match(to_string(.message) ?? "", r'^New session .?c[0-9]+.? of user \S+ with class .user. and type .tty.\.$') {
+        # the operator command's shell as the agent (machinectl shell): a c-numbered session, logind's
+        # numbering when there is no audit session. A console or SSH login gets its audit session's
+        # number and stays medium below (and sshd's own Accepted line is high).
         sev = "info"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"

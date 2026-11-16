@@ -127,6 +127,12 @@ tests:
   - name: "redact: any other GH_TOKEN value is still blanked, the placeholder with more after it too"
     inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "podman run -e GH_TOKEN=gho_notaplaceholder123 -e X_GH_TOKEN=airlock-proxy-adds-the-credentialXYZ -e GH_TOKEN=airlock-proxy-adds-the-credential", message: "x"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(._CMDLINE, "podman run -e GH_TOKEN=REDACTED -e X_GH_TOKEN=REDACTED -e GH_TOKEN=airlock-proxy-adds-the-credential"); assert_eq!(.audit.redacted, true)'}]}]
+  - name: "redact: the bare placeholder with more after it is blanked (the end check)"
+    inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "podman run -e GH_TOKEN=airlock-proxy-adds-the-credentialREALSECRET --name x", message: "x"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(._CMDLINE, "podman run -e GH_TOKEN=REDACTED --name x"); assert_eq!(.audit.redacted, true)'}]}]
+  - name: "redact: a planted marker with more after it isn't turned into a token-looking line"
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "GH_TOKEN\u001fairlock-proxy-adds-the-credentialREALSECRET"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!contains(string!(.message), "GH_TOKEN=")); assert!(!exists(.audit.redacted))'}]}]
   - name: "redact: a planted set-aside marker gains nothing (comes back as the placeholder, a real value after it still blanked)"
     inputs: [{insert_at: redact, type: log, log_fields: {message: "GH_TOKEN\u001fairlock-proxy-adds-the-credential GH_TOKEN=realsecret"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "GH_TOKEN=airlock-proxy-adds-the-credential GH_TOKEN=REDACTED")'}]}]
@@ -189,9 +195,12 @@ tests:
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1101)"}}
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.agent, "agent-web"); assert_eq!(.audit.severity, "high")'}]}]
-  - name: "enrich: logind's new tty session for an agent (the operator command's shape) is login, info"
-    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent-guard", SESSION_ID: "5", message: "New session '5' of user 'agent-guard' with class 'user' and type 'tty'."}}]
+  - name: "enrich: logind's new c-numbered tty session for an agent (the operator command's machinectl shell) is login, info"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent-guard", SESSION_ID: "c714", message: "New session 'c714' of user 'agent-guard' with class 'user' and type 'tty'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "info"); assert_eq!(.level, "info")'}]}]
+  - name: "enrich: a numbered tty session for an agent (a console or SSH login, its audit session) is medium"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "5", message: "New session '5' of user 'agent' with class 'user' and type 'tty'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "medium")'}]}]
   - name: "enrich: pasta dropping a box's datagram (direct DNS around the proxy) is box-drop, medium"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "passt.avx2", _EXE: "/usr/bin/passt.avx2", _SYSTEMD_UNIT: "user@1100.service", _SYSTEMD_USER_UNIT: "run-p1-i2.service", PRIORITY: "4", message: "Dropping datagram with no flow TAP 169.254.2.1:51234 -> 8.8.8.8:53"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "box-drop"); assert_eq!(.audit.severity, "medium"); assert_eq!(.audit.agent, "agent")'}]}]
