@@ -314,6 +314,17 @@ ui_teardown() { kill "$UI" "$STORE" 2>/dev/null || true; wait 2>/dev/null || tru
 @test "audit ui: refused requests don't hold off the idle limit; a control byte is a 400, no traceback" {
     ui_setup; ui_start "$(id -u)" 2 600
     c="$(printf 'GET /select/a\001b HTTP/1.0\r\nHost: 127.0.0.1:%s\r\n\r\n' "$PORT" | python3 -c 'import socket,sys; s=socket.create_connection(("127.0.0.1",int(sys.argv[1]))); s.sendall(sys.stdin.buffer.read()); print(s.recv(100).split(b"\r\n")[0].decode())' "$PORT")"
+    # Clients that send a refused request and reset at once (the server's answer meets a dead
+    # socket): never a traceback.
+    python3 -c '
+import socket, struct, sys
+for _ in range(20):
+    try:
+        s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+        s.sendall(b"GET /select/a\x01b HTTP/1.0\r\nHost: 127.0.0.1:%s\r\n\r\n" % sys.argv[1].encode())
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)); s.close()
+    except OSError:
+        pass' "$PORT" || true
     for _ in 1 2 3 4 5 6; do /usr/bin/curl --noproxy "*" -s -o /dev/null -H 'Host: evil.example.org' "http://127.0.0.1:$PORT/" || true; sleep 0.5; done
     gone=1; kill -0 "$UI" 2>/dev/null && gone=0
     ui_teardown
