@@ -303,8 +303,9 @@ machine (nothing leaves it):
   names, and Envoy's own JSON sits under `envoy.*`):
   - `audit.kind`: which rule kept the line: `envoy-refused`, `envoy-allowed`, `envoy-web-refused`,
     `envoy-web-allowed` (the same refusal rules as `audit denies`), `privilege` (an agent's own
-    sudo, su, pkexec or doas, by its setuid binary; polkit naming an agent, which is also where
-    run0 shows), `login` (logind or machined
+    sudo, su, pkexec or doas, by its setuid binary, and run0 by the system's binary under that
+    name; polkit naming an agent. A refused attempt shows only if it logs: polkit writes no line
+    when no authentication agent could be asked), `login` (logind or machined
     naming an agent), `session` (the agents' managers and their units), `nft-drop`,
     `journald-suppressed`, `envoy-service` (Envoy's units' other lines), `store` (the store's
     own units), `agent-process` (anything else an agent or its boxes logged);

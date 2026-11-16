@@ -303,3 +303,9 @@ tests:
   - name: "enrich: the last id of agent's subordinate range is agent's"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1165535", message: "last"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.agent, "agent")'}]}]
+  - name: "enrich: an agent's run0 (the system's systemd-run under that name) is privilege, high"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _EXE: "/usr/bin/systemd-run", _COMM: "run0", message: "Failed to start transient service unit: Interactive authentication required."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.severity, "high")'}]}]
+  - name: "enrich: a polkit Operator line from its stdout stream names no agent (a split line could end in a planted tail)"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", _TRANSPORT: "stdout", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4:5 [sh (owned by unix-user:agent-web)"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!exists(.audit.agent)); assert_eq!(.audit.kind, "privilege")'}]}]

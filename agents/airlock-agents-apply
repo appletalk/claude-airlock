@@ -1103,8 +1103,11 @@ transforms:
       if !(by_agent || by_owner || envoy_unit || store_unit || manager || named || suppressed || dropped) { abort }
       # Why it was kept, most specific first.
       # The setuid ones, by the binary journald resolved (an agent can't copy them and keep the
-      # path). run0 is systemd-run under another name and not setuid: its polkit line is the signal.
-      priv = includes(["/usr/bin/sudo", "/usr/sbin/sudo", "/usr/bin/su", "/bin/su", "/usr/bin/pkexec", "/usr/bin/doas"], exe)
+      # path). run0 is a link to systemd-run (the binary journald resolves): the system's
+      # systemd-run under the name run0 (a process can rename itself, but only to rate itself up).
+      comm = to_string(._COMM) ?? ""
+      priv = includes(["/usr/bin/sudo", "/usr/sbin/sudo", "/usr/bin/su", "/bin/su", "/usr/bin/pkexec", "/usr/bin/doas"], exe) ||
+        (exe == "/usr/bin/systemd-run" && comm == "run0")
       kind = "agent-process"
       if dropped { kind = "nft-drop"
       } else if suppressed { kind = "journald-suppressed"
@@ -1132,7 +1135,9 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       # end in text the subject chooses (an agent registration's locale). machined's and other
       # polkit lines name no agent.
       if agent == "" && logind_agent { agent = logind_user }
-      if agent == "" && named && unit == "polkit.service" && starts_with(msg, "Operator of ") {
+      # (Not from polkit's stdout stream: journald splits that at newlines, and a split command
+      # line could end in a planted tail.)
+      if agent == "" && named && unit == "polkit.service" && starts_with(msg, "Operator of ") && transport != "stdout" {
         m = parse_regex(msg, r'\(owned by unix-user:(?P<a>$alt|$ualt)\)\s*$') ?? {}
         a = if is_string(m.a) { string!(m.a) } else { "" }
         agent = to_string(get!(who, [a])) ?? ""
