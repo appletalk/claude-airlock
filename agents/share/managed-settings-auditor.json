@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "deny": [
+      "SendMessage",
+      "ListAgents",
+      "Artifact",
+      "ArtifactComments",
+      "ArtifactData",
+      "ArtifactCheck",
+      "RemoteTrigger",
+      "CronCreate",
+      "Agent",
+      "WebFetch",
+      "WebSearch",
+      "Write",
+      "Edit",
+      "NotebookEdit",
+      "Read(~/.claude/**)"
+    ]
+  },
+  "crossSessionInbound": "refuse",
+  "disableRemoteControl": true,
+  "allowManagedHooksOnly": true
+}

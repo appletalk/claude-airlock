@@ -1,0 +1,72 @@
+#!/bin/bash
+# audit-run: one auditor run (docs/agents.md, Audit), in the auditor user's manager, started by
+# the operator's `<command> audit`. A fresh one-shot Claude in a box: an empty workspace and memory
+# dir, the auditor's instructions, Bash for curl to the audit store (and a few text tools for its
+# answers), nothing else; capped in time and turns. The report (Claude's last message) goes to
+# stdout; the operator command cleans it, adds the queries Envoy logged for this user and writes
+# the report file, which this user never sees. Nothing here keeps state between runs.
+#
+#   audit-run review <days>      a look back over the last <days> days (1 to 90)
+#   audit-run ask <question>     the operator's question
+set -u
+# The site's names (rendered by airlock-agents-apply from agents.conf).
+# shellcheck source=/dev/null
+. "${AIRLOCK_AGENTS_ENV:-/etc/claude-airlock/agents/agents.env}"
+die() { echo "audit-run: $*" >&2; exit 64; }   # 64: refused, no run (the operator writes no report)
+AIRLOCK="${AGENTS_AUDIT_AIRLOCK:-$HOME/.local/bin/airlock}"                # test knobs; never set in use
+PROMPT="${AGENTS_AUDIT_PROMPT:-$AGENTS_SHARE/box/auditor-prompt.md}"
+TIMEOUT="${AGENTS_AUDIT_TIMEOUT:-20m}"
+TURNS=60
+TOOLS="Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(sort:*),Bash(uniq:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)"
+ws="$HOME/audit"                                  # one workspace for every run: one login
+export PATH=/usr/local/bin:/usr/bin
+
+[ "$(id -un)" = "${AGENTS_AUDITOR:-}" ] || die "run as the auditor (${AGENTS_AUDITOR:-none in agents.env}), from $AGENTS_COMMAND audit"
+case "${1:-}" in
+    review)
+        [[ "${2:-}" =~ ^[1-9][0-9]?$ ]] && [ "$2" -le 90 ] || die "usage: audit-run review <days, 1 to 90>"
+        task="Review the last $2 days in the audit store (from $(date -u -d "-$2 days" +%Y-%m-%dT%H:%M:%SZ) to now) and write the review report your instructions describe." ;;
+    ask)
+        q="${2:-}"
+        [ -n "$q" ] && [ "${#q}" -le 4000 ] || die "usage: audit-run ask <question, 1 to 4000 characters>"
+        # the operator's own text, but kept to what a terminal shows (tab and newline allowed)
+        [ -z "$(printf '%s' "$q" | LC_ALL=C tr -d '\t\n\040-\176\200-\377')" ] || die "the question has control characters"
+        task="Answer the operator's question below from the audit store, as your instructions describe for a question. The question (the operator's own words):
+
+$q" ;;
+    *) die "usage: audit-run review <days> | ask <question>" ;;
+esac
+[ $# = 2 ] || die "usage: audit-run review <days> | ask <question>"
+
+# The store's name: the plain-HTTP host with rules victoria-logs in this user's proxy manifest
+# (airlock-envoy writes it next to the socket; the launcher checks it again before it uses it).
+sock="$(sed -n 's/^AIRLOCK_EGRESS_PROXY=//p' "${AIRLOCK_CONFIG:-/nonexistent}" 2>/dev/null | tail -1)"
+sock=${sock#[\"\']} sock=${sock%[\"\']}
+[[ "$sock" == /*.sock ]] || die "no AIRLOCK_EGRESS_PROXY socket in ${AIRLOCK_CONFIG:-the config (AIRLOCK_CONFIG unset)}"
+store="$(awk '$3 == "victoria-logs" && $4 == "no" { print $1; exit }' "${sock%.sock}.clients" 2>/dev/null)"
+[[ "$store" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || die "the listener behind $sock has no audit store (an http host with rules victoria-logs): docs/agents.md, Audit"
+[ -f "$PROMPT" ] && [ -r "$PROMPT" ] || die "no auditor instructions at $PROMPT (sudo make install-agents)"
+
+# One run at a time: a second would empty the workspace under the first.
+run_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+exec 9> "$run_dir/audit-run.lock" || die "no lock file in $run_dir"
+flock -n 9 || die "another audit run is going (one at a time)"
+
+# Nothing from an earlier run is left: not in the workspace (a CLAUDE.md or .claude/ there would
+# load into this one), not in its memory dir (the launcher makes it again, empty).
+{ mkdir -p "$ws" && find "$ws" -mindepth 1 -delete && [ -z "$(find "$ws" -mindepth 1 -print -quit)" ]; } \
+    || die "the workspace $ws could not be emptied; nothing runs until it is"
+rm -rf -- "$HOME/.config/claude-airlock/state/$(printf '%s' "$ws" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')/box-memory"
+
+# The site's names into the instructions (each checked by the apply's parser: no sed specials).
+agents="$(printf '%s ' "$AGENTS_AGENT" ${AGENTS_WEB:+"$AGENTS_WEB"} ${AGENTS_GUARD:+"$AGENTS_GUARD"} "$AGENTS_AUDITOR" | sed 's/ $//; s/ /, /g')"
+prompt="$(sed -e "s/{auditor}/$AGENTS_AUDITOR/g" -e "s/{agents}/$agents/g" -e "s/{operator}/$AGENTS_OPERATOR/g" \
+    -e "s/{command}/$AGENTS_COMMAND/g" -e "s/{store}/$store/g" "$PROMPT")"
+
+cd "$ws" || die "no workspace $ws"
+timeout -k 30s "$TIMEOUT" "$AIRLOCK" -p "$task" \
+    --name "$AGENTS_AUDITOR-$(date -u +%Y%m%dT%H%M%SZ)" --session-id "$(cat /proc/sys/kernel/random/uuid)" \
+    --restricted --strict-mcp-config --tools Bash --allowedTools "$TOOLS" \
+    --permission-mode dontAsk --max-turns "$TURNS" \
+    --append-system-prompt "$prompt" --output-format text </dev/null

@@ -89,7 +89,7 @@ _airlock_agents() {
                 esac
             fi ;;
         audit)
-            if (( CURRENT == 3 )); then _values 'audit command' 'denies[Envoy'"'"'s refusals]' 'events[what the store rated, by severity]' 'ui[the store'"'"'s web UI, until Ctrl-C]'
+            if (( CURRENT == 3 )); then _values 'audit command' 'denies[Envoy'"'"'s refusals]' 'events[what the store rated, by severity]' 'ui[the store'"'"'s web UI, until Ctrl-C]' 'login[/login in the auditor'"'"'s box]' '--days[the auditor'"'"'s review: days back, 1 to 90]'
             elif [[ ${words[3]} == denies ]]; then _values 'option' '--since[<n>d, <n>h or YYYY-MM-DD]' '--limit[1 to 1000]'
             elif [[ ${words[3]} == ui ]]; then _values 'option' '--port[1024 to 65535]'
             elif [[ ${words[3]} == events ]]; then

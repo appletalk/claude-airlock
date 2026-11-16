@@ -127,7 +127,7 @@ fi
 echo "==> installing the toolkit"
 put() { install -D -m "$1" -o root -g root "$2" "$3.new" && mv -f "$3.new" "$3"; echo "$3" >> "$shipped"; }
 shipped="$(mktemp)"; trap 'rm -f "$shipped"' EXIT
-for f in session-run session-stop web-session-run web-worker guard-worker nodump-refresh audit-ui; do put 0755 "$SRC/lib/$f" "$LIBDIR/$f"; done
+for f in session-run session-stop web-session-run web-worker guard-worker nodump-refresh audit-ui audit-run; do put 0755 "$SRC/lib/$f" "$LIBDIR/$f"; done
 put 0755 "$SRC/host-test.sh" "$LIBDIR/host-test.sh"
 put 0644 "$SRC/lib/worker-common.sh" "$LIBDIR/worker-common.sh"
 put 0644 "$SRC/../lib/clipboard-image.sh" "$LIBDIR/clipboard-image.sh"   # the operator's paste (shared with airlock paste)
@@ -136,7 +136,7 @@ put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
 put 0755 "$SRC/../bin/update-runsc" /usr/local/sbin/update-runsc
 put 0755 "$SRC/../bin/update-victorialogs" /usr/local/sbin/update-victorialogs
 put 0755 "$SRC/airlock-audit" /usr/local/sbin/airlock-audit
-for f in containers.conf tmux.conf tmux-clipboard.conf completion.zsh completion.bash managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
+for f in containers.conf tmux.conf tmux-clipboard.conf completion.zsh completion.bash managed-settings-agent.json managed-settings-web.json managed-settings-guard.json managed-settings-auditor.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
 for f in "$SRC"/box/* "$SRC"/templates/*; do d=${f%/*}; put 0644 "$f" "$SHARE/${d##*/}/${f##*/}"; done
 put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
 # The execute-only copies' refresh after package upgrades: whichever package manager this is.

@@ -409,6 +409,39 @@ machine (nothing leaves it):
   reaches the store), and no CORS (VictoriaLogs allows any origin; those headers are dropped).
   A browser too old to send either header can still send a blind query, but can't read the
   answer. Refused requests don't count as use. The store's door still allows only queries.
+- **The auditor (optional):** an agent user of its own that reads the store for you, so a
+  look back doesn't mean reading lines yourself. Add it to `agents.conf` like the others, with
+  `audit on`: `auditor claude-audit uid 1103 subuid 1400000 home 10G`. It gets the same
+  containment as the agents (its own manager, network namespace, slice, home image, nft drop;
+  the store records its own lines too), the base image, no credentials, no web and no repos.
+  Give it one airlock-envoy listener that reaches Anthropic and the store's socket, nothing else
+  (apply pauses on anything more, and on the open web):
+  ```
+  http audit.internal socket /run/airlock-audit/vl.sock rules victoria-logs
+  claude-audit-store @anthropic http://audit.internal
+  client claude-audit-store claude-audit
+  ```
+  (any name for the host does; `.internal` is reserved, so it never means a real one). Then
+  `claude-agent update`, and `claude-agent audit login` once (`/login` in its box).
+  - `claude-agent audit` reviews the last 7 days (`--days <n>`, up to 90); `claude-agent audit
+    "<question>"` answers one question (quoted: a single word is taken for a mistyped command).
+    Each run is a fresh one-shot Claude in a box: an empty workspace and memory, no earlier
+    report, 60 turns and 20 minutes at most, the tools Bash for curl to the store and a few text
+    tools (jq, grep, sort, ...); no Write, Edit or web tools. You wait for it; the report prints when
+    it ends.
+  - **The report** goes to `/srv/<auditor>/reports/<time>.md` (yours alone, 0700: the auditor
+    never reads or writes it; this command writes it after the run). It starts with **the queries
+    actually run**: Envoy's lines for the auditor's user over the run, as the store holds them,
+    not the model's account of itself (a GET's query is decoded from its URL; a POST's body isn't
+    logged, so its query shows as unknown, and the auditor is told to use GET). The command waits
+    up to 30 seconds for the store to catch up with the run and says so if it hasn't. The
+    auditor's own text comes after, marked as such, cleaned of control characters.
+  - **It is prompt-injectable by design:** the agents choose much of what it reads. It can't act
+    (its box reaches Anthropic and the store's read-only queries, nothing else), its report is
+    text for you, and it decides nothing: what it says never silences or rates anything. Its Bash
+    can read the box's own login and send it in a query, which lands in the store (redacted when
+    the shape is known); there is nowhere else for it to go. Its instructions are
+    `agents/box/auditor-prompt.md`.
 - **Day to day:** `sudo airlock-audit status` (units, what the store holds, seccomp kills),
   `restart`, `check` (the guarantees above, live: exit 1 on any failure), and `reset` (empties the
   store and reads the retention window back in from the journal; asks first).

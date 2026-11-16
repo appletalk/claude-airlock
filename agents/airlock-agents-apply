@@ -20,7 +20,8 @@
 # Names derive from the users: units <user>-session@, <web>-worker, the queue /srv/<web>, the
 # inbox /srv/<agent>-inbox, unless the site file says otherwise. With `audit on`, also the audit
 # store (docs/agents.md, Audit): the airlock-audit account, a local VictoriaLogs behind a Unix
-# socket and Vector feeding it the agents' lines.
+# socket and Vector feeding it the agents' lines; with an auditor line too, the auditor user (its
+# box reaches only Anthropic and the store) and its reports dir /srv/<auditor>/reports.
 # shellcheck disable=SC2016  # sh -c '...' _ args: expanded by the inner shell, on purpose
 set -euo pipefail
 umask 022
@@ -73,7 +74,7 @@ OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on OP_
 AUDIT=off AUDIT_RETENTION=90d AUDIT_MAX_DISK=5G AUDIT_PREFIXES=()
 # The first systemd whose ProtectControlGroups=private works for user@.service (render_manager).
 CGNS_SYSTEMD=258
-ROLES=(agent web guard)
+ROLES=()
 declare -A NAME=() UID_OF=() SUB=() SIZE=() MEMHIGH=() MEMMAX=() TASKS=() CPU=()
 INTERNAL_NAMES=() INTERNAL_HOSTS=()
 declare -A EXTERNAL=() ACCEPT=()
@@ -138,7 +139,7 @@ while IFS= read -r line || [ -n "$line" ]; do
                     if [ "${w[0]}" = inbox ]; then INBOX=$v; else QUEUE=$v; fi ;;
                 daily-cap) [[ "$v" =~ ^[1-9][0-9]{0,4}$ ]] || die "$where: bad daily-cap '$v'"; DAILY_CAP=$v ;;
             esac ;;
-        agent|web|guard)
+        agent|web|guard|auditor)
             r=${w[0]}
             [ -z "${NAME[$r]:-}" ] || die "$where: a second $r line"
             [ "${#w[@]}" -ge 2 ] || die "$where: want: $r <user> uid <n> subuid <n> home <size> [memory-high X] [memory-max X] [tasks N] [cpu N%]"
@@ -182,7 +183,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         internal-host)
             [ "${#w[@]}" -gt 1 ] || die "$where: internal-host lists nothing"
             for v in "${w[@]:1}"; do [[ "$v" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "$where: bad internal host '$v'"; INTERNAL_HOSTS+=("$v"); done ;;
-        *) die "$where: unknown line '${w[0]}' (operator, command, agent, web, guard, inbox, queue, internal-name, internal-host, daily-cap, clipboard, runsc, audit, audit-nft-prefix, external, accept)" ;;
+        *) die "$where: unknown line '${w[0]}' (operator, command, agent, web, guard, auditor, inbox, queue, internal-name, internal-host, daily-cap, clipboard, runsc, audit, audit-nft-prefix, external, accept)" ;;
     esac
 done < "$site"
 
@@ -193,8 +194,15 @@ done < "$site"
 if [ -n "${NAME[web]:-}" ] || [ -n "${NAME[guard]:-}" ]; then
     [ -n "${NAME[web]:-}" ] && [ -n "${NAME[guard]:-}" ] || die "$site: web research needs both a web and a guard line"
     WEB_ON=1
-else WEB_ON=0; ROLES=(agent); fi
-AGENT=${NAME[agent]} WEB=${NAME[web]:-} GUARD=${NAME[guard]:-}
+else WEB_ON=0; fi
+ROLES=(agent); [ "$WEB_ON" = 0 ] || ROLES+=(web guard)
+# The auditor (docs/agents.md, Audit): reads the audit store, so only with it.
+if [ -n "${NAME[auditor]:-}" ]; then
+    [ "$AUDIT" = on ] || die "$site: an auditor line needs audit on (it reads the audit store)"
+    ROLES+=(auditor)
+fi
+AGENT=${NAME[agent]} WEB=${NAME[web]:-} GUARD=${NAME[guard]:-} AUDITOR=${NAME[auditor]:-}
+AUDIT_REPORTS=""; [ -z "$AUDITOR" ] || AUDIT_REPORTS=/srv/$AUDITOR/reports
 COMMAND=${COMMAND:-$AGENT}
 [ "$COMMAND" != claude ] || COMMAND=claude-agent
 INBOX=${INBOX:-/srv/$AGENT-inbox}
@@ -213,11 +221,13 @@ for a in "${ROLES[@]}"; do
     done
 done
 [ "$INBOX" != "${QUEUE:-}" ] || die "$site: inbox and queue are the same path"
+[ -z "$AUDITOR" ] || { [ "$INBOX" != "/srv/$AUDITOR" ] && [ "${QUEUE:-}" != "/srv/$AUDITOR" ]; } \
+    || die "$site: /srv/$AUDITOR is the auditor's (its reports): pick another inbox or queue"
 [[ "$INBOX" =~ ^/srv/[a-z0-9][a-z0-9._-]*$ ]] || die "$site: the inbox $INBOX must be /srv/<name>"
 
 # Defaults for the ceilings (sized for one agent at a time on a 20-core, 32 GB workstation).
-declare -A D_MH=([agent]=14G [web]=5G [guard]=2560M) D_MM=([agent]=16G [web]=6G [guard]=3G) \
-    D_T=([agent]=8192 [web]=4096 [guard]=2048) D_C=([agent]=1200% [web]=400% [guard]=200%)
+declare -A D_MH=([agent]=14G [web]=5G [guard]=2560M [auditor]=2560M) D_MM=([agent]=16G [web]=6G [guard]=3G [auditor]=3G) \
+    D_T=([agent]=8192 [web]=4096 [guard]=2048 [auditor]=2048) D_C=([agent]=1200% [web]=400% [guard]=200% [auditor]=200%)
 for r in "${ROLES[@]}"; do
     MEMHIGH[$r]=${MEMHIGH[$r]:-${D_MH[$r]}} MEMMAX[$r]=${MEMMAX[$r]:-${D_MM[$r]}}
     TASKS[$r]=${TASKS[$r]:-${D_T[$r]}} CPU[$r]=${CPU[$r]:-${D_C[$r]}}
@@ -256,6 +266,9 @@ AGENTS_DAILY_CAP=$DAILY_CAP
 AGENTS_EXTERNAL="${!EXTERNAL[*]}"
 AGENTS_RUNSC=$RUNSC
 AGENTS_AUDIT=$AUDIT
+AGENTS_AUDITOR=$AUDITOR
+AGENTS_AUDITOR_UID=${UID_OF[auditor]:-}
+AGENTS_AUDIT_REPORTS=$AUDIT_REPORTS
 AGENTS_LIB=$LIBDIR
 AGENTS_SHARE=$SHARE
 AGENTS_ETC=$ETC
@@ -455,6 +468,17 @@ EOF
     # The ACL is always replaced, so readers taken out of agents.conf lose their entries.
     if [ "$WEB_ON" = 1 ]; then echo "a $INBOX/airlock  -    -     -    -   u:${UID_OF[web]}:r-x,u:${UID_OF[guard]}:r-x,d:u:${UID_OF[web]}:r--,d:u:${UID_OF[guard]}:r--"
     else echo "a $INBOX/airlock  -    -     -    -   u::rwx,g::r-x,o::---,d:u::rwx,d:g::r-x,d:o::---"; fi
+}
+
+# The auditor's reports: the operator's alone. The operator command writes each one after its run
+# (the auditor never sees them, nor writes there); /srv/<auditor> itself is root's.
+render_reports_tmpfiles() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: $AUDIT_REPORTS, the reports \`$COMMAND audit\` writes ($OPERATOR's
+# alone: $AUDITOR never reads or writes them). Kept until the operator removes them.
+d /srv/$AUDITOR          0755 root root -
+d $AUDIT_REPORTS  0700 $OPERATOR $OPERATOR -
+EOF
 }
 
 # The web queue: path mode group ACL (getfacl -n form, the operator by name). Owner always root,
@@ -1289,6 +1313,7 @@ file_list() {
         for f in web.py agent_web.py verdict.schema.json web-research.md web-research-rule.md; do echo "$QUEUE/lib/$f 0644"; done
     fi
     echo "/usr/local/bin/$COMMAND 0755"
+    [ -z "$AUDITOR" ] || echo "/etc/tmpfiles.d/airlock-agents-reports.conf 0644"
     if [ "$AUDIT" = on ]; then
         echo "/etc/sysusers.d/airlock-audit.conf 0644"
         echo "/etc/tmpfiles.d/airlock-audit.conf 0644"
@@ -1304,6 +1329,7 @@ render_file() {  # render_file <dest path>
         */50-airlock-agents.rules) render_polkit ;;
         */airlock-agents-inbox.conf) render_inbox_tmpfiles ;;
         */airlock-agents-queue.conf) render_queue_tmpfiles ;;
+        */airlock-agents-reports.conf) render_reports_tmpfiles ;;
         /etc/airlock-agents.nft) render_nft ;;
         */airlock-agents-nft.service) render_nft_unit ;;
         /etc/profile.d/airlock-agents.sh) render_profile ;;
@@ -1338,7 +1364,7 @@ if [ "$mode" = env ]; then render_env; exit 0; fi
 if [ "$mode" = userconf ]; then
     r="$(role_of "$out")"; [ -n "$r" ] || die "$out is not an agent user of this site"
     tpl=("$SHARE_SRC/templates/$r.conf"); [ "$r" != agent ] || [ "$WEB_ON" = 0 ] || tpl+=("$SHARE_SRC/templates/agent-web-mounts.conf")
-    sed -e "s#{agent}#$AGENT#g" -e "s#{web}#$WEB#g" -e "s#{guard}#$GUARD#g" -e "s#{inbox}#$INBOX#g" \
+    sed -e "s#{agent}#$AGENT#g" -e "s#{web}#$WEB#g" -e "s#{guard}#$GUARD#g" -e "s#{auditor}#$AUDITOR#g" -e "s#{inbox}#$INBOX#g" \
         -e "s#{queue}#${QUEUE:-}#g" -e "s#{command}#$COMMAND#g" "${tpl[@]}"
     exit 0
 fi
@@ -1463,7 +1489,7 @@ elif [ -z "$ROOT" ]; then
     if [ "$AUDIT" = on ] && [ -n "$envoy_list" ] && ! grep -qx 'log-journal on' <<< "$envoy_list"; then
         echo "note: audit on, but airlock-envoy's site file has no 'log-journal on': the store gets no Envoy lines until it has (add the line, then sudo airlock-envoy-apply)" >&2
     fi
-    for u in "$AGENT" $GUARD; do
+    for u in "$AGENT" $GUARD $AUDITOR; do
         while read -r l; do
             [ -n "$l" ] || continue
             if awk -v l="$l" '$1 == l && $2 == "web"' <<< "$envoy_list" | grep -q .; then
@@ -1471,6 +1497,28 @@ elif [ -z "$ROOT" ]; then
             fi
         done < <(awk -v u="$u" '$2 == "client" && $3 == u { print $1 }' <<< "$envoy_list")
     done
+    # The auditor reads what the agents did, and its model is injectable by what it reads: its
+    # listeners reach Anthropic (the built-in anthropic listener's names) and the audit store
+    # (plain HTTP, rules victoria-logs, no credential), nothing else.
+    if [ -n "$AUDITOR" ]; then
+        anth="$(awk '$1 == "anthropic" && $2 !~ /^(http:|web$|client$)/ { print $2 }' <<< "$envoy_list")"
+        store=0
+        while read -r l; do
+            [ -n "$l" ] || continue
+            while read -r _ d rest; do
+                case "$d" in
+                    client|web) ;;
+                    http://*)
+                        if [[ " $rest " != *" rules victoria-logs "* || " $rest " == *" credential "* ]]; then
+                            pause "airlock-envoy listener $l is $AUDITOR's and reaches $d ($rest): an auditor's listener reaches Anthropic and the audit store (rules victoria-logs, no credential) only"
+                        elif [[ " $rest " == *" socket $AUDIT_SOCK "* ]]; then store=1; fi ;;
+                    *) grep -qxF -- "$d" <<< "$anth" \
+                        || pause "airlock-envoy listener $l is $AUDITOR's and reaches $d: an auditor's listener reaches Anthropic and the audit store only" ;;
+                esac
+            done < <(awk -v l="$l" '$1 == l' <<< "$envoy_list")
+        done < <(awk -v u="$AUDITOR" '$2 == "client" && $3 == u { print $1 }' <<< "$envoy_list")
+        [ "$store" = 1 ] || echo "note: no airlock-envoy listener of $AUDITOR's reaches the audit store ($AUDIT_SOCK) yet: $COMMAND audit can't run until one does (below, or docs/agents.md, Audit)" >&2
+    fi
 fi
 
 
@@ -1705,7 +1753,7 @@ OP_HOME="$(getent passwd "$OPERATOR" | cut -d: -f6)"
 # taking one away is not automatic. Its files would go, but the user, its linger and home would
 # stay, outside any sandbox. The steps are in docs/agents.md.
 if [ -f "$ROOT$ETC/agents.env" ]; then
-    for k in AGENTS_AGENT AGENTS_WEB AGENTS_GUARD; do
+    for k in AGENTS_AGENT AGENTS_WEB AGENTS_GUARD AGENTS_AUDITOR; do
         old="$(sed -n "s/^$k=//p" "$ROOT$ETC/agents.env")"
         [ -n "$old" ] || continue
         now=" ${NAME[*]} "
@@ -1874,7 +1922,7 @@ done
 if [ "$nd_ok" = 1 ]; then ok "$ND: execute-only copies of sh, systemd-run, systemctl, install, current"
 else step "$ND: execute-only copies of sh, systemd-run, systemctl, install (nodump-refresh)" "$ROOT$LIBDIR/nodump-refresh"; fi
 
-declare -A GECOS=([agent]="Claude (airlock)" [web]="Claude web research (airlock)" [guard]="Claude answer gate (airlock)")
+declare -A GECOS=([agent]="Claude (airlock)" [web]="Claude web research (airlock)" [guard]="Claude answer gate (airlock)" [auditor]="Claude auditor (airlock)")
 
 provision_user() {
     local r=$1 u=${NAME[$1]} n=${UID_OF[$1]} size=${SIZE[$1]} sub=${SUB[$1]}
@@ -1996,6 +2044,23 @@ if [ "$WEB_ON" = 1 ]; then
         systemctl --global enable "$WEB-worker.path" "$WEB-worker.timer" "$GUARD-worker.path" "$GUARD-worker.timer"; fi
 fi
 
+# The auditor's reports: the operator's alone, 0700, in root's /srv/<auditor>.
+if [ -n "$AUDITOR" ]; then
+    for d in "/srv/$AUDITOR" "$AUDIT_REPORTS"; do
+        if [ -L "$ROOT$d" ] || { [ -e "$ROOT$d" ] && [ ! -d "$ROOT$d" ]; }; then die "$d is not a plain directory (a link?): move it away first"; fi
+    done
+    if [ -z "$ROOT" ] && [ -d "/srv/$AUDITOR" ] && [ "$(stat -c %u "/srv/$AUDITOR")" != 0 ]; then
+        die "/srv/$AUDITOR is $(stat -c %U "/srv/$AUDITOR")'s, not root's: another program's? pick another auditor name or move it"
+    fi
+    if [ "$(stat -c %u:%a "$ROOT/srv/$AUDITOR" 2>/dev/null)" = 0:755 ] || { [ -n "$ROOT" ] && [ "$(stat -c %a "$ROOT/srv/$AUDITOR" 2>/dev/null)" = 755 ]; }; then
+        if [ "$(stat -c %u:%g:%a "$ROOT$AUDIT_REPORTS" 2>/dev/null)" = "$OP_UID:$OP_GID:700" ] || { [ -n "$ROOT" ] && [ "$(stat -c %a "$ROOT$AUDIT_REPORTS" 2>/dev/null)" = 700 ]; }; then
+            reports_ok=1
+        else reports_ok=0; fi
+    else reports_ok=0; fi
+    if [ "$reports_ok" = 1 ]; then ok "/srv/$AUDITOR root's 0755, reports/ $OPERATOR's 0700"
+    else step "/srv/$AUDITOR root's 0755, reports/ $OPERATOR's 0700" systemd-tmpfiles --create /etc/tmpfiles.d/airlock-agents-reports.conf; fi
+fi
+
 # Last, and as each user: the starter dirs (a failure is the user's own doing, so a warning).
 for r in "${ROLES[@]}"; do
     u=${NAME[$r]} home="/home/${NAME[$r]}" missing=0 starter=".config .local .local/bin"
@@ -2092,6 +2157,10 @@ if [ -n "$missing_socks" ]; then
     if [ "$WEB_ON" = 1 ]; then
         echo "  $WEB-web @anthropic web"; echo "  client $WEB-web $WEB"
         echo "  $GUARD-anthropic @anthropic"; echo "  client $GUARD-anthropic $GUARD"
+    fi
+    if [ -n "$AUDITOR" ]; then
+        echo "  http audit.internal socket $AUDIT_SOCK rules victoria-logs"
+        echo "  $AUDITOR-store @anthropic http://audit.internal"; echo "  client $AUDITOR-store $AUDITOR"
     fi
 fi
 if [ "$confirm" = 1 ] && [ "$user_units_changed" = 1 ]; then echo "next: $COMMAND reload (the agents' user units changed), then $COMMAND update"; unpend user-units

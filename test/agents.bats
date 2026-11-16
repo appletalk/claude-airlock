@@ -3495,6 +3495,27 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     [[ "$output" == *"/usr/local/bin/vmauth must be a regular file owned by root and writable by root alone"* ]] || return 1
 }
 
+@test "apply with an auditor: provisioned like the other agent users, its reports dir made, a link there refused" {
+    audit_site "auditor  agent-audit  uid 1103 subuid 1400000 home 1G"
+    "$P" --user-conf agent-audit > "$E/agent-audit.conf"
+    mkdir -p "$R/home/agent-audit"
+    run "$P"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"would: install /etc/tmpfiles.d/airlock-agents-reports.conf"* ]] || return 1
+    [[ "$output" == *"would: useradd agent-audit (uid 1103, home /home/agent-audit, no other groups)"* ]] || return 1
+    [[ "$output" == *"would: /srv/agent-audit root's 0755, reports/ alice's 0700"* ]] || return 1
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'systemd-tmpfiles --create /etc/tmpfiles.d/airlock-agents-reports.conf' "$LOG" || return 1
+    [ "$(stat -c %a "$R/srv/agent-audit/reports")" = 700 ]
+    run "$P"
+    [[ "$output" == *"ok   /srv/agent-audit root's 0755, reports/ alice's 0700"* ]] || { echo "$output"; return 1; }
+    # a link in its place is refused, never followed
+    rm -rf "$R/srv/agent-audit/reports"; ln -s /tmp "$R/srv/agent-audit/reports"
+    run "$P"
+    [ "$status" -ne 0 ]; [[ "$output" == *"/srv/agent-audit/reports is not a plain directory"* ]]
+}
+
 @test "audit off after on: the units stop before their files go; the data stays" {
     audit_site
     mkdir -p "$R/usr/local/bin" "$R/var/lib/airlock-audit/vl"

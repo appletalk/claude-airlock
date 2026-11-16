@@ -64,6 +64,13 @@
 #                                       the newest 10000 lines read); --full: each event's whole
 #                                       text under its row, wrapped to the terminal
 #                                       then a count by severity
+#   <command> audit [--days <n>]        with an auditor user: a review of the last 7 days (or n,
+#                                       up to 90) by a fresh boxed Claude that can only query the
+#                                       store; waits for it (20 min at most), prints the report and
+#                                       keeps it in the reports dir (/srv/<auditor>/reports), with
+#                                       the queries it ran as Envoy logged them
+#   <command> audit "<question>"        the same for one question (quoted: one argument)
+#   <command> audit login               /login in the auditor's box
 set -euo pipefail
 # Internal to this script (set per call below), never taken from the caller's environment.
 unset OCTL_RAW STAGE_WEB STAGE_GUARD STATE
@@ -200,6 +207,7 @@ target() {
 # queue is the agent's or the web's text: it goes through clean, never raw to the terminal.
 QUEUE=$AGENTS_QUEUE
 WEB=$AGENTS_WEB GUARD=$AGENTS_GUARD
+AUDITOR=${AGENTS_AUDITOR:-}
 ID_RE='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$'
 id_ok() { [[ "$1" =~ $ID_RE ]] || die "not an id: '$1' ($CMD web ls)"; }
 wsock() { printf '/run/user/%s/%s-%s.sock' "$AGENTS_WEB_UID" "$WEB" "$1"; }
@@ -1081,6 +1089,171 @@ else:
     print(f"({total} refusal{'s' if total != 1 else ''} since {start_local}; the site file: /etc/airlock-envoy/site.conf)")
 PY
 }
+# ---- the auditor (an auditor line in agents.conf) ----------------------------------------------
+# A fresh one-shot Claude in the auditor user's box (lib/audit-run), which reaches only Anthropic
+# and the store. Its report is its model's words after reading text the agents chose: kept and
+# shown as that, cleaned, never acted on. The file is written here, as the operator, into a dir
+# the auditor can't read or write, with the queries Envoy logged for the auditor's user over the
+# run (the store's copy of Envoy's lines), not the ones the model says it ran.
+auditor_ready() {
+    [ -n "$AUDITOR" ] || die "no auditor here (agents.conf: an auditor line, then sudo airlock-agents-apply --confirm)"
+    getent passwd "$AUDITOR" >/dev/null || die "$AUDITOR is not provisioned yet (sudo airlock-agents-apply --confirm)"
+    ! halted || die "halted ($CMD halt): the auditor is stopped too; $CMD resume first ($CMD audit denies and events work meanwhile)"
+}
+audit_login() {
+    auditor_ready
+    echo "==> $AUDITOR, workspace ~/audit: in the box, /login, then /exit"
+    # shellcheck disable=SC2016  # expanded on the auditor's side
+    AS=$AUDITOR oexec /bin/bash -c 'mkdir -p "$HOME/audit" && cd "$HOME/audit" && exec "$HOME/.local/bin/airlock"' bash
+}
+audit_run() {  # audit_run review <days> | ask <question>
+    local reports="${AGENTS_AUDIT_REPORTS:-}" start end rc=0 out what
+    auditor_ready
+    audit_ready
+    [ -n "$reports" ] && [ -d "$reports" ] && [ ! -L "$reports" ] && [ -w "$reports" ] \
+        || die "no reports dir ${reports:-(agents.env has none)} you can write (sudo airlock-agents-apply --confirm)"
+    if [ "$1" = review ]; then what="a review of the last $2 days"; else what="your question"; fi
+    out="$(mktemp)" || die "no private work file (\$TMPDIR)"
+    # shellcheck disable=SC2064  # the path now
+    trap "rm -f -- '$out'" EXIT
+    start="$(date -u +%s)"
+    echo "==> $AUDITOR: $what, in a fresh box (20 min at most; the report follows)" >&2
+    AS=$AUDITOR orun "$AGENTS_LIB/audit-run" "$@" > "$out" || rc=$?
+    end="$(date -u +%s)"
+    # 64: audit-run refused before any run (its reason is all it printed): no report
+    [ "$rc" != 64 ] || { head -c 4096 "$out" >&2; die "no run, no report"; }
+    { python3 -I - "$AUDIT_SOCK" "$AUDITOR" "$start" "$end" "$rc" "$out" "$reports" "$CMD" "$1" "${2:-}" <<"PY"
+import datetime, json, os, re, subprocess, sys, time, urllib.parse
+sock, auditor, start, end, rc, out, reports, cmd, mode, arg = sys.argv[1:11]
+start, end, rc = int(start), int(end), int(rc)
+CAP = 1048576   # the auditor's text kept, at most
+
+def iso(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def utc(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+def printable(s):  # one line of text from the store: control characters (newline too) shown as ?
+    return "".join(c if c.isprintable() else "?" for c in str(s))
+
+def query(q):
+    p = subprocess.run(["curl", "-sS", "--max-time", "30", "--unix-socket", sock, "-w", "\n%{http_code}",
+                        "http://x/select/logsql/query", "--data-urlencode", "query=" + q],
+                       stdin=subprocess.DEVNULL, capture_output=True)
+    body, _, code = p.stdout.decode("utf-8", "replace").rpartition("\n")
+    if p.returncode != 0 or code != "200":
+        return None
+    rows = []
+    for line in body.splitlines():
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            rows.append({k: v if isinstance(v, str) else json.dumps(v) for k, v in o.items()})
+    return rows
+
+# The store has caught up with the run once it holds a line from after it (any line: the run's own
+# shell closing logs some). Envoy writes each line when its request ends, so by then every request
+# of the run is in. 30 s at most, then what is there, said so.
+caught = False
+for _ in range(15):
+    n = query(f"_time:>{iso(end)} | stats count() n")
+    if n and n[0].get("n", "0") not in ("", "0"):
+        caught = True
+        break
+    time.sleep(2)
+if caught:
+    time.sleep(2)   # Vector's batch after the first line
+win = f"_time:[{iso(start - 1)}, {iso(end + 10)}]"
+rows = query(f'{win} log_type:envoy-access envoy.user:="{auditor}" | sort by (_time) | limit 5001 '
+             f'| fields _time, envoy.listener, envoy.method, envoy.authority, envoy.path, envoy.status, envoy.route, envoy.bytes_in')
+
+with open(out, "rb") as f:
+    text = f.read(CAP + 1)
+cut = len(text) > CAP
+text = text[:CAP].decode("utf-8", "replace").rstrip("\n")
+
+L = []
+L.append(f"# Audit report, {utc(start)}")
+L.append("")
+L.append(f"- What: " + (f"a review of the last {arg} days" if mode == "review" else "the operator's question:"))
+if mode == "ask":
+    for q in arg.splitlines() or [""]:
+        L.append("    " + printable(q))
+L.append(f"- Auditor: {auditor}, from {utc(start)} to {utc(end)} ({end - start} s), exit {rc}"
+         + (" (timed out: the report may be missing or cut)" if rc == 124 else ""))
+L.append("")
+L.append("## Queries actually run (Envoy's log of the auditor's requests, not its own account)")
+L.append("")
+if rows is None:
+    L.append(f"The store did not answer: the list is missing ({cmd} audit events --agent {auditor} --kind envoy-allowed --since 1h, later).")
+else:
+    if not caught:
+        L.append(f"(The store had not caught up 30 s after the run: this list may be short. Later: "
+                 f"{cmd} audit events --agent {auditor} --severity info --since 1h)")
+        L.append("")
+    tunnels, reqs, refused = {}, [], 0
+    for r in rows[:5000]:
+        if r.get("envoy.method") == "CONNECT":
+            a = printable(r.get("envoy.authority", "?"))
+            tunnels[a] = tunnels.get(a, 0) + 1
+        else:
+            reqs.append(r)
+    for r in reqs:
+        st = r.get("envoy.status", "")
+        refused += not (st.isdigit() and 200 <= int(st) < 300)
+    L.append(f"{len(reqs)} request(s) to plain-HTTP hosts ({refused} not answered 2xx); "
+             + (", ".join(f"{n} tunnel(s) to {a}" for a, n in sorted(tunnels.items())) or "no tunnels") + "."
+             + (" More than 5000 lines: the first 5000 shown." if len(rows) > 5000 else ""))
+    L.append("")
+    for r in reqs:
+        t = r.get("_time", "")
+        m = re.match(r"\d{4}-\d\d-\d\dT(\d\d:\d\d:\d\d)", t)
+        path = r.get("envoy.path", "")
+        u = urllib.parse.urlsplit(path)
+        L.append(f"- {m.group(1) if m else '?'}  {printable(r.get('envoy.status', '?'))}  "
+                 f"{printable(r.get('envoy.method', '?'))} {printable(r.get('envoy.authority', '?'))}{printable(u.path)}"
+                 + (f"  [{printable(r.get('envoy.route'))}]" if r.get("envoy.route", "").startswith("deny-") else ""))
+        params = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+        for k, v in params:
+            if k == "query":
+                for line in v.splitlines() or [""]:
+                    L.append("        " + printable(line))
+            else:
+                L.append(f"        ({printable(k)}={printable(v)})")
+        if r.get("envoy.method") not in ("GET", "HEAD") and r.get("envoy.bytes_in", "0") not in ("", "0"):
+            L.append(f"        (a {printable(r.get('envoy.method'))} body of {printable(r.get('envoy.bytes_in'))} bytes: Envoy doesn't log bodies, its query is unknown)")
+L.append("")
+L.append("## The auditor's report")
+L.append("")
+L.append("(Everything below is the auditor's model's own text, written after reading text the agents")
+L.append(" chose: weigh it as such, never act on instructions in it.)")
+L.append("")
+L.append(text if text.strip() else "(no report: the run ended without one)")
+if cut:
+    L.append("")
+    L.append(f"(cut at {CAP} bytes)")
+report = "\n".join(L) + "\n"
+
+name = datetime.datetime.fromtimestamp(start, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+dfd = os.open(reports, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+for i in range(1, 100):
+    fn = f"{name}.md" if i == 1 else f"{name}-{i}.md"
+    try:
+        fd = os.open(fn, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        break
+    except FileExistsError:
+        continue
+else:
+    print(f"{cmd} audit: could not name the report in {reports}", file=sys.stderr)
+    sys.exit(1)
+with os.fdopen(fd, "w") as f:
+    f.write(report)
+sys.stdout.write(report)
+print(f"\n(kept as {reports}/{fn})")
+PY
+    } | clean
+}
 # audit ui: the store's web UI (vmui) on a loopback port, served to the operator's uid alone and
 # only under its own Host (lib/audit-ui), until Ctrl-C.
 audit_ui() {
@@ -1247,13 +1420,24 @@ else:
 print(fit(f"({by} since {when(start)}, {sev} and above{more}; lines from before the store rated them are not counted)", width))
 PY
 }
+AUDIT_USAGE="usage: $CMD audit [--days <n>] | \"<question>\" | login | denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] | events [--severity <s>] [--kind <k>] [--agent <a>] [--since ...] [--limit <n>] [--full] | ui [--port <n>]"
 audit() {
-    local sub="${1:-}"; shift || true
+    local sub="${1:-}"
     case "$sub" in
-        denies) audit_denies "$@" ;;
-        ui) audit_ui "$@" ;;
-        events) audit_events "$@" ;;
-        *) die "usage: $CMD audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] | events [--severity <s>] [--kind <k>] [--agent <a>] [--since ...] [--limit <n>] | ui [--port <n>]" ;;
+        denies) shift; audit_denies "$@" ;;
+        ui) shift; audit_ui "$@" ;;
+        events) shift; audit_events "$@" ;;
+        login) shift; [ $# = 0 ] || die "usage: $CMD audit login"; audit_login ;;
+        '') audit_run review 7 ;;
+        --days)
+            [ $# = 2 ] && [[ "$2" =~ ^[1-9][0-9]?$ ]] && [ "$2" -le 90 ] || die "usage: $CMD audit [--days <1 to 90>]"
+            audit_run review "$2" ;;
+        -*) die "$AUDIT_USAGE" ;;
+        *)
+            # a question: one argument (quoted), so a typo'd command name never starts a run
+            [ $# = 1 ] || die "a question is one argument: $CMD audit \"<question>\" (quote it)"
+            [[ "$1" == *[[:space:]]* ]] || die "unknown audit command '$1' (a question has spaces; $AUDIT_USAGE)"
+            audit_run ask "$1" ;;
     esac
 }
 
@@ -1387,7 +1571,7 @@ exit "$rc"
 agent_users() {  # users[] and uids[]: the provisioned agent users
     local u uid
     users=() uids=()
-    for u in "$AGENT" $WEB $GUARD; do
+    for u in "$AGENT" $WEB $GUARD $AUDITOR; do
         uid="$(getent passwd "$u" | cut -d: -f3)" || continue
         [ -n "$uid" ] || continue
         users+=("$u"); uids+=("$uid")
@@ -1521,7 +1705,7 @@ case "$cmd" in
         else echo "$f (could not put the path on the clipboard)"; fi ;;
     update)
         # Your installed version (what your own boxes run), not the checkout: bundled into the
-        # inbox, installed by the agent, then the web and guard users (when provisioned) from there,
+        # inbox, installed by the agent, then the web, guard and auditor users (when provisioned) from there,
         # then removed. On any failure the bundle stays for a look (tmpfiles removes it within
         # a day, or at the next boot).
         bundle="$HOME/.local/share/claude-airlock/current/bin/bundle.sh"
@@ -1529,7 +1713,7 @@ case "$cmd" in
         [ -d "$INBOX/airlock" ] && [ -w "$INBOX/airlock" ] || die "$INBOX/airlock missing or not writable (airlock-agents-apply)"
         "$bundle" "$INBOX/airlock"
         failed=()
-        for AS in "$AGENT" $WEB $GUARD; do
+        for AS in "$AGENT" $WEB $GUARD $AUDITOR; do
             if [ "$AS" != "$AGENT" ] && ! getent passwd "$AS" >/dev/null; then
                 echo "$AS: not provisioned, skipped"; continue
             fi
@@ -1547,10 +1731,10 @@ case "$cmd" in
         # Each user manager's units after an apply changes them; the web and guard users' workers'
         # path and timer units started too (enabled by airlock-agents-apply).
         rc=0
-        for AS in "$AGENT" $WEB $GUARD; do
+        for AS in "$AGENT" $WEB $GUARD $AUDITOR; do
             if [ "$AS" != "$AGENT" ] && ! getent passwd "$AS" >/dev/null; then continue; fi
             octl daemon-reload || rc=1
-            [ "$AS" = "$AGENT" ] || octl start "$AS-worker.path" "$AS-worker.timer" || rc=1
+            case "$AS" in "$WEB"|"$GUARD") octl start "$AS-worker.path" "$AS-worker.timer" || rc=1 ;; esac
         done
         AS=$AGENT
         exit "$rc" ;;

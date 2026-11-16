@@ -218,7 +218,9 @@ denies() { run "$OP" audit denies "$@"; }
         denies $a
         [ "$status" -ne 0 ] || { echo "accepted: $a"; return 1; }
     done
-    run "$OP" audit; [ "$status" -ne 0 ]; [[ "$output" == *"usage: agent audit denies"* ]]
+    # bare audit is the auditor's review: none here, so refused before any query
+    run "$OP" audit; [ "$status" -ne 0 ]; [[ "$output" == *"no auditor here"* ]]
+    run "$OP" audit --frob; [ "$status" -ne 0 ]; [[ "$output" == *"usage: agent audit [--days <n>]"* ]]
     [ ! -s "$CALLS" ]
 }
 
