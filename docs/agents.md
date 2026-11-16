@@ -292,6 +292,13 @@ machine (nothing leaves it):
   (minus box output), airlock-envoy's units, logins, polkit and sudo lines that name an agent
   user, and the kernel's drops with the agents' nft log prefixes. The rest of the journal stays
   where it is.
+- **Redacted before it is stored:** standard credential shapes (the values of query parameters
+  named like `token`, `key`, `secret`, `password`, `sig` or `code`; `Bearer`/`Basic` values and
+  `Authorization` headers; `user:password@` in URLs; GitHub, GitLab, Slack, Anthropic and AWS
+  key formats; JWTs; private key headers). The parameter name stays, so a refused `?token=`
+  still shows. Envoy never logs the credentials it adds; this is for secrets a box sends itself,
+  since whatever reads the store (an auditor's model included) may send it on. The raw lines stay
+  in Envoy's files and the journal.
 - **Where:** a VictoriaLogs (`/usr/local/bin/victoria-logs`, installed by `make install-agents`
   from an image pinned by digest, `sudo update-victorialogs`) under its own account
   `airlock-audit`, data in `/var/lib/airlock-audit`, kept 90 days up to 2 GB

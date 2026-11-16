@@ -831,6 +831,30 @@ EOF
 }
 # A VRL array of strings, from values the parser already restricted (no quotes, no backslashes).
 vrl_strings() { local v out=""; for v in "$@"; do out="$out${out:+, }\"$v\""; done; printf '[%s]' "$out"; }
+# Standard credential shapes, blanked in what the store keeps (the raw lines stay where they are:
+# Envoy's files, the journal). Defence in depth: Envoy never logs the credentials it adds, but a
+# box can put its own secret in a query string, and an auditor sends what it reads to its model.
+# Only public, generic patterns: nothing here names a site's own token formats.
+render_audit_redact() {
+    local f
+    echo "  redact:"
+    echo "    type: remap"
+    echo "    inputs: [envoy_fields, journal_fields]"
+    echo "    source: |"
+    for f in message path; do
+        cat <<EOF
+      if is_string(.$f) {
+        .$f = replace(string!(.$f), r'(?i)([?&](?:access_token|refresh_token|id_token|token|api_key|apikey|api-key|key|secret|client_secret|password|passwd|pwd|auth|authorization|sig|signature|code|session|sessionid|jwt)=)[^&\s"#]*', "\${1}REDACTED")
+        .$f = replace(.$f, r'(?i)\b(bearer|basic)(\s+)[A-Za-z0-9+/=._~-]{8,}', "\${1}\${2}REDACTED")
+        .$f = replace(.$f, r'(?i)((?:\b|_)authorization["\x27]?\s*[:=]\s*["\x27]?)([A-Za-z]+\s+)?[A-Za-z0-9+/=._~-]{8,}', "\${1}\${2}REDACTED")
+        .$f = replace(.$f, r'(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@"]+:)[^/\s@"]+@', "\${1}REDACTED@")
+        .$f = replace(.$f, r'\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b', "REDACTED")
+        .$f = replace(.$f, r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', "REDACTED-JWT")
+        .$f = replace(.$f, r'-----BEGIN [A-Z ]*PRIVATE KEY-----', "REDACTED-PRIVATE-KEY")
+      }
+EOF
+    done
+}
 render_audit_vector() {
     local r p uids=() names=() alt ualt nft=""
     for r in "${ROLES[@]}"; do uids+=("${UID_OF[$r]}"); names+=("${NAME[$r]}"); done
@@ -841,6 +865,7 @@ render_audit_vector() {
 # logs, read as they are written; from the journal only the agents' lines: their users and
 # managers (minus box output), airlock-envoy's and the store's own units, logins, polkit and
 # sudo lines naming an agent, and the kernel's drops with the agents' nft log prefixes.
+# Standard credential shapes are blanked before anything is stored (redact).
 data_dir: $AUDIT_LIB/vector
 sources:
   envoy:
@@ -886,10 +911,11 @@ transforms:
     inputs: [journal_agents]
     source: |
       .log_type = "journal"
+$(render_audit_redact)
 sinks:
   store:
     type: elasticsearch
-    inputs: [envoy_fields, journal_fields]
+    inputs: [redact]
     endpoints: ["http://127.0.0.1:9428/insert/elasticsearch/"]
     api_version: v8
     compression: gzip

@@ -46,3 +46,31 @@ tests:
   - name: envoy web line typed
     inputs: [{insert_at: envoy_fields, type: log, log_fields: {file: "/var/log/airlock-envoy/web.jsonl-20261115T000000Z", message: 'not json'}}]
     outputs: [{extract_from: envoy_fields, conditions: [{type: vrl, source: 'assert!(.log_type == "envoy-web" && .message == "not json")'}]}]
+  # redact: standard credential shapes blanked, everything else kept as it was
+  - name: redact query token values, any case, name kept
+    inputs: [{insert_at: redact, type: log, log_fields: {path: "/api/v1/repos/a/b?a=1&TOKEN=canary-123&access_token=xyz&page=2", message: "x"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.path, "/api/v1/repos/a/b?a=1&TOKEN=REDACTED&access_token=REDACTED&page=2")'}]}]
+  - name: redact query values in the raw envoy line too
+    inputs: [{insert_at: redact, type: log, log_fields: {message: '{"path":"/x?api_key=abc123def&q=hello"}'}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "{\"path\":\"/x?api_key=REDACTED&q=hello\"}")'}]}]
+  - name: keep ordinary query parameters
+    inputs: [{insert_at: redact, type: log, log_fields: {path: "/api/v1/repos/search?q=keyboard&limit=10&sort=updated"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.path, "/api/v1/repos/search?q=keyboard&limit=10&sort=updated")'}]}]
+  - name: redact bearer and basic values
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "sent Authorization: Bearer abcdefghijklmnop and basic dXNlcjpwYXNzd29yZA=="}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!contains(string!(.message), "abcdefghijklmnop") && !contains(string!(.message), "dXNlcjpwYXNzd29yZA") && contains(string!(.message), "REDACTED"))'}]}]
+  - name: redact url userinfo
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "fetch https://alice:s3cretpass@git.example.org/x.git failed"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "fetch https://alice:REDACTED@git.example.org/x.git failed")'}]}]
+  - name: redact vendor token shapes
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "ghp_abcdefghijklmnopqrstuvwxyz0123456789 AKIAABCDEFGHIJKLMNOP sk-ant-api03-abcdefghijklmnopqrstuv"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "REDACTED REDACTED REDACTED")'}]}]
+  - name: redact a jwt and a private key header
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N and -----BEGIN OPENSSH PRIVATE KEY-----"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "jwt REDACTED-JWT and REDACTED-PRIVATE-KEY")'}]}]
+  - name: keep ordinary journal text
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "agent : user NOT in sudoers ; TTY=pts/1 ; COMMAND=/usr/bin/cat /etc/shadow"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "agent : user NOT in sudoers ; TTY=pts/1 ; COMMAND=/usr/bin/cat /etc/shadow")'}]}]
+  - name: a line without message or path passes untouched
+    inputs: [{insert_at: redact, type: log, log_fields: {status: "200"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.status, "200")'}]}]
