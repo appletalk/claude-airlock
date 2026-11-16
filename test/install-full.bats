@@ -128,3 +128,20 @@ update-runsc --check"
 @test "refuses to run as root" {
     grep -q 'run it as yourself' "$S" || return 1
 }
+
+@test "the first-time agents question checks the clone too before its root step" {
+    command -v script >/dev/null || skip "no script(1)"
+    rm -f "$AIRLOCK_AGENTS_ENV"
+    git -C "$T/repo" init -q && git -C "$T/repo" add -A && git -C "$T/repo" -c user.email=t@example.org -c user.name=t commit -qm x
+    echo stray > "$T/repo/agents/new-file"
+    # answers: launcher n, set up agents y
+    run script -qec "bash $T/repo/bin/install-full.sh" /dev/null <<< $'n\ny\n'
+    [[ "$output" == *"has local changes"* ]] || { echo "$output"; return 1; }
+    ! grep -q 'agents/install.sh' "$CALLS" || return 1
+}
+
+@test "not a git checkout: said, then on (nothing to compare against)" {
+    agents_env "$(id -un)" off
+    YES=1 run bash "$S" </dev/null
+    [ "$status" -eq 0 ] && [[ "$output" == *"not a git checkout: local changes can't be checked"* ]] || return 1
+}

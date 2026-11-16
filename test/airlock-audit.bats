@@ -13,7 +13,8 @@ setup() {
     for p in 1 101 102 103; do mkdir -p "$R/proc/$p/ns"; done
     ln -s 'net:[1]' "$R/proc/1/ns/net"
     for p in 101 102 103; do ln -s "net:[${NETNS:-999}]" "$R/proc/$p/ns/net"; done
-    ln -s /usr/local/bin/victoria-logs "$R/proc/101/exe"; ln -s /usr/local/bin/vmauth "$R/proc/102/exe"
+    mkdir -p "$R/usr/local/bin"; echo vl > "$R/usr/local/bin/victoria-logs"; echo va > "$R/usr/local/bin/vmauth"
+    ln -s "$R/usr/local/bin/victoria-logs" "$R/proc/101/exe"; ln -s "$R/usr/local/bin/vmauth" "$R/proc/102/exe"
     # systemctl: start/stop recorded; is-active from INACTIVE (a unit named there is failed);
     # show MainPID: 101/102/103; cat: present
     cat > "$T/bin/systemctl" <<'EOF'
@@ -128,9 +129,9 @@ EOF
     run "$A" restart --if-stale
     [ "$status" -eq 0 ] && [[ "$output" == *"runs the installed binaries: nothing to restart"* ]] || return 1
     [ ! -s "$CALLS" ] || return 1
-    rm "$R/proc/102/exe"; ln -s '/usr/local/bin/vmauth (deleted)' "$R/proc/102/exe"
+    rm "$R/proc/102/exe"; ln -s "$R/usr/local/bin/vmauth (deleted)" "$R/proc/102/exe"
     run "$A" restart --if-stale
-    [ "$status" -eq 0 ] && [[ "$output" == *"stale: airlock-audit-vmauth(/usr/local/bin/vmauth (deleted))"* ]] || return 1
+    [ "$status" -eq 0 ] && [[ "$output" == *"stale: airlock-audit-vmauth($R/usr/local/bin/vmauth (deleted))"* ]] || return 1
     grep -q '^systemctl stop ' "$CALLS" && grep -q '^systemctl start ' "$CALLS" || return 1
 }
 
@@ -156,4 +157,16 @@ EOF
     rm "$R/proc/103/ns/net"; ln -s 'net:[555]' "$R/proc/103/ns/net"
     run "$A" check
     [ "$status" -eq 1 ]; [[ "$output" == *"FAIL airlock-audit-vector: in net:[555], not the store's net:[999]"* ]]
+}
+
+@test "restart --if-stale: the same file through a symlinked path is current" {
+    mkdir -p "$T/real"; mv "$R/usr/local/bin/vmauth" "$T/real/vmauth"; ln -s "$T/real/vmauth" "$R/usr/local/bin/vmauth"
+    rm "$R/proc/102/exe"; ln -s "$T/real/vmauth" "$R/proc/102/exe"
+    run "$A" restart --if-stale
+    [ "$status" -eq 0 ] && [[ "$output" == *"nothing to restart"* ]] || return 1
+}
+
+@test "status: seccomp kills from the audit transport (SECCOMP ...) count too" {
+    KILLS='SECCOMP auid=4294967295 uid=969 comm="vmauth" sig=31 syscall=27' run "$A" status
+    [ "$status" -eq 0 ] && [[ "$output" == *'SECCOMP auid=4294967295 uid=969 comm="vmauth"'* ]] || return 1
 }

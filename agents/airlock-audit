@@ -55,7 +55,7 @@ status)
     since="$(systemctl show -p ActiveEnterTimestamp --value airlock-audit-vl.service)"
     # Seccomp records arrive as kernel or as audit lines (with journald's audit socket active).
     kills="$(journalctl --no-pager -q ${since:+--since "$since"} _TRANSPORT=kernel + _TRANSPORT=audit 2>/dev/null \
-        | grep 'type=1326' | grep -E 'comm="(victoria-logs|vmauth|vector|journalctl|cat|systemd-socket-)' || true)"
+        | grep -E 'type=1326|^SECCOMP |[[:space:]]SECCOMP ' | grep -E 'comm="(victoria-logs|vmauth|vector|journalctl|cat|systemd-socket-)' || true)"
     if [ -z "$kills" ]; then echo "  none"; else while IFS= read -r l; do echo "  $l"; done <<< "$kills"; fi
     ;;
 restart)
@@ -68,7 +68,9 @@ restart)
             for u in airlock-audit-vl:victoria-logs airlock-audit-vmauth:vmauth; do
                 p="$(systemctl show -p MainPID --value "${u%%:*}.service")"
                 exe="$(readlink "$PROC/$p/exe" 2>/dev/null || true)"
-                [ "$exe" = "/usr/local/bin/${u#*:}" ] || stale="$stale ${u%%:*}(${exe:-not running})"
+                # the same file (inode), so a symlinked /usr/local still matches; a binary replaced
+                # on disk is another inode
+                [ "$PROC/$p/exe" -ef "$ROOT/usr/local/bin/${u#*:}" ] || stale="$stale ${u%%:*}(${exe:-not running})"
             done
             if [ -z "$stale" ]; then echo "the store runs the installed binaries: nothing to restart"; exit 0; fi
             echo "stale:$stale" ;;
@@ -90,9 +92,9 @@ reset)
         read -r -u 3 -p "Reset the audit store? [y/N] " a || a=
         [[ "$a" == [yY]* ]] || { echo "nothing changed"; exit 1; }
     fi
-    systemctl stop "${STOP[@]}"
-    # Whatever fails between the stop and the start, the store starts again (empty or not).
+    # Whatever fails from the stop to the start, the store starts again (empty or not).
     trap 'systemctl start "${START[@]}"' EXIT
+    systemctl stop "${STOP[@]}"
     [ ! -d "$DATA" ] || find "$DATA" -mindepth 1 -delete
     rm -f "$CURSOR"
     trap - EXIT

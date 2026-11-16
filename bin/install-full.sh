@@ -23,8 +23,8 @@
 #
 # The root steps run code from this checkout (agents/install.sh installs the toolkit that runs as
 # root). Run it from a clone no airlock box mounts: a box that can write it could change what
-# root runs. Before the first sudo it checks the checkout has no local changes and stops if it
-# has; and it says so, every run.
+# root runs. Before the first root step it checks the checkout has no local changes (tracked or
+# untracked) and stops if it has. That catches stray edits, not a box that could write the clone.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,8 +52,10 @@ clean_checkout() {
     [ "$checked" = 0 ] || return 0
     checked=1
     echo "    (root runs code from $REPO_DIR: use a clone no airlock box mounts)"
-    if ! git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then return 0; fi
-    local dirty; dirty="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null)" || dirty="(git status failed)"
+    if ! git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "    (not a git checkout: local changes can't be checked)"; return 0
+    fi
+    local dirty; dirty="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all 2>/dev/null)" || dirty="(git status failed)"
     if [ -n "$dirty" ]; then
         echo "make install: $REPO_DIR has local changes; the root steps would run them. Commit, stash or check them out first:" >&2
         printf '%s\n' "$dirty" | head -n 10 >&2
