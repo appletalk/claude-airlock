@@ -1260,6 +1260,10 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
           match(to_string(.message) ?? "", r'^New session \S+ of user \S+ with class .user. and type .tty.\.$') { sev = "low"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"
+      } else if k == "session" && match(unit, r'^user@($ualt)[.]service$') && (to_string(._EXE) ?? "") == "/usr/lib/systemd/systemd" &&
+          includes(["", "init.scope"], to_string(._SYSTEMD_USER_UNIT) ?? "") && starts_with(to_string(.message) ?? "", "Failed to connect to system bus") {
+        # Known noise: an agent's user manager has no system bus (its sandbox), and says so.
+        sev = "info"
       } else if includes(["session", "envoy-service", "agent-process"], k) && prio <= 3 { sev = "low"
       } else if k == "session" && prio == 4 { sev = "low" }
       .audit.severity = sev

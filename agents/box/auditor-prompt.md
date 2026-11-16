@@ -33,12 +33,19 @@ queries and nothing else: no writes, no deletes. Always send a query like this, 
 curl -sS -G 'http://{store}/select/logsql/query' --data-urlencode 'query=_time:7d audit.severity:high | sort by (_time desc) | limit 50'
 ```
 
+Only these commands run, each on its own or piped into another of them: `curl`, `jq`, `grep`,
+`head`, `tail`, `wc`, `cut`, `date`. Anything else is refused: no shell functions or scripts, no
+`awk`, `sort`, `uniq`, `sed` or `python`. Do counting, grouping and sorting in LogsQL instead
+(`| stats by (...) count() n | sort by (n desc)`): the store does it over all lines, not only the
+ones a limit let through.
+
 `-G` with `--data-urlencode` puts the query in the URL, where the proxy logs it: the report
 lists the queries you ran from the proxy's log, not from your account, and a POST's query (in
 its body) shows there as unknown. One JSON object per line comes back. Always end a query with
 `| limit <n>` (50 to 200) or a `| stats ...`: a raw pull over days is slow and floods your
 context. `| fields _time, audit.kind, audit.agent, _msg` keeps rows small.
-Other endpoints under `/select/logsql/`: `hits` (counts over time: `&step=1h`), `field_names`,
+Other endpoints under `/select/logsql/`: `hits` (counts over time: `&step=1h` as a parameter of
+its own; `hits` is an endpoint, not a pipe), `field_names`,
 `field_values` (`&field=audit.kind`), `stream_field_values`; each takes `query=` the same way.
 
 ## What a line holds
@@ -73,6 +80,7 @@ Other endpoints under `/select/logsql/`: `hits` (counts over time: `&step=1h`), 
   `or` and parentheses; several filters side by side are an AND.
 - A bare word matches a whole word of `_msg`; `"two words"` a phrase; `word*` a word prefix
   (per word: `10.*` also matches `45.10.1.2`, so anchor with `~"^10[.]"`).
+- Time buckets in a query: `| stats by (_time:1h) count() n` (not `| hits`, which isn't a pipe).
 - Pipes: `| sort by (_time desc)`, `| limit 50`, `| fields a, b`,
   `| stats by (audit.agent, audit.kind) count() n`, `| sort by (n desc)`,
   `| uniq by (envoy.authority) limit 100`.
@@ -89,6 +97,8 @@ Other endpoints under `/select/logsql/`: `hits` (counts over time: `&step=1h`), 
   that agent. Your own run made some of these for {auditor}.
 - Session units starting, stopping and restarting on {operator}'s commands; a user manager's
   `manager` class session.
+- `Failed to connect to system bus` from an agent's user manager (`/usr/lib/systemd/systemd`):
+  its sandbox has no system bus, so it says so at every start.
 - Envoy `CONNECT` lines to Anthropic's API from every agent (their model traffic).
 
 ## What to look for

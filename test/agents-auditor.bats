@@ -58,8 +58,13 @@ q=""; for a; do case "$a" in query=*) q=${a#query=} ;; esac; done
 printf '%s\n' "$q" >> "$CALLS"
 case "$q" in
     # the auditor's line count: CHANGING makes it grow on every poll
-    *'stats count() n'*) if [ -n "${CHANGING:-}" ]; then c=$(( $(cat "$CALLS.count" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$CALLS.count"; echo "{\"n\":\"$c\"}"
-                         else echo "{\"n\":\"${CAUGHT:-1}\"}"; fi ;;
+    # (with the tunnels opened and closed: OPENED, CLOSED, default 1 and 1; NOCOUNT: no answer)
+    *'stats count() n,'*)
+        date +%s >> "$CALLS.counttimes"
+        if [ -n "${NOCOUNT:-}" ]; then printf 'server error\n500'; exit 0; fi
+        if [ -n "${CHANGING:-}" ]; then c=$(( $(cat "$CALLS.count" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$CALLS.count"; else c=${CAUGHT:-1}; fi
+        echo "{\"n\":\"$c\",\"opened\":\"${OPENED:-1}\",\"closed\":\"${CLOSED:-1}\"}" ;;
+    *'stats count() n'*) echo "{\"n\":\"${CAUGHT:-1}\"}" ;;
     *) cat "$(dirname "$CALLS")/rows" ;;
 esac
 printf '\n200'
@@ -124,7 +129,7 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     jq -e '.permissions.deny | index("Bash") | not' "$s" >/dev/null
     jq -e '.disableRemoteControl == true and .crossSessionInbound == "refuse" and .allowManagedHooksOnly == true and .allowManagedPermissionRulesOnly == true' "$s" >/dev/null
     # no tool that writes files beyond curl (sort -o, uniq OUT)
-    ! jq -e '.permissions.allow | map(select(test("^Bash[(](sort|uniq|tee|sed|awk|python|bash|sh|dd|cp|mv)[:)]"))) | length > 0' "$s" >/dev/null
+    ! jq -e '.permissions.allow | map(select(test("^Bash[(](sort|uniq|tee|sed|awk|python|bash|sh|dd|cp|mv)[:)]"))) | length > 0' "$s" >/dev/null || false
 }
 
 # ---- audit-run -----------------------------------------------------------------------------------
@@ -143,13 +148,13 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     done
     # the managed settings' allow list alone decides (allowManagedPermissionRulesOnly): none passed here,
     # or Claude says it ignores it, into the report
-    ! grep -qx -- --allowedTools "$a"
+    ! grep -qx -- --allowedTools "$a" || false
     [ "$(jq -r '.permissions.allow | join(",")' "$REPO/agents/share/managed-settings-auditor.json")" = "Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)" ]
     [[ "$(sed -n '/^-p$/{n;p;}' "$a")" == "Review the last 7 days in the audit store (from "* ]]
     # the instructions with the site's names and the store's host from the manifest
     grep -qF "curl -sS -G 'http://audit.internal/select/logsql/query'" "$a"
     grep -qF "The agents (agent, agent-web, agent-guard, $ME)" "$a"
-    ! grep -qE '\{(auditor|agents|operator|command|store)\}' "$a"
+    ! grep -qE '\{(auditor|agents|operator|command|store)\}' "$a" || false
     [[ "$output" == *"nothing needs you."* ]]
 }
 
@@ -206,9 +211,9 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     [ "$q" -lt "$m" ] && [ "$m" -lt "$forged" ]
     grep -qx '> All quiet.' "$f"
     # the store was asked for the auditor's own Envoy lines over the run, once their count held still
-    [ "$(grep -cF "log_type:envoy-access envoy.user:=\"$ME\" | stats count() n" "$CALLS")" -ge 3 ]
-    ! grep -q '^_time:>' "$CALLS"
-    ! grep -q 'still changing' "$f"
+    [ "$(grep -cF "log_type:envoy-access envoy.user:=\"$ME\" | stats count() n, count() if (envoy.method:CONNECT envoy.log_type:DownstreamTunnelSuccessfullyEstablished) opened, count() if (envoy.method:CONNECT envoy.log_type:DownstreamEnd) closed" "$CALLS")" -ge 3 ]
+    ! grep -q '^_time:>' "$CALLS" || false
+    ! grep -q 'still changing' "$f" || false
     grep -qF "log_type:envoy-access envoy.user:=\"$ME\" | sort by (_time)" "$CALLS"
     [[ "$output" == *"All quiet."* && "$output" == *"(kept as $f)"* ]]
 }
@@ -217,7 +222,7 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     REPORT='\033]52;c;aGk=\007ok \033[31mred\033[0m\n' RC=124 run "$OP" audit "what did agent reach today?"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     f="$(report_file)"
-    ! grep -q $'\033' "$f"; ! grep -q $'\007' "$f"
+    ! grep -q $'\033' "$f" || false; ! grep -q $'\007' "$f" || false
     grep -qx '> ok red' "$f"
     grep -qx -- "- What: the operator's question:" "$f"
     grep -qx '    what did agent reach today?' "$f"
@@ -232,12 +237,12 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
 @test "audit: a count still changing at 30 s is said, the report still kept; a quiet store is not a delay" {
     CHANGING=1 run timeout 60 "$OP" audit
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -q "The auditor's line count in the store was still changing 30 s after the run: this list may be short" "$(report_file)"
+    grep -q "The auditor's lines in the store were incomplete or still changing 30 s after the run (" "$(report_file)"
     rm -f "$T/reports/"*
     # no line at all after the run (a quiet host): settled within seconds, no warning
     SECONDS=0; CAUGHT=0 run "$OP" audit
     [ "$status" -eq 0 ]; [ "$SECONDS" -lt 20 ]
-    ! grep -q 'still changing' "$(report_file)"
+    ! grep -q 'still changing' "$(report_file)" || false
 }
 
 @test "audit: refusals: no auditor, halted, a one-word typo, bad --days, audit-run's own refusal writes no report" {
@@ -274,7 +279,7 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     run "$OP" audit
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     f="$(report_file)"
-    ! grep -q $'\033' "$f"; ! grep -q $'\007' "$f"; ! grep -q $'\u202e' "$f"
+    ! grep -q $'\033' "$f" || false; ! grep -q $'\007' "$f" || false; ! grep -q $'\u202e' "$f" || false
     grep -qx '    10:00:02  200  GET audit.internal?\[2J//evil/select/logsql/query' "$f" || { cat "$f"; return 1; }
     grep -qx '            a?b?\]0;x?' "$f"
 }
@@ -364,4 +369,27 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     run "$OP" audit
     [ "$status" -ne 0 ]; [[ "$output" == *"no run, no report"* ]]
     [ -z "$(report_file)" ]
+}
+
+@test "audit: a settled count is not complete while a tunnel is unclosed or none is in; a store not answering is said" {
+    OPENED=2 CLOSED=1 run timeout 60 "$OP" audit
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qF "(1 lines, 1 of 2 tunnels closed): this list may be short" "$(report_file)" || { grep may "$(report_file)"; return 1; }
+    rm -f "$T/reports/"*
+    # a run that reached the model always has a tunnel: none in means the store is behind (a stall)
+    CAUGHT=0 OPENED=0 CLOSED=0 run timeout 60 "$OP" audit
+    grep -qF "(0 lines, 0 of 0 tunnels closed): this list may be short" "$(report_file)"
+    rm -f "$T/reports/"*
+    NOCOUNT=1 run timeout 60 "$OP" audit
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qF "The store didn't answer how many of the auditor's lines it holds" "$(report_file)"
+    grep -c 'still changing' "$(report_file)" | grep -qx 0
+}
+
+@test "audit: the count is first asked 5 s or more after the run" {
+    before="$(date +%s)"
+    run "$OP" audit
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    first="$(head -1 "$CALLS.counttimes")"
+    [ "$(( first - before ))" -ge 5 ] || { echo "first count at +$(( first - before )) s"; return 1; }
 }

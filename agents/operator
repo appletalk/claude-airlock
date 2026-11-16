@@ -1135,8 +1135,8 @@ def utc(t):
 def printable(s):  # one line of text from the store: control characters (newline too) shown as ?
     return "".join(c if c.isprintable() else "?" for c in str(s))
 
-def query(q):
-    p = subprocess.run(["curl", "-sS", "--max-time", "30", "--unix-socket", sock, "-w", "\n%{http_code}",
+def query(q, limit=30):
+    p = subprocess.run(["curl", "-sS", "--max-time", str(max(1, int(limit))), "--unix-socket", sock, "-w", "\n%{http_code}",
                         "http://x/select/logsql/query", "--data-urlencode", "query=" + q],
                        stdin=subprocess.DEVNULL, capture_output=True)
     body, _, code = p.stdout.decode("utf-8", "replace").rpartition("\n")
@@ -1153,26 +1153,41 @@ def query(q):
     return rows
 
 # Envoy writes each line when its request ends and the store has it within a second or two
-# (measured on the first host runs: 0.02 to 1 s). So the list is in once the auditor's own line
-# count over the run has held still for three polls, 6 s or more after the run; 30 s at most, then
-# what is there, said so. (Waiting for any newer line instead never ends on a quiet host.)
+# (measured on the first host runs: 0.02 to 1 s). The list is in when it is complete and settled:
+# every tunnel the run opened has its closing line (the box's model traffic rides one, so a run
+# that reached the model has one; Envoy writes the close last, when the box goes), and the count
+# of the auditor's lines has held still for three polls; from 5 s after the run, about 30 s at
+# most, then what is there, said so. A count the store didn't answer never counts as settled.
+# (Another run or an audit login in this window shows here too.)
 win = f"_time:[{iso(start - 1)}, {iso(end + 10)}]"
-COUNT = f'{win} log_type:envoy-access envoy.user:="{auditor}" | stats count() n'
-caught, last, still = False, None, 0
+COUNT = (f'{win} log_type:envoy-access envoy.user:="{auditor}" | stats count() n, '
+         f'count() if (envoy.method:CONNECT envoy.log_type:DownstreamTunnelSuccessfullyEstablished) opened, '
+         f'count() if (envoy.method:CONNECT envoy.log_type:DownstreamEnd) closed')
+caught, answered, last, still, seen = False, False, None, 0, ("?", "?", "?")
 deadline = time.monotonic() + 30
-time.sleep(max(0, end + 6 - time.time()))
+time.sleep(min(6, max(0, end + 6 - time.time())))
 while time.monotonic() < deadline:
-    n = query(COUNT)
-    n = n[0].get("n", "") if n else None
-    if n is not None and n == last:
-        still += 1
-        if still >= 2:
-            caught = True
-            break
+    r = query(COUNT, deadline - time.monotonic())
+    cur = None
+    if r:
+        cur = tuple(r[0].get(k, "") for k in ("n", "opened", "closed"))
+        if not all(v.isdigit() for v in cur):
+            cur = None
+    if cur is not None:
+        answered, seen = True, cur
+        opened, closed = int(cur[1]), int(cur[2])
+        complete = closed >= opened and (opened > 0 or rc != 0)
+        if cur == last and complete:
+            still += 1
+            if still >= 2:
+                caught = True
+                break
+        elif cur != last:
+            still = 0
     else:
         still = 0
-    last = n
-    time.sleep(2)
+    last = cur
+    time.sleep(min(2, max(0, deadline - time.monotonic())))
 rows = query(f'{win} log_type:envoy-access envoy.user:="{auditor}" | sort by (_time) | limit 5001 '
              f'| fields _time, envoy.listener, envoy.method, envoy.authority, envoy.path, envoy.status, envoy.route, envoy.bytes_in')
 
@@ -1196,8 +1211,13 @@ L.append("")
 if rows is None:
     L.append(f"The store did not answer: the list is missing ({cmd} audit events --agent {auditor} --kind envoy-allowed --since 1h, later).")
 else:
-    if not caught:
-        L.append(f"(The auditor's line count in the store was still changing 30 s after the run: this list may be short. Later: "
+    if not answered:
+        L.append(f"(The store didn't answer how many of the auditor's lines it holds: this list may be short. Later: "
+                 f"{cmd} audit events --agent {auditor} --severity info --since 1h)")
+        L.append("")
+    elif not caught:
+        L.append(f"(The auditor's lines in the store were incomplete or still changing 30 s after the run ({seen[0]} lines, "
+                 f"{seen[2]} of {seen[1]} tunnels closed): this list may be short. Later: "
                  f"{cmd} audit events --agent {auditor} --severity info --since 1h)")
         L.append("")
     tunnels, reqs, refused = {}, [], 0
