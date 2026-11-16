@@ -78,6 +78,7 @@ claude-agent attach myproject
 | `claude-agent update` | give the agents your current claude-airlock |
 | `claude-agent web ...` | web research (below) |
 | `claude-agent halt` / `resume` | emergency stop of everything (below) / back to normal |
+| `claude-agent audit denies` | Envoy's recent refusals, with who and which site file line (with `audit on`, below) |
 
 Tab completion (sessions, web commands, the queue's ids by state): add to your `~/.zshrc`, after
 `compinit`, or to `~/.bashrc` with `completion.bash`:
@@ -332,6 +333,16 @@ machine (nothing leaves it):
 - **With external nftables**, name your drop rules' log prefixes, 16 characters or more before
   any colon (a process name is at most 15, and the kernel starts some lines with it):
   `audit-nft-prefix myhost-agent-drop: myhost-agentweb-drop:`.
+- **What was refused:** `claude-agent audit denies [--since 7d] [--limit 200]` (yours, no sudo):
+  Envoy's own refusals, newest first (the last 24 hours, 50 by default), each with its time, user
+  and listener, status, what was asked (method and host, or the TLS name in a tunnel), Envoy's
+  route, and which site file line would change it (a listener's destinations, a host's `http`
+  line, an internal name, a locked credential). A refused TLS name has no user in Envoy's line: it
+  is taken from the CONNECT that opened that tunnel (the latest one before it with the same
+  connection id, as ids restart with Envoy), and shown as `?` when none is in the store. Upstream's
+  own errors (a 403 from the server itself) and failed connections are not refusals and stay out.
+  One fixed query, no model; what it prints is the agents' text (hosts, paths, names), cleaned of
+  control characters, never acted on. It works while the agents are halted.
 - **Day to day:** `sudo airlock-audit status` (units, what the store holds, seccomp kills),
   `restart`, `check` (the guarantees above, live: exit 1 on any failure), and `reset` (empties the
   store and reads the retention window back in from the journal; asks first).

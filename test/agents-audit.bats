@@ -1,0 +1,140 @@
+#!/usr/bin/env bats
+# agents/operator audit denies: the fixed query, the join of a refused TLS name to its CONNECT,
+# the hints, cleaning. curl is a stub that answers from fixtures by the query it is sent; the
+# store's socket is a socket file nobody listens on. Nothing real is touched.
+
+setup() {
+    REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+    T="$BATS_TEST_TMPDIR"
+    OP="$REPO/agents/operator"
+    export AIRLOCK_AGENTS_ENV="$T/agents.env"
+    printf '%s\n' AGENTS_OPERATOR=alice AGENTS_COMMAND=agent AGENTS_AGENT=agent AGENTS_AGENT_UID=1100 \
+        "AGENTS_INBOX=$T/inbox" AGENTS_WEB= AGENTS_WEB_UID= AGENTS_GUARD= AGENTS_GUARD_UID= AGENTS_QUEUE= AGENTS_AUDIT=on "AGENTS_LIB=$T/lib" > "$AIRLOCK_AGENTS_ENV"
+    export AGENTS_AUDIT_SOCK="$T/vl.sock" CALLS="$T/calls" TZ=UTC HOME="$T/ophome"
+    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$AGENTS_AUDIT_SOCK"
+    mkdir -p "$T/bin"
+    # curl: records each query; a count answers COUNT (default: the rows' number), a CONNECT
+    # lookup answers $T/connects, anything else $T/rows; CODE makes it an HTTP error
+    cat > "$T/bin/curl" <<'EOF'
+#!/bin/bash
+q=""; for a; do case "$a" in query=*) q=${a#query=} ;; esac; done
+printf '%s\n' "$q" >> "$CALLS"
+if [ -n "${CODE:-}" ]; then printf 'cannot parse query\n%s' "$CODE"; exit 0; fi
+case "$q" in
+    *'stats count() n'*) echo "{\"n\":\"${COUNT:-$(grep -c . "$(dirname "$CALLS")/rows")}\"}" ;;
+    *envoy.method:CONNECT*) cat "$(dirname "$CALLS")/connects" 2>/dev/null ;;
+    *) cat "$(dirname "$CALLS")/rows" ;;
+esac
+printf '\n200'
+EOF
+    chmod +x "$T/bin/curl"
+    export PATH="$T/bin:$PATH"
+    : > "$T/rows"; : > "$T/connects"
+}
+row() { printf '%s\n' "$1" >> "$T/rows"; }
+denies() { run "$OP" audit denies "$@"; }
+
+@test "the query is fixed: Envoy's own refusals since the window, newest first, limited" {
+    denies --since 2h --limit 7
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    q="$(sed -n 1p "$CALLS")"
+    [[ "$q" == '_time:>='????-??-??T??:??:??Z' log_type:in("envoy-access","envoy-web") (envoy.flags:NR or '* ]]
+    [[ "$q" == *'envoy.route:~"^deny-"'* && "$q" == *'-envoy.details:via_upstream'* ]]
+    [[ "$q" == *'| sort by (_time desc) | limit 7 | fields '* ]]
+    [[ "$(sed -n 2p "$CALLS")" == *'| stats count() n' ]]
+    [[ "$output" == *"(no refusals since "* ]]
+}
+
+@test "a refused CONNECT, a preset's refusal and a locked credential: who, what, route, the site file line" {
+    row '{"_time":"2026-11-15T14:02:11.5Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.connection":"12","envoy.method":"CONNECT","envoy.authority":"example.org:443","envoy.path":"","envoy.route":"deny-connect","envoy.status":"403","envoy.flags":"-","envoy.details":"direct_response"}'
+    row '{"_time":"2026-11-15T14:01:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.connection":"11","envoy.method":"POST","envoy.authority":"git.example.org","envoy.path":"/api/v1/repos/a/b/merge","envoy.route":"git.example.org-refused","envoy.status":"403","envoy.flags":"-","envoy.details":"direct_response"}'
+    row '{"_time":"2026-11-15T14:00:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"GET","envoy.authority":"git.example.org","envoy.path":"/","envoy.route":"git.example.org-read","envoy.status":"423","envoy.details":"lua_response"}'
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == "2026-11-15 14:02:11  agent            agent-infra              403  CONNECT example.org:443  [deny-connect]" ]]
+    [[ "${lines[1]}" == "    example.org:443 is not a destination of agent-infra: add it to the agent-infra lines" ]]
+    [[ "${lines[2]}" == *"POST git.example.org/api/v1/repos/a/b/merge  [git.example.org-refused]" ]]
+    [[ "${lines[3]}" == *"refused by the rules of git.example.org: its http line"* ]]
+    [[ "${lines[5]}" == *"locked: airlock-envoy-cred unlock" ]]
+    [[ "${lines[6]}" == "(3 refusals since "*"; the site file: /etc/airlock-envoy/site.conf)" ]]
+}
+
+@test "a refused TLS name gets its user from the latest CONNECT before it with that connection id" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"sni-x","envoy.connection":"40","envoy.sni":"other.example.org","envoy.route":"","envoy.flags":"NR"}'
+    # the same id twice (Envoy restarted): the later one, still before the SNI line, wins; one after it doesn't
+    printf '%s\n' \
+        '{"_time":"2026-11-14T10:00:00Z","envoy.connection":"40","envoy.user":"old","envoy.listener":"old-l","envoy.authority":"old.example.org:443"}' \
+        '{"_time":"2026-11-15T14:04:59Z","envoy.connection":"40","envoy.user":"agent","envoy.listener":"agent-infra","envoy.authority":"svc.example.org:443"}' \
+        '{"_time":"2026-11-15T14:09:00Z","envoy.connection":"40","envoy.user":"later","envoy.listener":"later-l","envoy.authority":"later.example.org:443"}' > "$T/connects"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == *"agent            agent-infra                -  TLS other.example.org in a tunnel to svc.example.org:443  [no route NR]" ]]
+    [[ "${lines[1]}" == "    the tunnel to svc.example.org:443 sent the TLS name other.example.org: only svc.example.org passes" ]]
+    q="$(grep CONNECT "$CALLS")"
+    [[ "$q" == *'envoy.connection:in(40) '* ]]
+}
+
+@test "an SNI line with no CONNECT to join shows no user rather than a guess; a bad id is never queried" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"41","envoy.sni":"x.example.org","envoy.flags":"NR"}'
+    row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.connection":"1) or (x","envoy.sni":"y.example.org","envoy.flags":"NR"}'
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == *"  ?                ?                          -  TLS x.example.org in a tunnel to ?  "* ]]
+    q="$(grep CONNECT "$CALLS")"
+    [[ "$q" == *'envoy.connection:in(41) '* && "$q" != *"or (x"* ]]
+}
+
+@test "web's internal-name refusal, an address entry's RBAC refusal" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-web","envoy.listener":"agent-web","envoy.user":"agent","envoy.sni":"metrics.example.org","envoy.route":"deny-internal-name"}'
+    row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.connection":"5","envoy.sni":"one.example.org","envoy.route":"tls-no-sni","envoy.details":"rbac_access_denied_matched_policy[server-name-sent]"}'
+    printf '%s\n' '{"_time":"2026-11-15T14:03:00Z","envoy.connection":"5","envoy.user":"agent","envoy.listener":"agent-infra","envoy.authority":"10.99.0.1:6443"}' > "$T/connects"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == *"web TLS metrics.example.org  [deny-internal-name]" ]]
+    [[ "${lines[1]}" == *"metrics.example.org is an internal name: web never reaches one"* ]]
+    [[ "${lines[3]}" == "    10.99.0.1:6443 is an address entry, which passes only TLS without a name; the client sent one.example.org" ]]
+}
+
+@test "the agents' text is cleaned: no escape sequence or control byte reaches the terminal" {
+    row "$(printf '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/\\u001b]52;c;aGk=\\u0007x\\u009b31m","envoy.route":"deny-http","envoy.status":"403"}')"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    ! printf '%s' "$output" | LC_ALL=C grep -qP '[\x00-\x08\x0b-\x1f\x7f]|\xc2[\x80-\x9f]'
+    [[ "${lines[0]}" == *"GET a.example.org/?]52;c;aGk=?x?31m  [deny-http]" ]]
+}
+
+@test "more than shown: the closing line says so" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.user":"agent","envoy.listener":"agent-infra","envoy.method":"CONNECT","envoy.authority":"a.example.org:443","envoy.route":"deny-connect","envoy.status":"403"}'
+    COUNT=312 denies --limit 1
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[2]}" == "(1 of 312 refusals since "*", newest first: --limit <n> for more)" ]]
+}
+
+@test "the store unreachable or refusing: an error, exit 1; no audit store: says how to turn it on" {
+    CODE=400 denies
+    [ "$status" -eq 1 ]; [[ "$output" == *"no answer from the audit store (curl 0, HTTP 400): cannot parse query"* ]]
+    sed -i 's/^AGENTS_AUDIT=on$/AGENTS_AUDIT=off/' "$AIRLOCK_AGENTS_ENV"
+    denies
+    [ "$status" -eq 1 ]; [[ "$output" == *"no audit store here (agents.conf: audit on"* ]]
+    sed -i 's/^AGENTS_AUDIT=off$/AGENTS_AUDIT=on/' "$AIRLOCK_AGENTS_ENV"; rm -f "$AGENTS_AUDIT_SOCK"
+    denies
+    [ "$status" -eq 1 ]; [[ "$output" == *"socket $AGENTS_AUDIT_SOCK is missing"* ]]
+}
+
+@test "bad arguments are refused before any query" {
+    for a in "--limit 0" "--limit 1001" "--limit x" "--since 5m" "--frob"; do
+        # shellcheck disable=SC2086
+        denies $a
+        [ "$status" -ne 0 ] || { echo "accepted: $a"; return 1; }
+    done
+    run "$OP" audit; [ "$status" -ne 0 ]; [[ "$output" == *"usage: agent audit denies"* ]]
+    [ ! -s "$CALLS" ]
+}
+
+@test "audit works while the agents are halted (it reads only the store); other commands don't" {
+    mkdir -p "$T/home/.local/state/airlock-agents"; : > "$T/home/.local/state/airlock-agents/halting"
+    HOME="$T/home" run "$OP" audit denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    HOME="$T/home" run "$OP" ls
+    [ "$status" -ne 0 ]; [[ "$output" == *"halted"* ]]
+}

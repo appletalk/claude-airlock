@@ -41,7 +41,7 @@ _airlock_agents() {
     local -a words=()
     COMPREPLY=()
     if [ "$COMP_CWORD" = 1 ]; then
-        words=(ls list new attach stop restart paste update shell reload web help halt resume)
+        words=(ls list new attach stop restart paste update shell reload web audit help halt resume)
     else
         case "${COMP_WORDS[1]}" in
             attach|stop|restart) [ "$COMP_CWORD" = 2 ] && mapfile -t words < <(_airlock_agents_names sessions) ;;
@@ -56,6 +56,9 @@ _airlock_agents() {
                         login) words=(research gate chat) ;;
                     esac
                 fi ;;
+            audit)
+                if [ "$COMP_CWORD" = 2 ]; then words=(denies)
+                elif [ "${COMP_WORDS[2]}" = denies ]; then words=(--since --limit); fi ;;
         esac
     fi
     for w in "${words[@]}"; do [[ $w == "$cur"* ]] && COMPREPLY+=("$w"); done

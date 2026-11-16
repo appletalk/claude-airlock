@@ -61,7 +61,7 @@ _airlock_agents() {
         'ls:sessions and their state' 'list:sessions and their state' 'new:start a session' 'attach:join a session'
         'stop:stop a session' 'restart:restart a session' 'paste:the clipboard image into the inbox'
         'update:give the agent users your claude-airlock' 'shell:a shell as the agent'
-        'reload:reload the agents'"'"' user units' 'web:web research' 'help:usage'
+        'reload:reload the agents'"'"' user units' 'web:web research' 'audit:the audit store' 'help:usage'
         'halt:emergency stop of every agent user (and Envoy)' 'resume:undo halt'
     )
     webcmds=(
@@ -87,6 +87,10 @@ _airlock_agents() {
                     ask) _message 'question (quoted)' ;;
                     new) _message 'session name' ;;
                 esac
+            fi ;;
+        audit)
+            if (( CURRENT == 3 )); then _values 'audit command' 'denies[Envoy'"'"'s refusals]'
+            elif [[ ${words[3]} == denies ]]; then _values 'option' '--since[<n>d, <n>h or YYYY-MM-DD]' '--limit[1 to 1000]'
             fi ;;
     esac
 }

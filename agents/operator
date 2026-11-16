@@ -49,6 +49,11 @@
 #                                       --waiting: what waits on you; --all: both. Never one in flight
 #   An id can be given by its last 6 characters.
 #   <command> web login [research|gate|chat]   /login in each workspace's box (all three if none given)
+#
+# Audit (when agents.conf has audit on):
+#   <command> audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]
+#                                       Envoy's refusals (last 24 h, newest 50): who, what, the
+#                                       route, and which site file line would change it
 set -euo pipefail
 # Internal to this script (set per call below), never taken from the caller's environment.
 unset OCTL_RAW STAGE_WEB STAGE_GUARD STATE
@@ -848,6 +853,165 @@ web() {
     esac
 }
 
+# ---- audit ------------------------------------------------------------------------------------
+# The audit store (audit on: docs/agents.md, Audit), read through its socket, which the operator
+# may connect to (queries only, vmauth refuses the rest). Every field in it is the agents' text
+# (hosts, paths, TLS names): formatted as data, never as a query, and cleaned on the way out.
+AUDIT_SOCK="${AGENTS_AUDIT_SOCK:-/run/airlock-audit/vl.sock}"   # test knob, like AGENTS_NODUMP_DIR
+audit_ready() {
+    [ "${AGENTS_AUDIT:-off}" = on ] || die "no audit store here (agents.conf: audit on, then sudo airlock-agents-apply --confirm)"
+    [ -S "$AUDIT_SOCK" ] || die "the audit store's socket $AUDIT_SOCK is missing (sudo airlock-audit status)"
+}
+# audit denies: Envoy's own refusals, newest first, from one fixed query (no model). Each with
+# who (user, listener), what (method and host, or the TLS name), the route and which site file
+# line would change it. A refused TLS name carries no user: joined to the CONNECT that opened its
+# tunnel (Envoy's connection id, the latest CONNECT before it: ids restart with Envoy).
+audit_denies() {
+    local since=24h limit=50 cutoff W
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --since) [ $# -ge 2 ] || die "--since needs <n>d, <n>h or YYYY-MM-DD"; since=$2; shift ;;
+            --limit) [ $# -ge 2 ] && [[ "$2" =~ ^([1-9][0-9]{0,2}|1000)$ ]] || die "--limit needs a number from 1 to 1000"; limit=$2; shift ;;
+            *) die "usage: $CMD audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]" ;;
+        esac
+        shift
+    done
+    cutoff="$(since_epoch "$since")"
+    audit_ready
+    set_cols
+    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" <<"PY" | rows_out "$W"
+import datetime, json, re, subprocess, sys
+sock, start, limit, cmd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+
+# Envoy's own refusals: a deny- route (CONNECT or plain HTTP outside the listener, an internal
+# name asked of web), a TLS name no destination takes (NR) or an address entry refuses (RBAC),
+# and any 4xx/5xx Envoy answered itself (a preset's rules, a locked credential, a body too large,
+# a request the parser rejected): not one passed on from upstream, not an upstream failure.
+REFUSED = ('log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.details:~"^rbac_access_denied" '
+           'or envoy.route:~"^deny-" or (envoy.status:>=400 -envoy.details:via_upstream '
+           '-envoy.details:~"^(upstream_|no_healthy_upstream)"))')
+FIELDS = ('_time, log_type, envoy.listener, envoy.user, envoy.connection, envoy.method, envoy.authority, '
+          'envoy.path, envoy.sni, envoy.route, envoy.status, envoy.flags, envoy.details')
+
+def printable(s, n):
+    s = "".join(c if c.isprintable() else "?" for c in str(s))
+    return s if len(s) <= n else s[:n - 3] + "..."
+
+def query(q):
+    p = subprocess.run(["curl", "-sS", "--max-time", "30", "--unix-socket", sock, "-w", "\n%{http_code}",
+                        "http://x/select/logsql/query", "--data-urlencode", "query=" + q],
+                       stdin=subprocess.DEVNULL, capture_output=True)
+    body, _, code = p.stdout.decode("utf-8", "replace").rpartition("\n")
+    if p.returncode != 0 or code != "200":
+        why = (body or p.stderr.decode("utf-8", "replace")).strip()
+        print(f"{cmd} audit denies: no answer from the audit store (curl {p.returncode}, HTTP {code or '-'}): "
+              f"{printable(why, 300)}", file=sys.stderr)
+        sys.exit(1)
+    rows = []
+    for line in body.splitlines():
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            rows.append({k: v if isinstance(v, str) else json.dumps(v) for k, v in o.items()})
+    return rows
+
+def when(t):  # VictoriaLogs' RFC 3339 UTC time: a sort key, and the local time to show
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z$", t or "")
+    if not m:
+        return (0, 0), "?"
+    d = datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    return (int(d.timestamp()), int((m.group(2) or "0").ljust(9, "0"))), d.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+since = f"_time:>={start} "
+rows = query(f"{since}{REFUSED} | sort by (_time desc) | limit {limit} | fields {FIELDS}")
+total = query(f"{since}{REFUSED} | stats count() n")
+total = int(total[0].get("n", "0")) if total and total[0].get("n", "").isdigit() else len(rows)
+
+# The SNI lines' users: the CONNECT lines with their connection ids, from a day before the window
+# (a tunnel can be open long before its TLS name is refused).
+ids = sorted({r["envoy.connection"] for r in rows if r.get("log_type") == "envoy-access" and not r.get("envoy.method")
+              and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))})
+opened = {}
+if ids:
+    s = datetime.datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ") - datetime.timedelta(days=1)
+    for c in query(f'_time:>={s:%Y-%m-%dT%H:%M:%SZ} log_type:envoy-access envoy.method:CONNECT '
+                   f'envoy.connection:in({",".join(ids)}) | limit 10000 '
+                   f'| fields _time, envoy.connection, envoy.user, envoy.listener, envoy.authority'):
+        opened.setdefault(c.get("envoy.connection", ""), []).append((when(c.get("_time"))[0], c))
+
+def hint(r):
+    route, st, fl, det = r.get("envoy.route", ""), r.get("envoy.status", ""), r.get("envoy.flags", ""), r.get("envoy.details", "")
+    l, a, sni = r.get("envoy.listener", "") or "?", r.get("envoy.authority", "") or "?", r.get("envoy.sni", "") or "(none)"
+    host = re.sub(r":[0-9]+$", "", a)
+    if r.get("log_type") == "envoy-web":
+        if route.startswith("deny-"):
+            return f"{sni} is an internal name: web never reaches one; a destination of its own on the {l} lines"
+        return f"web refused the TLS name {sni}"
+    if route == "deny-connect":
+        return f"{a} is not a destination of {l}: add it to the {l} lines"
+    if route == "deny-http":
+        return f"{a} is not a plain-HTTP host of {l}: an http line for it, and http://{host} on the {l} lines"
+    if route.startswith("deny-connect-http-"):
+        return f"{a} is a plain-HTTP host here: the client should use http://{host}, not a tunnel"
+    if route.startswith("deny-web-internal"):
+        return f"{a} is an internal name, never web: a destination of its own on the {l} lines"
+    if not r.get("envoy.method"):  # an SNI line
+        if det.startswith("rbac_access_denied"):
+            return f"{a} is an address entry, which passes only TLS without a name; the client sent {sni}"
+        return f"the tunnel to {a} sent the TLS name {sni}: only {host} passes"
+    if st == "423":
+        return f"the credential for {a} is locked: airlock-envoy-cred unlock"
+    if st == "503":
+        return f"the credential for {a} has no token (airlock-envoy-cred)"
+    if st == "413":
+        return f"a body over the limit of the rules of {a} (its http line)"
+    if not route:
+        return f"Envoy refused the request itself ({det or 'no details'})"
+    return f"refused by the rules of {a}: its http line (what each preset allows: airlock-envoy docs/presets.md)"
+
+for r in rows:
+    key, t = when(r.get("_time"))
+    if r.get("log_type") == "envoy-access" and not r.get("envoy.method"):
+        c = [x for x in opened.get(r.get("envoy.connection", ""), []) if x[0] <= (key[0] + 1, key[1])]
+        if c:
+            o = max(c, key=lambda x: x[0])[1]
+            r = dict(r, **{"envoy.user": o.get("envoy.user", ""), "envoy.listener": o.get("envoy.listener", ""),
+                           "envoy.authority": o.get("envoy.authority", "")})
+        else:
+            r = dict(r, **{"envoy.listener": "", "envoy.authority": ""})
+        what = f"TLS {r.get('envoy.sni') or '(no name)'} in a tunnel to {r.get('envoy.authority') or '?'}"
+        st = "-"
+    elif r.get("log_type") == "envoy-web":
+        what, st = f"web TLS {r.get('envoy.sni') or '(no name)'}", "-"
+    else:
+        what = f"{r.get('envoy.method', '')} {r.get('envoy.authority', '')}{r.get('envoy.path', '') if r.get('envoy.method') != 'CONNECT' else ''}"
+        st = r.get("envoy.status", "") or "-"
+    tag = r.get("envoy.route", "") or "no route"
+    if r.get("envoy.flags", "") not in ("", "-"):
+        tag += " " + r["envoy.flags"]
+    print(f"{t}  {printable(r.get('envoy.user') or '?', 16):<16} {printable(r.get('envoy.listener') or '?', 24):<24} "
+          f"{printable(st, 3):>3}  {printable(what, 120)}  [{printable(tag, 60)}]")
+    print(f"    {printable(hint(r), 200)}")
+
+shown, start_local = len(rows), when(start)[1]
+if total == 0:
+    print(f"(no refusals since {start_local})")
+elif total > shown:
+    print(f"({shown} of {total} refusals since {start_local}, newest first: --limit <n> for more)")
+else:
+    print(f"({total} refusal{'s' if total != 1 else ''} since {start_local}; the site file: /etc/airlock-envoy/site.conf)")
+PY
+}
+audit() {
+    local sub="${1:-}"; shift || true
+    case "$sub" in
+        denies) audit_denies "$@" ;;
+        *) die "usage: $CMD audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]" ;;
+    esac
+}
+
 # ---- halt / resume ----------------------------------------------------------------------------
 # What halt did, for resume (root's: written under sudo, readable). Test knobs, like AGENTS_NODUMP_DIR.
 HALT_MARK="${AGENTS_HALT_MARK:-/var/lib/airlock-agents-halt/halted}"
@@ -1058,7 +1222,7 @@ resume() {
 
 cmd="${1:-ls}"; shift || true
 case "$cmd" in
-    halt|resume|-h|--help|help) ;;
+    halt|resume|audit|-h|--help|help) ;;   # audit: reads the store only, nothing of the agents
     _complete) ! halted || exit 0 ;;   # nothing reaches a halted agent, completion included
     *) ! halted || die "halted ($CMD halt): $CMD resume first" ;;
 esac
@@ -1148,6 +1312,8 @@ case "$cmd" in
     web)
         [ -n "$WEB" ] || die "no web research here (agents.conf has no web and guard users)"
         web "$@" ;;
+    audit)
+        audit "$@" ;;
     _complete)
         # For the shell completion (share/completion.zsh, .bash): names only, one per line, a tab,
         # then a short description. Each name is checked against its shape and every description
