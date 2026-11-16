@@ -2,8 +2,8 @@
 # audit-ui <store socket> <port> <uid>: the audit store's web UI (VictoriaLogs' vmui) on
 # 127.0.0.1:<port> for one user, until Ctrl-C (the operator's `audit ui`, docs/agents.md).
 # It closes by itself after 30 minutes without a request, and after 4 hours whatever happens, so
-# a forgotten terminal doesn't keep the store open. (Two more arguments, idle and most seconds,
-# are for the tests; the operator command never passes them.)
+# a forgotten terminal doesn't keep the store open. (Three more arguments, idle, most and the
+# store's read timeout in seconds, are for the tests; the operator command never passes them.)
 #
 # A port on loopback is open to every process on the host, so each connection's owner is looked
 # up in the kernel's socket table (/proc/net/tcp: the uid that made the client socket) and only
@@ -23,6 +23,7 @@
 import http.client
 import http.server
 import socket
+import struct
 import sys
 import threading
 import time
@@ -30,6 +31,7 @@ import time
 SOCK, PORT, UID = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 IDLE = int(sys.argv[4]) if len(sys.argv) > 4 else 30 * 60
 MOST = int(sys.argv[5]) if len(sys.argv) > 5 else 4 * 3600
+STORE_TIMEOUT = int(sys.argv[6]) if len(sys.argv) > 6 else 120
 STARTED = LAST = time.monotonic()
 HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 ORIGINS = {"http://" + h for h in HOSTS}
@@ -60,12 +62,13 @@ def owner(peer, me):  # the uid of the client socket peer -> me, or None
 class Store(http.client.HTTPConnection):
     def connect(self):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(120)
+        self.sock.settimeout(STORE_TIMEOUT)
         self.sock.connect(SOCK)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"   # one request per connection: each is checked from the start
+    timeout = 60                    # a client that stops sending (a short body) frees its thread
     def version_string(self):
         return "audit-ui"
 
@@ -86,7 +89,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         origin, site = self.headers.get("Origin"), self.headers.get("Sec-Fetch-Site")
         if (origin is not None and origin not in ORIGINS) or (site is not None and site not in ("same-origin", "none")):
             return self.refuse(403, "audit-ui: only the UI itself, not another site")
-        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in self.path) or \
+        if not self.path.startswith("/") or any(ord(c) < 0x20 or ord(c) == 0x7f for c in self.path) or \
                 any(ord(c) < 0x20 and c != "\t" or ord(c) == 0x7f for v in self.headers.values() for c in v):
             return self.refuse(400, "audit-ui: a control character in the request")
         if "Transfer-Encoding" in self.headers:
@@ -116,13 +119,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if kl not in ("connection", "keep-alive", "transfer-encoding", "server", "date") and not kl.startswith("access-control-"):
                     self.send_header(k, v)
             self.end_headers()
+            self.wfile.flush()
             while True:
-                chunk = r.read(65536)
+                chunk = r.read1(65536)   # what has arrived, as it arrives (a live tail streams)
                 if not chunk:
                     break
                 self.wfile.write(chunk)
+                self.wfile.flush()
         except (OSError, ValueError, http.client.HTTPException):
-            pass   # a store read cut mid-body ends the connection short: the browser sees it failed
+            # Cut mid-answer (the store timed out or went away): reset the connection, never a
+            # clean close, so the browser shows a failed request, not a short or empty result.
+            try:
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.connection.close()   # now: the server's own close would send a FIN first
+            except OSError:
+                pass
+            self.close_connection = True
         finally:
             store.close()
 

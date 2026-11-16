@@ -888,12 +888,13 @@ sock, start, limit, cmd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4
 # Envoy's own refusals: a deny- route (CONNECT or plain HTTP outside the listener, an internal
 # name asked of web), a TLS name no destination takes (NR) or an address entry refuses (RBAC), a
 # push to a protected branch (the push check, UAEX: Envoy answers git with a 200 and a refusal in
-# the pack status), web failing to reach a name (UF, DF: its kernel filter refuses an internal
+# the pack status), an MCP tool the rules refuse (a 200 with a JSON-RPC error; every answer Envoy's
+# Lua code makes on a box listener is a refusal), web failing to reach a name (UF, DF: its kernel filter refuses an internal
 # address that way), and any 4xx/5xx Envoy answered itself (a preset's rules, a locked
 # credential, a body too large, a request the parser rejected): not one passed on from upstream,
 # not an upstream failure, not a timeout (a slow client or a long stream is no refusal).
 REFUSED = ('log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX '
-           'or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" '
+           'or envoy.details:lua_response or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" '
            'or (log_type:envoy-web envoy.flags:~"UF|DF") '
            'or (envoy.status:>=400 -envoy.details:via_upstream '
            '-envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))')
@@ -943,17 +944,26 @@ def is_sni(r):
 
 # Their users: the CONNECT that opened the tunnel, by Envoy's connection id. A TLS name is read
 # within 15 s of the tunnel opening (the inspector's timeout), so only a CONNECT from 20 s before
-# the SNI line to 1 s after counts: ids restart with Envoy, and a CONNECT line the journal
+# the SNI line to 3 s after counts: ids restart with Envoy, and a CONNECT line the journal
 # dropped in a flood must not pin the refusal on an older tunnel with the same id (shown as ?).
-JOIN_BEFORE, JOIN_AFTER = 20, 1
+# One time window per row (merged where they overlap), and only the tunnel's first and last
+# lines (not the periodic ones a long tunnel logs every minute), so the lookup stays small.
+JOIN_BEFORE, JOIN_AFTER = 20, 3   # after: Envoy flushes its log once a second
 sni_rows = [r for r in rows if is_sni(r) and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))]
 ids = sorted({r["envoy.connection"] for r in sni_rows})
 opened = {}
+def utc(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 if ids:
-    keys = [when(r.get("_time"))[0][0] for r in sni_rows]
-    lo = datetime.datetime.fromtimestamp(min(keys) - JOIN_BEFORE, datetime.timezone.utc)
-    hi = datetime.datetime.fromtimestamp(max(keys) + JOIN_AFTER + 1, datetime.timezone.utc)
-    for c in query(f'_time:[{lo:%Y-%m-%dT%H:%M:%SZ}, {hi:%Y-%m-%dT%H:%M:%SZ}] log_type:envoy-access envoy.method:CONNECT '
+    spans = []
+    for k in sorted(when(r.get("_time"))[0][0] for r in sni_rows):
+        if spans and k - JOIN_BEFORE <= spans[-1][1]:
+            spans[-1][1] = k + JOIN_AFTER + 1
+        else:
+            spans.append([k - JOIN_BEFORE, k + JOIN_AFTER + 1])
+    times = " or ".join(f"_time:[{utc(a)}, {utc(b)}]" for a, b in spans)
+    for c in query(f'({times}) log_type:envoy-access envoy.method:CONNECT '
+                   f'envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) '
                    f'envoy.connection:in({",".join(ids)}) | sort by (_time desc) | limit 10000 '
                    f'| fields _time, envoy.connection, envoy.user, envoy.listener, envoy.authority'):
         opened.setdefault(c.get("envoy.connection", ""), []).append((when(c.get("_time"))[0], c))
@@ -986,15 +996,19 @@ def hint(r, sni_line):
         if not sni:
             return f"the tunnel to {a} sent no TLS name (not TLS, or none sent): only TLS naming {host} passes"
         return f"the tunnel to {a} sent the TLS name {sni}: only {host} passes"
-    if "UAEX" in fl or det == "ext_authz_denied":
+    if ("UAEX" in fl or det == "ext_authz_denied") and st == "200":
         return f"a push to a protected branch of {a}: protect on its http line"
+    if "UAEX" in fl or det == "ext_authz_denied":
+        return f"the push check refused the push to {a} (Envoy's own log says why)"
     if det == "ext_authz_error":
         return f"the push check for {a} could not decide, so the push was refused (it fails closed)"
     if det == "lua_response" and st == "423":
         return f"the credential for {a} is locked: airlock-envoy-cred unlock"
     if det == "lua_response" and st == "503":
         return f"the credential for {a} has no token (airlock-envoy-cred)"
-    if det == "direct_response" and st == "413":
+    if det == "lua_response" and st == "200":
+        return f"a tool call the mcp rules of {a} refuse: tools or deny-tools on its http line"
+    if st == "413" and det in ("direct_response", "request_payload_too_large"):
         return f"a body over the limit of the rules of {a} (its http line)"
     if route and (det == "direct_response" or (det == "lua_response" and st == "403")):
         return f"refused by the rules of {a}: its http line (what each preset allows: airlock-envoy docs/presets.md)"

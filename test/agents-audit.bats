@@ -38,7 +38,7 @@ denies() { run "$OP" audit denies "$@"; }
     denies --since 2h --limit 7
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     q="$(sed -n 1p "$CALLS")"
-    pred='log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))'
+    pred='log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:lua_response or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))'
     [[ "$q" == '_time:>='????-??-??T??:??:??Z" $pred | sort by (_time desc) | limit 7 | fields "* ]] || { echo "$q"; return 1; }
     [[ "$(sed -n 2p "$CALLS")" == *'| stats count() n' ]]
     [[ "$output" == *"(no refusals since "* ]]
@@ -60,9 +60,9 @@ denies() { run "$OP" audit denies "$@"; }
 
 @test "a refused TLS name gets its user from the latest CONNECT before it with that connection id" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"sni-x","envoy.connection":"40","envoy.sni":"other.example.org","envoy.route":"","envoy.flags":"NR"}'
-    # the same id twice (Envoy restarted): the later one, still before the SNI line, wins; one after it doesn't
+    # the same id twice in the window: the later one wins; one after the window doesn't count
     printf '%s\n' \
-        '{"_time":"2026-11-14T10:00:00Z","envoy.connection":"40","envoy.user":"old","envoy.listener":"old-l","envoy.authority":"old.example.org:443"}' \
+        '{"_time":"2026-11-15T14:04:45Z","envoy.connection":"40","envoy.user":"old","envoy.listener":"old-l","envoy.authority":"old.example.org:443"}' \
         '{"_time":"2026-11-15T14:04:59Z","envoy.connection":"40","envoy.user":"agent","envoy.listener":"agent-infra","envoy.authority":"svc.example.org:443"}' \
         '{"_time":"2026-11-15T14:09:00Z","envoy.connection":"40","envoy.user":"later","envoy.listener":"later-l","envoy.authority":"later.example.org:443"}' > "$T/connects"
     denies
@@ -80,7 +80,17 @@ denies() { run "$OP" audit denies "$@"; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == *"  ?                ?                          -  TLS other.example.org in a tunnel to ?  "* ]] || { echo "$output"; return 1; }
     q="$(grep CONNECT "$CALLS")"
-    [[ "$q" == '_time:[2026-11-15T14:04:40Z, 2026-11-15T14:05:02Z] '*'| sort by (_time desc) | limit 10000 '* ]] || { echo "$q"; return 1; }
+    [[ "$q" == '(_time:[2026-11-15T14:04:40Z, 2026-11-15T14:05:04Z]) log_type:envoy-access envoy.method:CONNECT envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) envoy.connection:in(40) | sort by (_time desc) | limit 10000 '* ]] || { echo "$q"; return 1; }
+}
+
+@test "the CONNECT lookup is one window per refusal (merged where they overlap), not one span over all" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"7","envoy.sni":"a.example.org","envoy.flags":"NR"}'
+    row '{"_time":"2026-11-15T14:04:50Z","log_type":"envoy-access","envoy.connection":"8","envoy.sni":"b.example.org","envoy.flags":"NR"}'
+    row '{"_time":"2026-11-05T14:00:00Z","log_type":"envoy-access","envoy.connection":"9","envoy.sni":"c.example.org","envoy.flags":"NR"}'
+    denies --since 30d
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    q="$(grep CONNECT "$CALLS")"
+    [[ "$q" == '(_time:[2026-11-05T13:59:40Z, 2026-11-05T14:00:04Z] or _time:[2026-11-15T14:04:30Z, 2026-11-15T14:05:04Z]) '*'envoy.connection:in(7,8,9) '* ]] || { echo "$q"; return 1; }
 }
 
 @test "an HTTP line without a method (the parser refused it) is not taken for a TLS refusal or joined" {
@@ -108,6 +118,17 @@ denies() { run "$OP" audit denies "$@"; }
     [ "${lines[7]}" = "    the push check for g.example.org could not decide, so the push was refused (it fails closed)" ]
     [ "${lines[9]}" = "    web could not connect to n.example.org (down, or an internal address its kernel filter refuses)" ]
     [ "${lines[11]}" = "    Envoy refused the request itself (http1.unexpected_underscore)" ]
+}
+
+@test "hints: an MCP tool refused (a 200 from Envoy's Lua), the push check's own 400, a buffered body too large" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"m.example.org","envoy.path":"/mcp","envoy.route":"m.example.org-ep0-post","envoy.status":"200","envoy.details":"lua_response"}'
+    row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"400","envoy.flags":"UAEX","envoy.details":"ext_authz_denied"}'
+    row '{"_time":"2026-11-15T14:03:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"api.example.org","envoy.path":"/graphql","envoy.route":"api.example.org-graphql","envoy.status":"413","envoy.details":"request_payload_too_large"}'
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "${lines[1]}" = "    a tool call the mcp rules of m.example.org refuse: tools or deny-tools on its http line" ] || { echo "$output"; return 1; }
+    [ "${lines[3]}" = "    the push check refused the push to g.example.org (Envoy's own log says why)" ]
+    [ "${lines[5]}" = "    a body over the limit of the rules of api.example.org (its http line)" ]
 }
 
 @test "an SNI line with no CONNECT to join shows no user rather than a guess; a bad id is never queried" {
@@ -180,13 +201,21 @@ denies() { run "$OP" audit denies "$@"; }
 ui_setup() {
     rm -f "$AGENTS_AUDIT_SOCK"
     cat > "$T/store.py" <<'PY'
-import http.server, json, os, socket, socketserver, sys
+import http.server, json, os, socket, socketserver, sys, time
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        if self.path.startswith("/stream"):  # three chunks, a second apart; /stream-stall stops after one
+            self.send_response(200); self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
+            for i in range(3):
+                self.wfile.write(b"5\r\nrow%d\n\r\n" % i); self.wfile.flush()
+                if self.path == "/stream-stall": time.sleep(30)
+                time.sleep(1)
+            self.wfile.write(b"0\r\n\r\n"); return
         b = json.dumps({"path": self.path, "headers": dict(self.headers)}).encode()
         self.send_response(200); self.send_header("Content-Length", str(len(b)))
         self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("X-Store", "yes")
         self.end_headers(); self.wfile.write(b)
     do_POST = do_GET
 class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -228,13 +257,15 @@ ui_teardown() { kill "$UI" "$STORE" 2>/dev/null || true; wait 2>/dev/null || tru
     o="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H 'Origin: https://evil.example.org' "$u")"
     f="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: cross-site' "$u")"
     n="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H 'Origin: null' "$u")"
+    ss="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: same-site' "$u")"
     s="$(/usr/bin/curl --noproxy "*" -s -D - -o /dev/null -H "Origin: http://127.0.0.1:$PORT" -H 'Sec-Fetch-Site: same-origin' "$u")"
     p="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -X OPTIONS -H "Origin: https://evil.example.org" "$u")"
     ui_teardown
-    [ "$o" = 403 ] && [ "$f" = 403 ] && [ "$n" = 403 ] || { echo "$o $f $n"; return 1; }
+    [ "$o" = 403 ] && [ "$f" = 403 ] && [ "$n" = 403 ] && [ "$ss" = 403 ] || { echo "$o $f $n $ss"; return 1; }
     [[ "$s" == "HTTP/1.0 200 "* ]] || { echo "$s"; return 1; }
     ! grep -qi '^access-control-' <<< "$s" || return 1
-    grep -q $'^Server: audit-ui\r$' <<< "$s"
+    grep -q $'^Server: audit-ui\r$' <<< "$s" || return 1
+    [ "$(grep -ci '^server:' <<< "$s")" = 1 ] && grep -q '^X-Store: yes' <<< "$s" || return 1   # the store's own Server is not passed
     [[ "$p" == 4* || "$p" == 5* ]] && [ "$p" != 200 ]
 }
 
@@ -255,6 +286,26 @@ ui_teardown() { kill "$UI" "$STORE" 2>/dev/null || true; wait 2>/dev/null || tru
     [[ "$c" == "HTTP/1.0 400 "* ]] || { echo "$c"; return 1; }
     [ "$gone" = 1 ] || { echo "still open after 3 s of refused requests with idle 2 s"; return 1; }
     ! grep -q Traceback "$T/ui.out" || { cat "$T/ui.out"; return 1; }
+}
+
+@test "audit ui: a folded header or an absolute-form target is a 400 and never reaches the store" {
+    ui_setup; ui_start "$(id -u)"
+    raw() { printf "$1" "$PORT" | python3 -c 'import socket,sys; s=socket.create_connection(("127.0.0.1",int(sys.argv[1]))); s.sendall(sys.stdin.buffer.read()); print(s.recv(200).split(b"\r\n")[0].decode())' "$PORT"; }
+    a="$(raw 'GET /select/x HTTP/1.0\r\nHost: 127.0.0.1:%s\r\nAccept: a\r\n b\r\n\r\n')"
+    b="$(raw 'GET http://evil.example.org/select/x HTTP/1.0\r\nHost: 127.0.0.1:%s\r\n\r\n')"
+    ui_teardown
+    [[ "$a" == "HTTP/1.0 400 "* && "$b" == "HTTP/1.0 400 "* ]] || { echo "$a / $b"; return 1; }
+}
+
+@test "audit ui: a streamed answer goes out as it comes; one cut mid-answer is a reset, not a clean short end" {
+    ui_setup; ui_start "$(id -u)" 600 600 3
+    /usr/bin/curl --noproxy "*" -sN "http://127.0.0.1:$PORT/stream" | while IFS= read -r l; do echo "$(date +%s.%N) $l"; done > "$T/stream.out"
+    set +e; /usr/bin/curl --noproxy "*" -s -o /dev/null "http://127.0.0.1:$PORT/stream-stall"; rc=$?; set -e
+    ui_teardown
+    first="$(sed -n 1p "$T/stream.out" | cut -d' ' -f1)" last="$(sed -n 3p "$T/stream.out" | cut -d' ' -f1)"
+    [ "$(wc -l < "$T/stream.out")" = 3 ] || { cat "$T/stream.out"; return 1; }
+    python3 -c 'import sys; sys.exit(0 if float(sys.argv[2]) - float(sys.argv[1]) > 1.5 else 1)' "$first" "$last" || { cat "$T/stream.out"; return 1; }
+    [ "$rc" -ne 0 ] || { echo "a cut answer ended cleanly (curl 0)"; return 1; }
 }
 
 @test "audit ui: a connection from another uid is refused and named once" {

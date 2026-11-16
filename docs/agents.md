@@ -343,8 +343,8 @@ machine (nothing leaves it):
   no user in Envoy's line: it is taken from the CONNECT that opened that tunnel (the one with the
   same connection id from 20 seconds before it to a second after, as ids restart with Envoy and
   a TLS name comes within 15 seconds), and shown as `?` when there is none, never a guess.
-  Upstream's own errors (a 403 from the server itself), failed connections and timeouts are not
-  refusals and stay out.
+  Upstream's own errors (a 403 from the server itself), a tunnel's or plain-HTTP host's failed
+  connection, and timeouts are not refusals and stay out.
   One fixed query, no model; what it prints is the agents' text (hosts, paths, names), cleaned of
   control characters, never acted on. It works while the agents are halted.
 - **Browsing it:** `claude-agent audit ui` serves the store's web UI (VictoriaLogs' vmui) at
