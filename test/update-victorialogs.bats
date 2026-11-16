@@ -42,7 +42,7 @@ EOF
     unset AIRLOCK_VL_PINS
     while read -r name image; do
         [[ "$name" =~ ^(victoria-logs|vmauth)$ ]] || return 1
-        [[ "$image" =~ ^docker\.io/victoriametrics/(victoria-logs|vmauth):v[0-9.]+@sha256:([0-9a-f]{64}|VMAUTH_DIGEST_PENDING)$ ]] || { echo "$image"; return 1; }
+        [[ "$image" =~ ^docker\.io/victoriametrics/(victoria-logs|vmauth):v[0-9.]+@sha256:[0-9a-f]{64}$ ]] || { echo "$image"; return 1; }
     done < <(sed -n 's/^    "\([a-z-]*\) \([^"]*\)"$/\1 \2/p' "$U")
     export AIRLOCK_VL_PINS="vmauth docker.io/example/bbb:v2"
     run "$U"
