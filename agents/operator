@@ -1152,19 +1152,27 @@ def query(q):
             rows.append({k: v if isinstance(v, str) else json.dumps(v) for k, v in o.items()})
     return rows
 
-# The store has caught up with the run once it holds a line from after it (any line: the run's own
-# shell closing logs some). Envoy writes each line when its request ends, so by then every request
-# of the run is in. 30 s at most, then what is there, said so.
-caught = False
-for _ in range(15):
-    n = query(f"_time:>{iso(end + 1)} | stats count() n")
-    if n and n[0].get("n", "0") not in ("", "0"):
-        caught = True
-        break
-    time.sleep(2)
-if caught:
-    time.sleep(2)   # Vector's batch after the first line
+# Envoy writes each line when its request ends and the store has it within a second or two
+# (measured on the first host runs: 0.02 to 1 s). So the list is in once the auditor's own line
+# count over the run has held still for three polls, 6 s or more after the run; 30 s at most, then
+# what is there, said so. (Waiting for any newer line instead never ends on a quiet host.)
 win = f"_time:[{iso(start - 1)}, {iso(end + 10)}]"
+COUNT = f'{win} log_type:envoy-access envoy.user:="{auditor}" | stats count() n'
+caught, last, still = False, None, 0
+deadline = time.monotonic() + 30
+time.sleep(max(0, end + 6 - time.time()))
+while time.monotonic() < deadline:
+    n = query(COUNT)
+    n = n[0].get("n", "") if n else None
+    if n is not None and n == last:
+        still += 1
+        if still >= 2:
+            caught = True
+            break
+    else:
+        still = 0
+    last = n
+    time.sleep(2)
 rows = query(f'{win} log_type:envoy-access envoy.user:="{auditor}" | sort by (_time) | limit 5001 '
              f'| fields _time, envoy.listener, envoy.method, envoy.authority, envoy.path, envoy.status, envoy.route, envoy.bytes_in')
 
@@ -1189,7 +1197,7 @@ if rows is None:
     L.append(f"The store did not answer: the list is missing ({cmd} audit events --agent {auditor} --kind envoy-allowed --since 1h, later).")
 else:
     if not caught:
-        L.append(f"(The store had not caught up 30 s after the run: this list may be short. Later: "
+        L.append(f"(The auditor's line count in the store was still changing 30 s after the run: this list may be short. Later: "
                  f"{cmd} audit events --agent {auditor} --severity info --since 1h)")
         L.append("")
     tunnels, reqs, refused = {}, [], 0

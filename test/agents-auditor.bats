@@ -57,7 +57,9 @@ S
 q=""; for a; do case "$a" in query=*) q=${a#query=} ;; esac; done
 printf '%s\n' "$q" >> "$CALLS"
 case "$q" in
-    *'stats count() n'*) echo "{\"n\":\"${CAUGHT:-1}\"}" ;;
+    # the auditor's line count: CHANGING makes it grow on every poll
+    *'stats count() n'*) if [ -n "${CHANGING:-}" ]; then c=$(( $(cat "$CALLS.count" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$CALLS.count"; echo "{\"n\":\"$c\"}"
+                         else echo "{\"n\":\"${CAUGHT:-1}\"}"; fi ;;
     *) cat "$(dirname "$CALLS")/rows" ;;
 esac
 printf '\n200'
@@ -139,9 +141,10 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     for want in -p --restricted --strict-mcp-config --tools Bash --permission-mode dontAsk --max-turns 60 --output-format text --append-system-prompt; do
         grep -qxF -- "$want" "$a" || { echo "lacks $want"; cat "$a"; return 1; }
     done
-    [ "$(sed -n '/^--allowedTools$/{n;p;}' "$a")" = "Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)" ]
-    # the same list is the managed settings' allow list, which alone counts there
-    [ "$(jq -r '.permissions.allow | join(",")' "$REPO/agents/share/managed-settings-auditor.json")" = "$(sed -n '/^--allowedTools$/{n;p;}' "$a")" ]
+    # the managed settings' allow list alone decides (allowManagedPermissionRulesOnly): none passed here,
+    # or Claude says it ignores it, into the report
+    ! grep -qx -- --allowedTools "$a"
+    [ "$(jq -r '.permissions.allow | join(",")' "$REPO/agents/share/managed-settings-auditor.json")" = "Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)" ]
     [[ "$(sed -n '/^-p$/{n;p;}' "$a")" == "Review the last 7 days in the audit store (from "* ]]
     # the instructions with the site's names and the store's host from the manifest
     grep -qF "curl -sS -G 'http://audit.internal/select/logsql/query'" "$a"
@@ -202,8 +205,10 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     forged="$(grep -n '^> ## Queries actually run$' "$f" | cut -d: -f1)"
     [ "$q" -lt "$m" ] && [ "$m" -lt "$forged" ]
     grep -qx '> All quiet.' "$f"
-    # the store was asked for the auditor's own Envoy lines over the run, after it caught up
-    grep -q '^_time:>.* | stats count() n$' "$CALLS"
+    # the store was asked for the auditor's own Envoy lines over the run, once their count held still
+    [ "$(grep -cF "log_type:envoy-access envoy.user:=\"$ME\" | stats count() n" "$CALLS")" -ge 3 ]
+    ! grep -q '^_time:>' "$CALLS"
+    ! grep -q 'still changing' "$f"
     grep -qF "log_type:envoy-access envoy.user:=\"$ME\" | sort by (_time)" "$CALLS"
     [[ "$output" == *"All quiet."* && "$output" == *"(kept as $f)"* ]]
 }
@@ -224,10 +229,15 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     [[ "$(sed -n '/^-p$/{n;p;}' "$CALLS.airlock")" == "Review the last 30 days"* ]]
 }
 
-@test "audit: the store not caught up or not answering is said, the report still kept" {
-    CAUGHT=0 run timeout 60 "$OP" audit
+@test "audit: a count still changing at 30 s is said, the report still kept; a quiet store is not a delay" {
+    CHANGING=1 run timeout 60 "$OP" audit
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -q "The store had not caught up 30 s after the run: this list may be short" "$(report_file)"
+    grep -q "The auditor's line count in the store was still changing 30 s after the run: this list may be short" "$(report_file)"
+    rm -f "$T/reports/"*
+    # no line at all after the run (a quiet host): settled within seconds, no warning
+    SECONDS=0; CAUGHT=0 run "$OP" audit
+    [ "$status" -eq 0 ]; [ "$SECONDS" -lt 20 ]
+    ! grep -q 'still changing' "$(report_file)"
 }
 
 @test "audit: refusals: no auditor, halted, a one-word typo, bad --days, audit-run's own refusal writes no report" {

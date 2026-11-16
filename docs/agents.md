@@ -440,7 +440,8 @@ machine (nothing leaves it):
     actually run**: Envoy's lines for the auditor's user over the run, as the store holds them,
     not the model's account of itself (a GET's query is decoded from its URL; a POST's body isn't
     logged, so its query shows as unknown, and the auditor is told to use GET). The command waits
-    up to 30 seconds for the store to catch up with the run and says so if it hasn't. Requests
+    until the store's count of those lines holds still (6 seconds after the run at least, 30 at
+    most; Envoy's lines arrive within a second or two) and says so if it never did. Requests
     inside a TLS tunnel (Envoy doesn't open those) and any after the run's window aren't listed,
     and the report says so. The auditor's own text comes after, quoted line by line (so no
     heading in it passes for the file's own) and cleaned of control characters.

@@ -22,8 +22,9 @@ AIRLOCK="${AGENTS_AUDIT_AIRLOCK:-$HOME/.local/bin/airlock}"                # tes
 PROMPT="${AGENTS_AUDIT_PROMPT:-$AGENTS_SHARE/box/auditor-prompt.md}"
 TIMEOUT="${AGENTS_AUDIT_TIMEOUT:-20m}"
 TURNS=60
-# (as managed-settings-auditor.json's allow list, which alone counts there; no sort or uniq: they write files)
-TOOLS="Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)"
+# Its tools: Bash, for what managed-settings-auditor.json's allow list names (curl and text tools; no
+# sort or uniq, they write files). That list alone counts there (allowManagedPermissionRulesOnly), so
+# none is passed here: Claude would only say it ignores it, into the report.
 ws="$HOME/audit"                                  # one workspace for every run: one login
 export PATH=/usr/local/bin:/usr/bin
 
@@ -115,7 +116,7 @@ prompt="$(sed -e "s/{auditor}/$AGENTS_AUDITOR/g" -e "s/{agents}/$agents/g" -e "s
 cd "$ws" || die "no workspace $ws"
 timeout -k 30s "$TIMEOUT" "$AIRLOCK" -p "$task" \
     --name "$AGENTS_AUDITOR-$(date -u +%Y%m%dT%H%M%SZ)" --session-id "$(cat /proc/sys/kernel/random/uuid)" \
-    --restricted --strict-mcp-config --tools Bash --allowedTools "$TOOLS" \
+    --restricted --strict-mcp-config --tools Bash \
     --permission-mode dontAsk --max-turns "$TURNS" \
     --append-system-prompt "$prompt" --output-format text </dev/null
 rc=$?
