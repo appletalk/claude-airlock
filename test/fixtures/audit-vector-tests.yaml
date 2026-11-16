@@ -127,6 +127,9 @@ tests:
   - name: "redact: any other GH_TOKEN value is still blanked, the placeholder with more after it too"
     inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "podman run -e GH_TOKEN=gho_notaplaceholder123 -e X_GH_TOKEN=airlock-proxy-adds-the-credentialXYZ -e GH_TOKEN=airlock-proxy-adds-the-credential", message: "x"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(._CMDLINE, "podman run -e GH_TOKEN=REDACTED -e X_GH_TOKEN=REDACTED -e GH_TOKEN=airlock-proxy-adds-the-credential"); assert_eq!(.audit.redacted, true)'}]}]
+  - name: "redact: the placeholder under a longer name ending in GH_TOKEN is blanked (the word boundary)"
+    inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "podman run -e MY_GH_TOKEN=airlock-proxy-adds-the-credential --name x", message: "x"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(._CMDLINE, "podman run -e MY_GH_TOKEN=REDACTED --name x")'}]}]
   - name: "redact: the bare placeholder with more after it is blanked (the end check)"
     inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "podman run -e GH_TOKEN=airlock-proxy-adds-the-credentialREALSECRET --name x", message: "x"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(._CMDLINE, "podman run -e GH_TOKEN=REDACTED --name x"); assert_eq!(.audit.redacted, true)'}]}]
@@ -201,6 +204,21 @@ tests:
   - name: "enrich: a numbered tty session for an agent (a console or SSH login, its audit session) is medium"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "5", message: "New session '5' of user 'agent' with class 'user' and type 'tty'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: a c-numbered session of another class or type is not the operator's shell"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "c3", message: "New session 'c3' of user 'agent' with class 'user-early' and type 'tty'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: a c-numbered x11 session is not the operator's shell"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "c4", message: "New session 'c4' of user 'agent' with class 'user' and type 'x11'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: a c-numbered tty line with more after it is not the operator's shell"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "c5", message: "New session 'c5' of user 'agent' with class 'user' and type 'tty'. Seat: seat0"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: pasta by its own path (Debian's pasta binary) is box-drop too"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _EXE: "/usr/bin/pasta", PRIORITY: "4", message: "Dropping datagram with no flow TAP 169.254.2.1:51234 -> 8.8.4.4:53"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "box-drop")'}]}]
+  - name: "enrich: passt by its plain path is box-drop too"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _EXE: "/usr/bin/passt", PRIORITY: "4", message: "Dropping datagram with no flow TAP 169.254.2.1:51234 -> 8.8.4.4:53"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "box-drop")'}]}]
   - name: "enrich: pasta dropping a box's datagram (direct DNS around the proxy) is box-drop, medium"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "passt.avx2", _EXE: "/usr/bin/passt.avx2", _SYSTEMD_UNIT: "user@1100.service", _SYSTEMD_USER_UNIT: "run-p1-i2.service", PRIORITY: "4", message: "Dropping datagram with no flow TAP 169.254.2.1:51234 -> 8.8.8.8:53"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "box-drop"); assert_eq!(.audit.severity, "medium"); assert_eq!(.audit.agent, "agent")'}]}]

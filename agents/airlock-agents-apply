@@ -1116,8 +1116,8 @@ transforms:
       # logind, machined and polkit by their units. (An agent's own sudo or su runs as root but
       # stays in the agent's cgroup: the owner uid below keeps it. Nobody else's sudo is read.)
       # sshd too (Arch's sshd.service, Debian's ssh.service, socket-activated sshd@...): an agent
-      # account logging in over SSH is never expected, and logind's line for it looks like the
-      # operator command's.
+      # account logging in over SSH is never expected; sshd's own line is what proves it (logind's
+      # only tells it apart from the operator command's shell by the session's numbering).
       sshd = match(unit, r'^(ssh|sshd)(@.*)?[.]service$')
       svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit) || sshd
       names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
@@ -1268,10 +1268,11 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       } else if k == "login" && unit == "systemd-logind.service" &&
           match(to_string(.message) ?? "", r'^(Session \S+ logged out\. |Removed session \S+\.$|New session \S+ of user \S+ with class .manager. )') { sev = "info"
       } else if k == "login" && unit == "systemd-logind.service" &&
-          match(to_string(.message) ?? "", r'^New session .?c[0-9]+.? of user \S+ with class .user. and type .tty.\.$') {
+          match(to_string(.message) ?? "", r'^New session \x27?c[0-9]+\x27? of user \S+ with class \x27user\x27 and type \x27tty\x27\.$') {
         # the operator command's shell as the agent (machinectl shell): a c-numbered session, logind's
-        # numbering when there is no audit session. A console or SSH login gets its audit session's
-        # number and stays medium below (and sshd's own Accepted line is high).
+        # numbering when there is no audit session. Where logins get an audit session (pam_loginuid,
+        # a kernel with audit), a console or SSH login gets its number and stays medium below;
+        # where they don't, one is c-numbered too and only sshd's own Accepted line (high) shows SSH.
         sev = "info"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"

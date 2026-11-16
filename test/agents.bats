@@ -3464,7 +3464,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     run vector test "$T/v.yaml" "$REPO/test/fixtures/audit-vector-tests.yaml"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *failed* ]] || return 1
-    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 123 ] || return 1
+    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 129 ] || return 1
 }
 
 @test "apply with audit on: the account, the data dirs, then waits for VictoriaLogs; with it, enables the store" {
