@@ -782,6 +782,10 @@ RestartSec=5
 ReadWritePaths=$AUDIT_LIB/vl
 MemoryMax=2G
 $(audit_sandbox)
+# mincore: VictoriaLogs asks which pages of its own memory-mapped parts are in RAM. systemd
+# leaves it out of @system-service (it can tell which file pages others touched); without it the
+# filter kills VictoriaLogs at its first write (SIGSYS).
+SystemCallFilter=mincore
 
 [Install]
 WantedBy=multi-user.target
@@ -942,7 +946,9 @@ MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-MemoryMax=256M
+# journalctl maps the journal files: those pages count against the unit, so a low ceiling makes
+# a backfill crawl (it reached 256M on the first host run).
+MemoryMax=1G
 UMask=0077
 
 [Install]

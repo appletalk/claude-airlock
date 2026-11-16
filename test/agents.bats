@@ -3354,6 +3354,9 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     grep -qx 'PrivateNetwork=yes' "$u/airlock-audit-vl.service"
     grep -q -- '-retentionPeriod=90d -retention.maxDiskSpaceUsageBytes=5368709120 -httpListenAddr=127.0.0.1:9428' "$u/airlock-audit-vl.service"
     grep -qx 'CapabilityBoundingSet=' "$u/airlock-audit-vl.service"
+    # its one addition to @system-service (the filter killed it on the first host run without)
+    grep -qx 'SystemCallFilter=@system-service' "$u/airlock-audit-vl.service" && grep -qx 'SystemCallFilter=mincore' "$u/airlock-audit-vl.service"
+    [ "$(grep -c '^SystemCallFilter=' "$u/airlock-audit-vmauth.service")" = 1 ]
     # the one way in: a 0600 socket with ACL entries for airlock-envoy and the operator alone
     grep -qx 'ListenStream=/run/airlock-audit/vl.sock' "$u/airlock-audit-vl-proxy.socket"
     grep -qx 'SocketMode=0600' "$u/airlock-audit-vl-proxy.socket"
