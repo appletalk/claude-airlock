@@ -1140,7 +1140,9 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       # polkit lines name no agent.
       if agent == "" && logind_agent { agent = logind_user }
       if agent == "" && sshd && named {
-        m = parse_regex(msg, r'\bfor (invalid user )?(?P<a>$alt) from ') ?? {}
+        # Only sshd's own line shapes: the user name is the remote client's choice, so a name
+        # anywhere else in the line (or "invalid user", which an agent never is) decides nothing.
+        m = parse_regex(msg, r'^(Accepted|Failed|Postponed) \S+ for (?P<a>$alt) from \S+ port [0-9]+ ') ?? {}
         agent = if is_string(m.a) { string!(m.a) } else { "" }
       }
       # (Not from polkit's stdout stream: journald splits that at newlines, and a split command
@@ -1216,8 +1218,9 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       if k == "nft-drop" { sev = "high"
       } else if k == "privilege" && match(to_string(.message) ?? "", r'^pam_systemd_home\([a-z0-9_-]+:[a-z]+\): Failed to connect to system bus') {
         # Known noise: the agents have no system bus, so this module complains on every attempt;
-        # the attempt's own lines (sudo's, pam_unix's, faillock's) still rate high.
-        sev = "low"
+        # the attempt's own lines (sudo's, pam_unix's, faillock's) still rate high. Medium, not
+        # low: a sudo killed at its password prompt leaves only this line, and it must still show.
+        sev = "medium"
       } else if k == "privilege" && (to_string(._SYSTEMD_UNIT) ?? "") != "polkit.service" { sev = "high"
       } else if k == "privilege" && contains(msgl, "failed") { sev = "high"
       } else if k == "privilege" { sev = "low"
