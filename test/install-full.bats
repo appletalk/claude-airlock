@@ -28,15 +28,15 @@ agents_env() {  # agents_env <operator> <audit on|off>
 }
 
 @test "make install runs bin/install-full.sh, passing YES" {
-    grep -qE '^install: ##' "$REPO/Makefile"
-    grep -A1 -E '^install: ##' "$REPO/Makefile" | grep -q 'YES="$(YES)" bash bin/install-full.sh'
+    grep -qE '^install: ##' "$REPO/Makefile" || return 1
+    grep -A1 -E '^install: ##' "$REPO/Makefile" | grep -q 'YES="$(YES)" bash bin/install-full.sh' || return 1
 }
 
 @test "YES=1, no agents here: the launcher alone, then done" {
     YES=1 run bash "$S" </dev/null
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ "$(cat "$CALLS")" = "install.sh" ]
-    [[ "$output" == *"==> make install: done"* ]]
+    [ "$(cat "$CALLS")" = "install.sh" ] || return 1
+    [[ "$output" == *"==> make install: done"* ]] || return 1
 }
 
 @test "YES=1 with agents and the audit store: every step in order; a changed binary restarts the store" {
@@ -48,8 +48,8 @@ sudo bash $T/repo/agents/install.sh
 agents/install.sh (uid $(id -u))
 sudo $T/sbin/update-victorialogs
 update-victorialogs
-sudo $T/sbin/airlock-audit restart
-airlock-audit restart
+sudo $T/sbin/airlock-audit restart --if-stale
+airlock-audit restart --if-stale
 agent update
 agent reload
 sudo $T/sbin/airlock-audit check
@@ -59,44 +59,58 @@ update-runsc --check"
     [ "$(cat "$CALLS")" = "$want" ] || { diff <(echo "$want") "$CALLS"; return 1; }
 }
 
-@test "binaries already pinned: the store keeps running (no restart)" {
+@test "the store's restart is left to airlock-audit (--if-stale: it restarts only an older binary)" {
     agents_env "$(id -un)" on
     YES=1 run bash "$S" </dev/null
     [ "$status" -eq 0 ]
-    ! grep -q 'airlock-audit restart' "$CALLS"
-    [[ "$output" == *"nothing changed: the store keeps running"* ]]
+    grep -qx 'airlock-audit restart --if-stale' "$CALLS" || return 1
+    ! grep -qx 'airlock-audit restart' "$CALLS" || return 1
+}
+
+@test "a checkout with local changes stops before the first root step" {
+    agents_env "$(id -un)" off
+    git -C "$T/repo" init -q && git -C "$T/repo" add -A && git -C "$T/repo" -c user.email=t@example.org -c user.name=t commit -qm x
+    echo '# edited' >> "$T/repo/agents/install.sh"
+    YES=1 run bash "$S" </dev/null
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"has local changes; the root steps would run them"* ]] || return 1
+    ! grep -q '^sudo ' "$CALLS" || return 1
+    git -C "$T/repo" checkout -q agents/install.sh
+    : > "$CALLS"; YES=1 run bash "$S" </dev/null
+    [ "$status" -eq 0 ] && grep -q 'agents/install.sh' "$CALLS" || return 1
+    [[ "$output" == *"use a clone no airlock box mounts"* ]] || return 1
 }
 
 @test "audit off: no store steps" {
     agents_env "$(id -un)" off
     YES=1 run bash "$S" </dev/null
     [ "$status" -eq 0 ]
-    ! grep -qE 'update-victorialogs|airlock-audit' "$CALLS"
-    grep -qx 'agent update' "$CALLS" && grep -qx 'agent reload' "$CALLS"
+    ! grep -qE 'update-victorialogs|airlock-audit' "$CALLS" || return 1
+    grep -qx 'agent update' "$CALLS" && grep -qx 'agent reload' "$CALLS" || return 1
 }
 
 @test "another operator: the agents' steps are named for them, never run" {
     agents_env someone-else on
     YES=1 run bash "$S" </dev/null
     [ "$status" -eq 0 ]
-    ! grep -q '^agent ' "$CALLS"
-    [[ "$output" == *"the agents' own steps are someone-else's: as someone-else, agent update, then agent reload"* ]]
+    ! grep -q '^agent ' "$CALLS" || return 1
+    [[ "$output" == *"the agents' own steps are someone-else's: as someone-else, agent update, then agent reload"* ]] || return 1
 }
 
 @test "a waiting runsc update is reported, never applied" {
     agents_env "$(id -un)" off
     RUNSC_RC=10 YES=1 run bash "$S" </dev/null
     [ "$status" -eq 0 ]
-    [[ "$output" == *"a gVisor (runsc) update is waiting"* ]]
-    ! grep -qx 'update-runsc' "$CALLS"
+    [[ "$output" == *"a gVisor (runsc) update is waiting"* ]] || return 1
+    ! grep -qx 'update-runsc' "$CALLS" || return 1
 }
 
 @test "no terminal and no YES: refused before anything runs" {
     command -v setsid >/dev/null || skip "no setsid"
     run setsid -w bash "$S" </dev/null
     [ "$status" -ne 0 ]
-    [[ "$output" == *"rerun with YES=1"* ]]
-    [ ! -s "$CALLS" ]
+    [[ "$output" == *"rerun with YES=1"* ]] || return 1
+    [ ! -s "$CALLS" ] || return 1
 }
 
 @test "asks before each step: n skips it, q stops" {
@@ -105,12 +119,12 @@ update-runsc --check"
     # answers: launcher n, agents toolkit y, agent update q
     run script -qec "bash $S" /dev/null <<< $'n\ny\nq\n'
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    ! grep -qx 'install.sh' "$CALLS"
-    grep -q 'agents/install.sh' "$CALLS"
-    ! grep -q '^agent ' "$CALLS"
-    [[ "$output" == *"stopped; rerun make install to go on"* ]]
+    ! grep -qx 'install.sh' "$CALLS" || return 1
+    grep -q 'agents/install.sh' "$CALLS" || return 1
+    ! grep -q '^agent ' "$CALLS" || return 1
+    [[ "$output" == *"stopped; rerun make install to go on"* ]] || return 1
 }
 
 @test "refuses to run as root" {
-    grep -q 'run it as yourself' "$S"
+    grep -q 'run it as yourself' "$S" || return 1
 }

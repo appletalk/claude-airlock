@@ -4,7 +4,10 @@ Install in levels. **Level 2, airlock-envoy, is the recommended setup**; level 1
 quick start. The levels above it add agents.
 
 **One command per repo, for installing and for every update after:** in airlock-envoy
-`make install`, then here `make install`. Each says what its next step does and asks
+`make install`, then here `make install`. Run both **from clones no airlock box mounts**: their
+root steps install code from the clone, so a box that could write it could change what root
+runs. Here `make install` checks the clone has no local changes before its first sudo and stops
+if it has. Each says what its next step does and asks
 `[Y/n/q]` (n skips that step, q stops); `make install YES=1` runs every step without asking. A
 step that is already current says so. Here the steps are: the launcher and images (level 1),
 the agents toolkit and its apply (level 3, where agents are set up, or if you choose to set

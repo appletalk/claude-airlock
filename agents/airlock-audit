@@ -4,12 +4,15 @@
 #   airlock-audit status          the units, what the store holds (rows per kind, oldest and
 #                                 newest line), seccomp kills of its programs since it started
 #   airlock-audit restart         stop and start the store in order (the socket last)
+#   airlock-audit restart --if-stale
+#                                 only if VictoriaLogs or vmauth runs an older binary than the one
+#                                 installed (what make install runs after update-victorialogs)
 #   airlock-audit reset [--yes]   empty the store and the reader's cursor, then start again: the
 #                                 retention window is read back in. Asks first (--yes: doesn't)
 #   airlock-audit check           the store's guarantees, live: no host listener, one network
-#                                 namespace, the door refuses writes and path tricks, vmauth's own
-#                                 endpoints refuse without a key, a query answers. Exit 1 on any
-#                                 failure
+#                                 namespace, the door (vmauth itself, not the store behind it)
+#                                 refuses writes and path tricks, vmauth's own endpoints refuse
+#                                 without a key, a query answers. Exit 1 on any failure
 set -euo pipefail
 export LC_ALL=C
 
@@ -50,12 +53,27 @@ status)
     else echo "  no answer through $SOCK"; fi
     echo "== seccomp kills since the store started"
     since="$(systemctl show -p ActiveEnterTimestamp --value airlock-audit-vl.service)"
-    kills="$(journalctl -k --no-pager -q ${since:+--since "$since"} 2>/dev/null \
+    # Seccomp records arrive as kernel or as audit lines (with journald's audit socket active).
+    kills="$(journalctl --no-pager -q ${since:+--since "$since"} _TRANSPORT=kernel + _TRANSPORT=audit 2>/dev/null \
         | grep 'type=1326' | grep -E 'comm="(victoria-logs|vmauth|vector|journalctl|cat|systemd-socket-)' || true)"
     if [ -z "$kills" ]; then echo "  none"; else while IFS= read -r l; do echo "  $l"; done <<< "$kills"; fi
     ;;
 restart)
-    [ $# = 0 ] || die "restart takes no arguments"
+    case "${1:-}" in
+        '') ;;
+        --if-stale)
+            # A running binary replaced on disk shows as "<path> (deleted)" (update-victorialogs
+            # installs with mv, a new inode); one that isn't the installed path is stale too.
+            stale=""
+            for u in airlock-audit-vl:victoria-logs airlock-audit-vmauth:vmauth; do
+                p="$(systemctl show -p MainPID --value "${u%%:*}.service")"
+                exe="$(readlink "$PROC/$p/exe" 2>/dev/null || true)"
+                [ "$exe" = "/usr/local/bin/${u#*:}" ] || stale="$stale ${u%%:*}(${exe:-not running})"
+            done
+            if [ -z "$stale" ]; then echo "the store runs the installed binaries: nothing to restart"; exit 0; fi
+            echo "stale:$stale" ;;
+        *) die "restart takes only --if-stale" ;;
+    esac
     systemctl stop "${STOP[@]}"
     systemctl start "${START[@]}"
     echo "restarted: ${START[*]}"
@@ -73,8 +91,11 @@ reset)
         [[ "$a" == [yY]* ]] || { echo "nothing changed"; exit 1; }
     fi
     systemctl stop "${STOP[@]}"
+    # Whatever fails between the stop and the start, the store starts again (empty or not).
+    trap 'systemctl start "${START[@]}"' EXIT
     [ ! -d "$DATA" ] || find "$DATA" -mindepth 1 -delete
     rm -f "$CURSOR"
+    trap - EXIT
     systemctl start "${START[@]}"
     echo "reset: the store is empty and reading the journal back in (airlock-audit status shows it fill)"
     ;;
@@ -86,7 +107,8 @@ check)
     for u in "${SERVICES[@]}" airlock-audit-vl-proxy.socket; do
         if systemctl is-active --quiet "$u"; then ok "$u active"; else bad "$u is $(systemctl is-active "$u" 2>/dev/null || true)"; fi
     done
-    if ss -ltnH 2>/dev/null | grep -qE ':(9428|8427)\b'; then bad "something listens on 9428 or 8427 in the host's network namespace"
+    if ! listeners="$(ss -ltnH 2>/dev/null)"; then bad "ss failed: can't tell what listens in the host's network namespace"
+    elif grep -qE ':(9428|8427)\b' <<< "$listeners"; then bad "something listens on 9428 or 8427 in the host's network namespace"
     else ok "no host listener on 9428 or 8427"; fi
     host="$(readlink "$PROC/1/ns/net")" ns=""
     for u in airlock-audit-vl airlock-audit-vmauth airlock-audit-vector; do
@@ -96,10 +118,15 @@ check)
         elif [ -n "$ns" ] && [ "$n" != "$ns" ]; then bad "$u: in $n, not the store's $ns"
         else ok "$u in the store's network namespace ($n)"; ns=$n; fi
     done
-    # The door: writes, deletes and internal endpoints refused, with or without path tricks.
+    # The door: writes, deletes and internal endpoints refused by vmauth itself (its "missing
+    # route" answer), with or without path tricks. Any other answer, a refusal from the store
+    # behind it included, means vmauth let the request through.
     for p in /insert/jsonline //insert/jsonline /delete/run_task /internal/insert '/select/../insert/jsonline' '/select%2F..%2Finsert/jsonline'; do
-        c="$(curl -s -o /dev/null -w '%{http_code}' --path-as-is --max-time 10 --unix-socket "$SOCK" -X POST "http://x$p" -d '{}' || true)"
-        case "$c" in 2*) bad "the door let POST $p through ($c)" ;; 000|'') bad "no answer for POST $p" ;; *) ok "the door refuses POST $p ($c)" ;; esac
+        body="$(curl -s -w '\n%{http_code}' --path-as-is --max-time 10 --unix-socket "$SOCK" -X POST "http://x$p" -d '{}' || true)"
+        c="${body##*$'\n'}"
+        if [[ "$c" == 4* ]] && grep -qi 'missing route' <<< "$body"; then ok "vmauth refuses POST $p ($c, missing route)"
+        elif [ -z "$c" ] || [ "$c" = 000 ]; then bad "no answer for POST $p"
+        else bad "POST $p got past vmauth's routes ($c): $(head -c 120 <<< "${body%$'\n'*}" | tr '\n' ' ')"; fi
     done
     for p in /metrics /flags /-/reload /debug/pprof/; do
         c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --unix-socket "$SOCK" "http://x$p" || true)"
