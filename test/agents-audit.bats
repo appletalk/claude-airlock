@@ -22,6 +22,7 @@ printf '%s\n' "$q" >> "$CALLS"
 if [ -n "${CODE:-}" ]; then printf 'cannot parse query\n%s' "$CODE"; exit 0; fi
 case "$q" in
     *'stats count() n'*) echo "{\"n\":\"${COUNT:-$(grep -c . "$(dirname "$CALLS")/rows")}\"}" ;;
+    *'stats by (audit.severity) count() n'*) echo "{\"audit.severity\":\"high\",\"n\":\"${COUNT:-$(grep -c . "$(dirname "$CALLS")/rows")}\"}" ;;
     *envoy.method:CONNECT*) cat "$(dirname "$CALLS")/connects" 2>/dev/null ;;
     *) cat "$(dirname "$CALLS")/rows" ;;
 esac
@@ -385,4 +386,45 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     printf '#!/bin/sh\nshift; exec "$@"\n' > "$T/bin/python3"; chmod +x "$T/bin/python3"
     AGENTS_AUDIT_UI="$T/fake-ui" run "$OP" audit ui --port 9500
     [ "$output" = "$AGENTS_AUDIT_SOCK 9500 $(id -u)" ] || { echo "$output"; return 1; }
+}
+
+# ---- audit events ----------------------------------------------------------------------------------
+@test "events: one fixed query, the severity and above, kind and agent only in their checked shape" {
+    row '{"_time":"2026-11-15T14:05:00Z","audit.severity":"high","audit.kind":"privilege","audit.agent":"agent","audit.session":"proj.main","log_type":"journal","_msg":"agent : user NOT in sudoers"}'
+    row '{"_time":"2026-11-15T14:04:00Z","audit.severity":"medium","audit.kind":"envoy-refused","audit.agent":"agent","log_type":"envoy-access","envoy.method":"CONNECT","envoy.authority":"example.org:443","envoy.route":"deny-connect","envoy.status":"403"}'
+    run "$OP" audit events --severity medium --kind privilege --agent agent --since 2h
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    q="$(sed -n 1p "$CALLS")"
+    [[ "$q" == '_time:>='????-??-??T??:??:??Z' audit.severity:in(high,medium) audit.kind:privilege audit.agent:"agent" | sort by (_time desc) | limit 50 | fields '* ]] || { echo "$q"; return 1; }
+    [[ "$(sed -n 2p "$CALLS")" == *'| stats by (audit.severity) count() n' ]]
+    [[ "${lines[0]}" == "2026-11-15 14:05:00  high    privilege            agent/proj.main               agent : user NOT in sudoers" ]] || { echo "$output"; return 1; }
+    [[ "${lines[1]}" == *"medium  envoy-refused        agent                         CONNECT example.org:443  [deny-connect 403]" ]] || { echo "$output"; return 1; }
+}
+
+@test "events: defaults are medium and above, the last 24 h; low and info widen it" {
+    run "$OP" audit events
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$(sed -n 1p "$CALLS")" == *' audit.severity:in(high,medium) | sort'* ]] || return 1
+    : > "$CALLS"; run "$OP" audit events --severity info
+    [[ "$(sed -n 1p "$CALLS")" == *' audit.severity:in(high,medium,low,info) | sort'* ]] || return 1
+    : > "$CALLS"; run "$OP" audit events --severity high
+    [[ "$(sed -n 1p "$CALLS")" == *' audit.severity:in(high) | sort'* ]]
+}
+
+@test "events: bad values are refused before any query (no quote, space or other text reaches it)" {
+    for a in "--severity critical" "--kind Privilege" "--kind a\"b" "--agent x y" "--agent \"x" "--limit 0" "--since 5m" "--frob"; do
+        # shellcheck disable=SC2086
+        run "$OP" audit events $a
+        [ "$status" -ne 0 ] || { echo "accepted: $a"; return 1; }
+    done
+    [ ! -s "$CALLS" ]
+}
+
+@test "events: the agents' text is cleaned; a redacted line says so; the count line" {
+    row "$(printf '{"_time":"2026-11-15T14:05:00Z","audit.severity":"high","audit.kind":"agent-process","audit.agent":"agent","audit.redacted":"true","log_type":"journal","_msg":"x\\u001b]52;c;aGk=\\u0007y"}')"
+    COUNT=3 run "$OP" audit events
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    ! printf '%s' "$output" | LC_ALL=C grep -qP '[\x00-\x08\x0b-\x1f\x7f]' || return 1
+    [[ "${lines[0]}" == *"x?]52;c;aGk=?y (redacted)" ]] || { echo "$output"; return 1; }
+    [[ "${lines[1]}" == "(high 3 since "* ]] || { echo "$output"; return 1; }
 }

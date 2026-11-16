@@ -79,6 +79,7 @@ claude-agent attach myproject
 | `claude-agent web ...` | web research (below) |
 | `claude-agent halt` / `resume` | emergency stop of everything (below) / back to normal |
 | `claude-agent audit denies` | Envoy's recent refusals, with who and which site file line (with `audit on`, below) |
+| `claude-agent audit events` | what the store rated high or medium in the last day (`--severity`, `--kind`, `--agent`, `--since`) |
 | `claude-agent audit ui` | the audit store's web UI in your browser, for you alone, until Ctrl-C |
 
 Tab completion (sessions, web commands, the queue's ids by state): add to your `~/.zshrc`, after
@@ -373,6 +374,12 @@ machine (nothing leaves it):
   connection, and timeouts are not refusals and stay out.
   One fixed query, no model; what it prints is the agents' text (hosts, paths, names), cleaned of
   control characters, never acted on. It works while the agents are halted.
+- **By severity:** `claude-agent audit events [--severity high|medium|low|info] [--kind <kind>]
+  [--agent <name>] [--since 7d] [--limit 200]` lists the lines the store rated at that severity and
+  above (medium and the last 24 hours by default), newest first: time, severity, kind, agent and
+  session, what happened (a redacted line says so), then a count by severity. Kind and agent are
+  checked against their shape before they go into the fixed query. Lines stored before the store
+  rated them don't show (a reset reads them in again).
 - **Browsing it:** `claude-agent audit ui` serves the store's web UI (VictoriaLogs' vmui) at
   `http://127.0.0.1:9429/select/vmui/` until Ctrl-C (`--port <n>` for another), and closes by
   itself after 30 minutes without a request or 4 hours in all, so it isn't left open. A loopback port

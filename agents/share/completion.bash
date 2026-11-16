@@ -57,9 +57,16 @@ _airlock_agents() {
                     esac
                 fi ;;
             audit)
-                if [ "$COMP_CWORD" = 2 ]; then words=(denies ui)
+                if [ "$COMP_CWORD" = 2 ]; then words=(denies events ui)
                 elif [ "${COMP_WORDS[2]}" = denies ]; then words=(--since --limit)
-                elif [ "${COMP_WORDS[2]}" = ui ]; then words=(--port); fi ;;
+                elif [ "${COMP_WORDS[2]}" = ui ]; then words=(--port)
+                elif [ "${COMP_WORDS[2]}" = events ]; then
+                    case "${COMP_WORDS[COMP_CWORD-1]}" in
+                        --severity) words=(high medium low info) ;;
+                        --kind) words=(envoy-refused envoy-web-refused privilege login session nft-drop journald-suppressed envoy-service store agent-process envoy-allowed envoy-web-allowed) ;;
+                        *) words=(--severity --kind --agent --since --limit) ;;
+                    esac
+                fi ;;
         esac
     fi
     for w in "${words[@]}"; do [[ $w == "$cur"* ]] && COMPREPLY+=("$w"); done

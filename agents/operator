@@ -56,6 +56,11 @@
 #                                       route, and which site file line would change it
 #   <command> audit ui [--port <n>]     the store's web UI on http://127.0.0.1:9429/select/vmui/,
 #                                       for you alone, until Ctrl-C (or 30 min idle, 4 h at most)
+#   <command> audit events [--severity high|medium|low|info] [--kind <kind>] [--agent <name>]
+#                          [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]
+#                                       what the store rated, at that severity and above (default
+#                                       medium, the last 24 h, newest 50): severity, kind, agent,
+#                                       session and what happened, then a count by severity
 set -euo pipefail
 # Internal to this script (set per call below), never taken from the caller's environment.
 unset OCTL_RAW STAGE_WEB STAGE_GUARD STATE
@@ -1086,12 +1091,99 @@ audit_ui() {
     audit_ready
     exec python3 -I "${AGENTS_AUDIT_UI:-$AGENTS_LIB/audit-ui}" "$AUDIT_SOCK" "$port" "$(id -u)"
 }
+# audit events: the lines the store rated (audit.severity, set at ingest), at a severity and
+# above, newest first, from one fixed query: kind and agent are checked against their shape
+# before they go in (no quote or space can reach the query).
+audit_events() {
+    local since=24h limit=50 sev=medium kind="" agent="" cutoff W
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --since) [ $# -ge 2 ] || die "--since needs <n>d, <n>h or YYYY-MM-DD"; since=$2; shift ;;
+            --limit) [ $# -ge 2 ] && [[ "$2" =~ ^([1-9][0-9]{0,2}|1000)$ ]] || die "--limit needs a number from 1 to 1000"; limit=$2; shift ;;
+            --severity) [ $# -ge 2 ] && [[ "$2" =~ ^(high|medium|low|info)$ ]] || die "--severity needs high, medium, low or info"; sev=$2; shift ;;
+            --kind) [ $# -ge 2 ] && [[ "$2" =~ ^[a-z][a-z-]{0,31}$ ]] || die "--kind needs a kind (envoy-refused, privilege, login, session, nft-drop, ...)"; kind=$2; shift ;;
+            --agent) [ $# -ge 2 ] && [[ "$2" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "--agent needs an agent user's name"; agent=$2; shift ;;
+            *) die "usage: $CMD audit events [--severity high|medium|low|info] [--kind <kind>] [--agent <name>] [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]" ;;
+        esac
+        shift
+    done
+    cutoff="$(since_epoch "$since")"
+    audit_ready
+    set_cols
+    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" "$sev" "$kind" "$agent" <<"PY" | rows_out "$W"
+import datetime, json, re, subprocess, sys
+sock, start, limit, cmd, sev, kind, agent = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
+ORDER = ["high", "medium", "low", "info"]
+levels = ORDER[:ORDER.index(sev) + 1]
+
+def printable(s, n):
+    s = "".join(c if c.isprintable() else "?" for c in str(s))
+    return s if len(s) <= n else s[:n - 3] + "..."
+
+def query(q):
+    p = subprocess.run(["curl", "-sS", "--max-time", "30", "--unix-socket", sock, "-w", "\n%{http_code}",
+                        "http://x/select/logsql/query", "--data-urlencode", "query=" + q],
+                       stdin=subprocess.DEVNULL, capture_output=True)
+    body, _, code = p.stdout.decode("utf-8", "replace").rpartition("\n")
+    if p.returncode != 0 or code != "200":
+        why = (body or p.stderr.decode("utf-8", "replace")).strip()
+        print(f"{cmd} audit events: no answer from the audit store (curl {p.returncode}, HTTP {code or '-'}): "
+              f"{printable(why, 300)}", file=sys.stderr)
+        sys.exit(1)
+    rows = []
+    for line in body.splitlines():
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            rows.append({k: v if isinstance(v, str) else json.dumps(v) for k, v in o.items()})
+    return rows
+
+def when(t):
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d{1,9})?Z$", t or "")
+    if not m:
+        return "?"
+    d = datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    return d.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+f = f'_time:>={start} audit.severity:in({",".join(levels)})'
+if kind:
+    f += f" audit.kind:{kind}"
+if agent:
+    f += f' audit.agent:"{agent}"'
+rows = query(f"{f} | sort by (_time desc) | limit {limit} | fields _time, audit.severity, audit.kind, audit.agent, "
+             "audit.session, audit.redacted, log_type, _msg, envoy.method, envoy.authority, envoy.path, envoy.route, "
+             "envoy.status, envoy.sni")
+counts = {r.get("audit.severity", ""): r.get("n", "0") for r in query(f"{f} | stats by (audit.severity) count() n")}
+for r in rows:
+    if r.get("log_type") in ("envoy-access", "envoy-web"):
+        m = r.get("envoy.method", "")
+        what = (f"{m} {r.get('envoy.authority', '')}{r.get('envoy.path', '') if m and m != 'CONNECT' else ''}"
+                if m else f"TLS {r.get('envoy.sni') or '(no name)'}")
+        what += f"  [{r.get('envoy.route') or 'no route'} {r.get('envoy.status', '')}]".rstrip("] ") + "]"
+    else:
+        what = (r.get("_msg") or "").split("\n")[0]
+    who = r.get("audit.agent") or "-"
+    if r.get("audit.session"):
+        who += "/" + r["audit.session"]
+    flag = " (redacted)" if r.get("audit.redacted") == "true" else ""
+    print(f"{when(r.get('_time'))}  {printable(r.get('audit.severity') or '?', 6):<6}  {printable(r.get('audit.kind') or '?', 19):<19}  "
+          f"{printable(who, 28):<28}  {printable(what, 160)}{flag}")
+by = ", ".join(f"{s} {counts[s]}" for s in levels if s in counts) or "none"
+total = sum(int(v) for v in counts.values() if v.isdigit())
+shown = len(rows)
+more = f"; newest {shown} shown, --limit <n> for more" if total > shown else ""
+print(f"({by} since {when(start)}, {sev} and above{more}; lines from before the store rated them are not counted)")
+PY
+}
 audit() {
     local sub="${1:-}"; shift || true
     case "$sub" in
         denies) audit_denies "$@" ;;
         ui) audit_ui "$@" ;;
-        *) die "usage: $CMD audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] | ui [--port <n>]" ;;
+        events) audit_events "$@" ;;
+        *) die "usage: $CMD audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] | events [--severity <s>] [--kind <k>] [--agent <a>] [--since ...] [--limit <n>] | ui [--port <n>]" ;;
     esac
 }
 
