@@ -198,12 +198,21 @@ tests:
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1101)"}}
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.agent, "agent-web"); assert_eq!(.audit.severity, "high")'}]}]
-  - name: "enrich: logind's new tty session for an agent, c-numbered (no audit session), is login, info"
+  - name: "enrich: logind's new tty session for an agent, c-numbered (no audit session), is login, low"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent-guard", SESSION_ID: "c714", message: "New session 'c714' of user 'agent-guard' with class 'user' and type 'tty'."}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "info"); assert_eq!(.level, "info")'}]}]
-  - name: "enrich: an audit-numbered tty session for an agent (the operator's shell where logins get an audit session) is info too"
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "low"); assert_eq!(.level, "info")'}]}]
+  - name: "enrich: an audit-numbered tty session for an agent (the operator's shell where logins get an audit session) is low too"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "7", message: "New session '7' of user 'agent' with class 'user' and type 'tty'."}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "info")'}]}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "low")'}]}]
+  - name: "enrich: a tty session line with something before it is not the routine one"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "8", message: "x New session '8' of user 'agent' with class 'user' and type 'tty'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: a tty session with an id of another shape is not the routine one"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "x", message: "New session 'abc-1' of user 'agent' with class 'user' and type 'tty'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: systemd's own sshd units (unix-local, vsock) accepting an agent are login, high"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "sshd-unix-local@1.service", message: "Accepted publickey for agent from UNKNOWN port 65535 ssh2: ED25519 SHA256:abc"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "high"); assert_eq!(.audit.agent, "agent")'}]}]
   - name: "enrich: a tty session of another class is not the operator's shell"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "c3", message: "New session 'c3' of user 'agent' with class 'user-early' and type 'tty'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]

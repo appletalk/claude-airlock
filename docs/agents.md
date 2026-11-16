@@ -326,11 +326,12 @@ machine (nothing leaves it):
     its prompt leaves only that line) or a dropped packet; `medium` for a refusal, a box-drop, an
     unusual login, journald suppressing the agents' lines or the store's own errors; `low` for a
     failing session, Envoy service or agent process; `info` for the rest: a user manager's
-    session, every session's end, a user manager saying it has no system bus, and logind's new
-    `user`/`tty` sessions for an agent (the operator command's `machinectl shell`: the agents'
-    passwords are locked, so there is no console or password login, and an SSH login is flagged
-    by sshd's own lines, `high` when sshd accepts an agent, `medium` for its other lines naming
-    one);
+    session, every session's end, a user manager saying it has no system bus, and `low` for logind's
+    new `user`/`tty` sessions for an agent: routinely the operator command's `machinectl shell`,
+    but an SSH server sshd's rules don't match (dropbear, Tailscale SSH), a PAM module that ignores
+    the locked password, or root (`su -l`, `run0`) leaves the same line, and nothing in it tells them
+    apart. sshd's own lines flag SSH through it: `high` when sshd (its own units or systemd's
+    `sshd-unix-local@`/`sshd-vsock@`) accepts an agent, `medium` for its other lines naming one;
   - `audit.redacted: true` when redaction changed the line (a box sent something
     credential-shaped: flagged, not only hidden). The launcher's own gh placeholder
     (`GH_TOKEN=airlock-proxy-adds-the-credential` on a box's podman command line) is no secret

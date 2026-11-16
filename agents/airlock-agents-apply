@@ -1118,7 +1118,8 @@ transforms:
       # sshd too (Arch's sshd.service, Debian's ssh.service, socket-activated sshd@...): an agent
       # account logging in over SSH is never expected; sshd's own line is what proves it (logind's
       # only tells it apart from the operator command's shell by the session's numbering).
-      sshd = match(unit, r'^(ssh|sshd)(@.*)?[.]service$')
+      # (and systemd's own ssh generator's sshd-unix-local@ and sshd-vsock@ units)
+      sshd = match(unit, r'^(ssh|sshd)(-[a-z0-9-]+)?(@.*)?[.]service$')
       svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit) || sshd
       names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
       # logind's own structured field (the unit proves the sender): its lines about an agent's
@@ -1247,9 +1248,9 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       # audit.severity: a security rating for triage, apart from syslog's (high, medium, low,
       # info). An agent's privilege attempt or a dropped packet is high; a refusal, an unusual
       # login, a suppression of the agents' lines medium; a failing session or service low.
-      # logind's routine lines (by its own message, its unit proven): a session of class user and
-      # type tty (the operator command's machinectl shell), a user manager's session and every
-      # session's end info. sshd accepting an agent: high. A box-drop medium.
+      # logind's routine lines (by its own message, its unit proven): a user manager's session and
+      # every session's end info; a session of class user and type tty low (see below). sshd
+      # accepting an agent: high. A box-drop medium.
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
@@ -1262,17 +1263,18 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       } else if k == "privilege" && (to_string(._SYSTEMD_UNIT) ?? "") != "polkit.service" { sev = "high"
       } else if k == "privilege" && contains(msgl, "failed") { sev = "high"
       } else if k == "privilege" { sev = "low"
-      } else if k == "login" && match(unit, r'^(ssh|sshd)(@.*)?[.]service$') &&
+      } else if k == "login" && match(unit, r'^(ssh|sshd)(-[a-z0-9-]+)?(@.*)?[.]service$') &&
           match(to_string(.message) ?? "", r'^Accepted \S+ for ') { sev = "high"
       } else if k == "login" && unit == "systemd-logind.service" &&
           match(to_string(.message) ?? "", r'^(Session \S+ logged out\. |Removed session \S+\.$|New session \S+ of user \S+ with class .manager. )') { sev = "info"
       } else if k == "login" && unit == "systemd-logind.service" &&
-          match(to_string(.message) ?? "", r'^New session \x27?[a-z]?[0-9]+\x27? of user \S+ with class \x27user\x27 and type \x27tty\x27\.$') {
-        # the operator command's shell as the agent (machinectl shell). Nothing else can make one: the
-        # agents' passwords are locked (apply checks it), so there is no console or password login,
-        # and an SSH key login shows by sshd's own Accepted line (high). The session's number tells
-        # nothing (an audit session's where the host gives logins one, else logind's c<N>).
-        sev = "info"
+          match(to_string(.message) ?? "", r'^New session (\x27[a-z]?[0-9]+\x27|[a-z]?[0-9]+) of user \S+ with class \x27user\x27 and type \x27tty\x27\.$') {
+        # Low, not info: routinely the operator command's shell as the agent (machinectl shell), but
+        # also what an SSH server sshd's rules don't see (dropbear, Tailscale SSH), a PAM module that
+        # ignores the locked password, or root (su -l, run0, systemd-run with a PAM name) would leave.
+        # The session's id tells these apart nowhere (an audit session's where the host gives logins
+        # one, else logind's c<N>), so the line stays visible below the default medium view.
+        sev = "low"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"
       } else if k == "session" && match(unit, r'^user@($ualt)[.]service$') && (to_string(._EXE) ?? "") == "/usr/lib/systemd/systemd" &&
