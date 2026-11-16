@@ -947,26 +947,32 @@ def is_sni(r):
 # the SNI line to 3 s after counts: ids restart with Envoy, and a CONNECT line the journal
 # dropped in a flood must not pin the refusal on an older tunnel with the same id (shown as ?).
 # One time window per row (merged where they overlap), and only the tunnel's first and last
-# lines (not the periodic ones a long tunnel logs every minute), so the lookup stays small.
+# lines (not the periodic ones a long tunnel logs every minute), so the lookup stays small; in
+# batches of at most 100 windows, each query well under VictoriaLogs' length limit (16 KiB).
 JOIN_BEFORE, JOIN_AFTER = 20, 3   # after: Envoy flushes its log once a second
 sni_rows = [r for r in rows if is_sni(r) and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))]
 ids = sorted({r["envoy.connection"] for r in sni_rows})
 opened = {}
 def utc(t):
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+JOIN_BATCH = 100
 if ids:
-    spans = []
-    for k in sorted(when(r.get("_time"))[0][0] for r in sni_rows):
+    spans = []   # [start, end, {ids}]
+    for k, cid in sorted((when(r.get("_time"))[0][0], r["envoy.connection"]) for r in sni_rows):
         if spans and k - JOIN_BEFORE <= spans[-1][1]:
             spans[-1][1] = k + JOIN_AFTER + 1
+            spans[-1][2].add(cid)
         else:
-            spans.append([k - JOIN_BEFORE, k + JOIN_AFTER + 1])
-    times = " or ".join(f"_time:[{utc(a)}, {utc(b)}]" for a, b in spans)
-    for c in query(f'({times}) log_type:envoy-access envoy.method:CONNECT '
-                   f'envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) '
-                   f'envoy.connection:in({",".join(ids)}) | sort by (_time desc) | limit 10000 '
-                   f'| fields _time, envoy.connection, envoy.user, envoy.listener, envoy.authority'):
-        opened.setdefault(c.get("envoy.connection", ""), []).append((when(c.get("_time"))[0], c))
+            spans.append([k - JOIN_BEFORE, k + JOIN_AFTER + 1, {cid}])
+    for i in range(0, len(spans), JOIN_BATCH):
+        batch = spans[i:i + JOIN_BATCH]
+        times = " or ".join(f"_time:[{utc(a)}, {utc(b)}]" for a, b, _ in batch)
+        bids = sorted(set().union(*(s for _, _, s in batch)), key=int)
+        for c in query(f'({times}) log_type:envoy-access envoy.method:CONNECT '
+                       f'envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) '
+                       f'envoy.connection:in({",".join(bids)}) | sort by (_time desc) | limit 10000 '
+                       f'| fields _time, envoy.connection, envoy.user, envoy.listener, envoy.authority'):
+            opened.setdefault(c.get("envoy.connection", ""), []).append((when(c.get("_time"))[0], c))
 
 def hint(r, sni_line):
     route, st, fl, det = r.get("envoy.route", ""), r.get("envoy.status", ""), r.get("envoy.flags", ""), r.get("envoy.details", "")
@@ -996,12 +1002,12 @@ def hint(r, sni_line):
         if not sni:
             return f"the tunnel to {a} sent no TLS name (not TLS, or none sent): only TLS naming {host} passes"
         return f"the tunnel to {a} sent the TLS name {sni}: only {host} passes"
+    if det == "ext_authz_error":   # (Envoy flags its own errors UAEX too)
+        return f"the push check for {a} could not decide, so the push was refused (it fails closed)"
     if ("UAEX" in fl or det == "ext_authz_denied") and st == "200":
         return f"a push to a protected branch of {a}: protect on its http line"
     if "UAEX" in fl or det == "ext_authz_denied":
         return f"the push check refused the push to {a} (Envoy's own log says why)"
-    if det == "ext_authz_error":
-        return f"the push check for {a} could not decide, so the push was refused (it fails closed)"
     if det == "lua_response" and st == "423":
         return f"the credential for {a} is locked: airlock-envoy-cred unlock"
     if det == "lua_response" and st == "503":

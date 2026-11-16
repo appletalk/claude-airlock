@@ -101,7 +101,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if n < 0 or n > MAX_BODY:
             return self.refuse(413, "audit-ui: a body over 1 MiB")
         LAST = time.monotonic()   # a request that passed every check: in use
-        body = self.rfile.read(n) if n else None
+        try:
+            body = self.rfile.read(n) if n else None
+        except OSError:   # the client went away mid-body
+            self.close_connection = True
+            return
+        if body is not None and len(body) != n:
+            return self.refuse(400, "audit-ui: a body shorter than its Content-Length")
         hdrs = {h: self.headers[h] for h in PASS if h in self.headers}
         if body is not None:
             hdrs["Content-Length"] = str(n)
@@ -127,8 +133,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except (OSError, ValueError, http.client.HTTPException):
-            # Cut mid-answer (the store timed out or went away): reset the connection, never a
+            # Cut mid-answer (the store timed out or went away): reset the connection, not a
             # clean close, so the browser shows a failed request, not a short or empty result.
+            # (A store that sends a Content-Length and closes early ends cleanly, short: the
+            # browser sees the length doesn't match.)
             try:
                 self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                 self.connection.close()   # now: the server's own close would send a FIN first

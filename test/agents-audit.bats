@@ -73,7 +73,7 @@ denies() { run "$OP" audit denies "$@"; }
     [[ "$q" == *'envoy.connection:in(40) '* ]]
 }
 
-@test "the join takes only a CONNECT from 20 s before to 1 s after: an older tunnel with the same id is not a guess" {
+@test "the join takes only a CONNECT from 20 s before to 3 s after: an older tunnel with the same id is not a guess" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"40","envoy.sni":"other.example.org","envoy.flags":"NR"}'
     printf '%s\n' '{"_time":"2026-11-15T14:04:30Z","envoy.connection":"40","envoy.user":"agent2","envoy.listener":"agent2-l","envoy.authority":"x.example.org:443"}' > "$T/connects"
     denies
@@ -93,6 +93,24 @@ denies() { run "$OP" audit denies "$@"; }
     [[ "$q" == '(_time:[2026-11-05T13:59:40Z, 2026-11-05T14:00:04Z] or _time:[2026-11-15T14:04:30Z, 2026-11-15T14:05:04Z]) '*'envoy.connection:in(7,8,9) '* ]] || { echo "$q"; return 1; }
 }
 
+@test "many refused TLS names over a long look-back: the lookup goes in batches, each query under 16 KiB" {
+    for i in $(seq 0 349); do
+        printf '{"_time":"%s","log_type":"envoy-access","envoy.connection":"%d","envoy.sni":"n%d.example.org","envoy.flags":"NR"}\n' \
+            "$(date -u -d "2026-11-15T14:00:00Z - $((i * 60)) seconds" +%Y-%m-%dT%H:%M:%SZ)" "$((100000 + i))" "$i" >> "$T/rows"
+    done
+    denies --since 30d --limit 1000
+    [ "$status" -eq 0 ] || { echo "$output" | tail -3; return 1; }
+    n=0; while IFS= read -r q; do
+        [[ "$q" == *envoy.method:CONNECT* ]] || continue
+        n=$((n + 1)); [ "${#q}" -lt 16384 ] || { echo "query $n is ${#q} bytes"; return 1; }
+    done < "$CALLS"
+    [ "$n" = 4 ] || { echo "$n lookups"; return 1; }
+    for i in 0 99 100 349; do grep -q "envoy.connection:in([0-9,]*$((100000 + i))[,)]" "$CALLS" || { echo "id $((100000 + i)) never looked up"; return 1; }; done
+    # each batch asks only for its own windows' ids: the first (oldest) batch not for the newest refusal's
+    first="$(grep -m1 envoy.method:CONNECT "$CALLS")"
+    [[ "$first" == *"100349"* && "$first" != *"100000"* ]] || { echo "${first:0:300}"; return 1; }
+}
+
 @test "an HTTP line without a method (the parser refused it) is not taken for a TLS refusal or joined" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.connection":"7","envoy.status":"400","envoy.details":"http1.codec_error"}'
     printf '%s\n' '{"_time":"2026-11-15T14:04:59Z","envoy.connection":"7","envoy.user":"other","envoy.listener":"other-l","envoy.authority":"old.example.org:443"}' > "$T/connects"
@@ -107,7 +125,7 @@ denies() { run "$OP" audit denies "$@"; }
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/","envoy.route":"a.example.org-read","envoy.status":"503","envoy.details":"lua_response"}'
     row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"m.example.org","envoy.path":"/mcp","envoy.route":"m.example.org-ep0-post-too-large","envoy.status":"413","envoy.details":"direct_response"}'
     row '{"_time":"2026-11-15T14:03:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"200","envoy.flags":"UAEX","envoy.details":"ext_authz_denied"}'
-    row '{"_time":"2026-11-15T14:02:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"503","envoy.details":"ext_authz_error"}'
+    row '{"_time":"2026-11-15T14:02:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"503","envoy.flags":"UAEX","envoy.details":"ext_authz_error"}'
     row '{"_time":"2026-11-15T14:01:00Z","log_type":"envoy-web","envoy.listener":"w","envoy.user":"agent","envoy.sni":"n.example.org","envoy.route":"web","envoy.flags":"UF"}'
     row '{"_time":"2026-11-15T14:00:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/x_y","envoy.route":"a.example.org-read","envoy.status":"400","envoy.details":"http1.unexpected_underscore"}'
     denies
@@ -306,6 +324,23 @@ ui_teardown() { kill "$UI" "$STORE" 2>/dev/null || true; wait 2>/dev/null || tru
     [ "$(wc -l < "$T/stream.out")" = 3 ] || { cat "$T/stream.out"; return 1; }
     python3 -c 'import sys; sys.exit(0 if float(sys.argv[2]) - float(sys.argv[1]) > 1.5 else 1)' "$first" "$last" || { cat "$T/stream.out"; return 1; }
     [ "$rc" -ne 0 ] || { echo "a cut answer ended cleanly (curl 0)"; return 1; }
+}
+
+@test "audit ui: a body shorter than its Content-Length is a 400; one cut by a reset leaves no traceback" {
+    ui_setup; ui_start "$(id -u)"
+    short="$(printf 'POST /select/x HTTP/1.0\r\nHost: 127.0.0.1:%s\r\nContent-Length: 100\r\n\r\nhello' "$PORT" | python3 -c '
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1]))); s.sendall(sys.stdin.buffer.read()); s.shutdown(socket.SHUT_WR)
+print(s.recv(200).split(b"\r\n")[0].decode())' "$PORT")"
+    python3 -c '
+import socket, struct, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s.sendall(b"POST /select/x HTTP/1.0\r\nHost: 127.0.0.1:%s\r\nContent-Length: 100\r\n\r\nhello" % sys.argv[1].encode())
+time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)); s.close()' "$PORT"
+    sleep 0.5
+    ui_teardown
+    [[ "$short" == "HTTP/1.0 400 "* ]] || { echo "$short"; return 1; }
+    ! grep -q Traceback "$T/ui.out" || { cat "$T/ui.out"; return 1; }
 }
 
 @test "audit ui: a connection from another uid is refused and named once" {
