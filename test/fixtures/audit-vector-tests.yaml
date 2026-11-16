@@ -198,19 +198,19 @@ tests:
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1101)"}}
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.agent, "agent-web"); assert_eq!(.audit.severity, "high")'}]}]
-  - name: "enrich: logind's new c-numbered tty session for an agent (the operator command's machinectl shell) is login, info"
+  - name: "enrich: logind's new tty session for an agent, c-numbered (no audit session), is login, info"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent-guard", SESSION_ID: "c714", message: "New session 'c714' of user 'agent-guard' with class 'user' and type 'tty'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "info"); assert_eq!(.level, "info")'}]}]
-  - name: "enrich: a numbered tty session for an agent (a console or SSH login, its audit session) is medium"
-    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "5", message: "New session '5' of user 'agent' with class 'user' and type 'tty'."}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "medium")'}]}]
-  - name: "enrich: a c-numbered session of another class or type is not the operator's shell"
+  - name: "enrich: an audit-numbered tty session for an agent (the operator's shell where logins get an audit session) is info too"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "7", message: "New session '7' of user 'agent' with class 'user' and type 'tty'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "info")'}]}]
+  - name: "enrich: a tty session of another class is not the operator's shell"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "c3", message: "New session 'c3' of user 'agent' with class 'user-early' and type 'tty'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
-  - name: "enrich: a c-numbered x11 session is not the operator's shell"
+  - name: "enrich: an x11 session is not the operator's shell"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "c4", message: "New session 'c4' of user 'agent' with class 'user' and type 'x11'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
-  - name: "enrich: a c-numbered tty line with more after it is not the operator's shell"
+  - name: "enrich: a tty line with more after it is not the operator's shell"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent", SESSION_ID: "c5", message: "New session 'c5' of user 'agent' with class 'user' and type 'tty'. Seat: seat0"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
   - name: "enrich: pasta by its own path (Debian's pasta binary) is box-drop too"

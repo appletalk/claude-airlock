@@ -1247,10 +1247,9 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       # audit.severity: a security rating for triage, apart from syslog's (high, medium, low,
       # info). An agent's privilege attempt or a dropped packet is high; a refusal, an unusual
       # login, a suppression of the agents' lines medium; a failing session or service low.
-      # logind's routine lines (by its own message, its unit proven): a c-numbered session of class
-      # user and type tty (the operator command's machinectl shell), a user manager's session and
-      # every session's end info; any other tty session (a console or SSH login, numbered by its
-      # audit session) medium. sshd accepting an agent: high. A box-drop medium.
+      # logind's routine lines (by its own message, its unit proven): a session of class user and
+      # type tty (the operator command's machinectl shell), a user manager's session and every
+      # session's end info. sshd accepting an agent: high. A box-drop medium.
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
@@ -1268,11 +1267,11 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       } else if k == "login" && unit == "systemd-logind.service" &&
           match(to_string(.message) ?? "", r'^(Session \S+ logged out\. |Removed session \S+\.$|New session \S+ of user \S+ with class .manager. )') { sev = "info"
       } else if k == "login" && unit == "systemd-logind.service" &&
-          match(to_string(.message) ?? "", r'^New session \x27?c[0-9]+\x27? of user \S+ with class \x27user\x27 and type \x27tty\x27\.$') {
-        # the operator command's shell as the agent (machinectl shell): a c-numbered session, logind's
-        # numbering when there is no audit session. Where logins get an audit session (pam_loginuid,
-        # a kernel with audit), a console or SSH login gets its number and stays medium below;
-        # where they don't, one is c-numbered too and only sshd's own Accepted line (high) shows SSH.
+          match(to_string(.message) ?? "", r'^New session \x27?[a-z]?[0-9]+\x27? of user \S+ with class \x27user\x27 and type \x27tty\x27\.$') {
+        # the operator command's shell as the agent (machinectl shell). Nothing else can make one: the
+        # agents' passwords are locked (apply checks it), so there is no console or password login,
+        # and an SSH key login shows by sshd's own Accepted line (high). The session's number tells
+        # nothing (an audit session's where the host gives logins one, else logind's c<N>).
         sev = "info"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"

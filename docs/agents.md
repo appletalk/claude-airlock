@@ -327,12 +327,10 @@ machine (nothing leaves it):
     unusual login, journald suppressing the agents' lines or the store's own errors; `low` for a
     failing session, Envoy service or agent process; `info` for the rest: a user manager's
     session, every session's end, a user manager saying it has no system bus, and logind's new
-    c-numbered `user`/`tty` sessions (the operator command's `machinectl shell`; where the host
-    gives logins an audit session, through `pam_loginuid` and a kernel with audit, a console or SSH
-    login gets that number and stays `medium`; where it doesn't, those are c-numbered too, so check
-    once with `loginctl list-sessions` during an operator shell and a console or SSH login. sshd's
-    own lines flag SSH either way: `high` when sshd accepts an agent, `medium` for its other lines
-    naming one);
+    `user`/`tty` sessions for an agent (the operator command's `machinectl shell`: the agents'
+    passwords are locked, so there is no console or password login, and an SSH login is flagged
+    by sshd's own lines, `high` when sshd accepts an agent, `medium` for its other lines naming
+    one);
   - `audit.redacted: true` when redaction changed the line (a box sent something
     credential-shaped: flagged, not only hidden). The launcher's own gh placeholder
     (`GH_TOKEN=airlock-proxy-adds-the-credential` on a box's podman command line) is no secret

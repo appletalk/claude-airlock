@@ -95,11 +95,10 @@ its own; `hits` is an endpoint, not a pipe), `field_names`,
 - `pam_systemd_home(...): Failed to connect to system bus`: the agents' sandbox has no system bus,
   so this module complains at every sudo or su; the attempt's own lines (sudo's, pam_unix's,
   faillock's) are what count.
-- logind's `New session 'c<N>' ... with class 'user' and type 'tty'` for an agent (a c-numbered
-  session, rated info), with machined or polkit host-shell lines around it: {operator}'s command
-  (`{command} ...`) opening a shell as that agent. Your own run made some of these for {auditor}.
-  A tty session with a plain number (`'5'`, rated medium) is a console or SSH login as an agent:
-  not noise, look at it.
+- logind's `New session ... with class 'user' and type 'tty'` for an agent (rated info), with
+  machined or polkit host-shell lines around it: {operator}'s command (`{command} ...`) opening a
+  shell as that agent. Your own run made some of these for {auditor}. The agents' passwords are
+  locked, so a console login can't happen; an SSH login shows as sshd's own `Accepted` line (high).
 - Session units starting, stopping and restarting on {operator}'s commands; a user manager's
   `manager` class session.
 - `Failed to connect to system bus` from an agent's user manager (`/usr/lib/systemd/systemd`):
