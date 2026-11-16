@@ -188,7 +188,7 @@ done < <(find "$tmp/new" -mindepth 1 -print0)
 mkdir -m 0755 "$tmp/ver" && cp "$tmp/new/runsc" "$tmp/ver/runsc" && chmod 0755 "$tmp/ver/runsc"
 chmod 0711 "$tmp"
 ver="$(cd / && setpriv 9>&- --reuid=65534 --regid=65534 --clear-groups --no-new-privs "$tmp/ver/runsc" --version 2>"$tmp/ver.err")" || ver=""
-candidate="$(awk '/^runsc version/ { print $3 }' <<< "$ver" | head -n 1)"
+candidate="$(awk '/^runsc version/ { print $3; exit }' <<< "$ver")"   # (no head: pipefail and SIGPIPE)
 if ! [[ "$candidate" =~ ^[A-Za-z0-9._-]+$ ]]; then
     # its last line, printable characters only (it is the downloaded binary's text)
     why="$(tail -c 4096 "$tmp/ver.err" | tr -cd '[:print:]\n' | { grep -v '^[[:space:]]*$' || true; } | tail -n 1 | cut -c1-200)"

@@ -40,7 +40,7 @@ systemctl cat airlock-audit-vl.service >/dev/null 2>&1 || die "no audit store he
 query() {  # query <LogsQL>: the store's answer, through its socket (vmauth: queries only)
     curl -s --max-time 20 --unix-socket "$SOCK" 'http://x/select/logsql/query' --data-urlencode "query=$1"
 }
-field() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1; }   # field <name>, from one JSON line on stdin
+field() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p;T;q"; }   # field <name>, from one JSON line on stdin (q, not head: pipefail)
 
 case "$cmd" in
 status)
