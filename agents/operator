@@ -893,11 +893,14 @@ sock, start, limit, cmd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4
 # address that way), and any 4xx/5xx Envoy answered itself (a preset's rules, a locked
 # credential, a body too large, a request the parser rejected): not one passed on from upstream,
 # not an upstream failure, not a timeout (a slow client or a long stream is no refusal).
-REFUSED = ('log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX '
+# The store's Vector classifies each Envoy line at ingest (audit.kind); these rules are the same,
+# kept for lines stored before that (until sudo airlock-audit reset reads them in again).
+REFUSED = ('(audit.kind:in("envoy-refused","envoy-web-refused") or (audit.kind:"" '
+           'log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX '
            'or envoy.details:lua_response or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" '
            'or (log_type:envoy-web envoy.flags:~"UF|DF") '
            'or (envoy.status:>=400 -envoy.details:via_upstream '
-           '-envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))')
+           '-envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))))')
 FIELDS = ('_time, log_type, envoy.listener, envoy.user, envoy.connection, envoy.method, envoy.authority, '
           'envoy.path, envoy.sni, envoy.route, envoy.status, envoy.flags, envoy.details')
 

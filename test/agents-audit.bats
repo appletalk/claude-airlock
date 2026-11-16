@@ -38,7 +38,7 @@ denies() { run "$OP" audit denies "$@"; }
     denies --since 2h --limit 7
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     q="$(sed -n 1p "$CALLS")"
-    pred='log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:lua_response or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))'
+    pred='(audit.kind:in("envoy-refused","envoy-web-refused") or (audit.kind:"" log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:lua_response or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))))'
     [[ "$q" == '_time:>='????-??-??T??:??:??Z" $pred | sort by (_time desc) | limit 7 | fields "* ]] || { echo "$q"; return 1; }
     [[ "$(sed -n 2p "$CALLS")" == *'| stats count() n' ]]
     [[ "$output" == *"(no refusals since "* ]]

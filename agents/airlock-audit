@@ -1,8 +1,9 @@
 #!/bin/bash
 # airlock-audit: the agents' audit store (docs/agents.md, Audit), for root.
 #
-#   airlock-audit status          the units, what the store holds (rows per kind, oldest and
-#                                 newest line), seccomp kills of its programs since it started
+#   airlock-audit status          the units, what the store holds (rows per log type, oldest and
+#                                 newest line, the last 7 days by audit.kind and severity),
+#                                 seccomp kills of its programs since it started
 #   airlock-audit restart         stop and start the store in order (the socket last)
 #   airlock-audit restart --if-stale
 #                                 only if VictoriaLogs or vmauth runs an older binary than the one
@@ -50,6 +51,8 @@ status)
     if r="$(query '_time:3650d | stats min(_time) oldest, max(_time) newest, count() n')" && [ -n "$r" ]; then
         printf 'lines %s, oldest %s, newest %s\n' "$(field n <<< "$r")" "$(field oldest <<< "$r")" "$(field newest <<< "$r")"
         query '_time:3650d | stats by (log_type) count() n' | sed 's/^/  /'
+        echo "== the last 7 days by kind and severity (lines from before the store classified them: kind empty)"
+        query '_time:7d | stats by (audit.kind, audit.severity) count() n | sort by (n desc)' | sed 's/^/  /'
     else echo "  no answer through $SOCK"; fi
     echo "== seccomp kills since the store started"
     since="$(systemctl show -p ActiveEnterTimestamp --value airlock-audit-vl.service)"

@@ -974,6 +974,7 @@ render_audit_redact() {
     type: remap
     inputs: [typed]
     source: |
+      before = .
       . = map_values(., recursive: true) -> |v| {
         if is_string(v) {
           s = string!(v)
@@ -988,6 +989,14 @@ render_audit_redact() {
           s = replace(s, r'\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255}|glpat-[A-Za-z0-9_-]{20,}|glsa_[A-Za-z0-9_]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{48}|[sr]k_live_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{36}|dckr_pat_[A-Za-z0-9_-]{20,}|pypi-[A-Za-z0-9_-]{50,}|ya29\.[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{35}|(?:AKIA|ASIA)[A-Z0-9]{16})\b', "REDACTED")
           s = replace(s, r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', "REDACTED-JWT")
           s = replace(s, r'(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)', "REDACTED-PRIVATE-KEY")
+          s
+        } else { v }
+      }
+      # Flagged, not only hidden: a line something was redacted from (a box sent a credential).
+      if . != before { .audit.redacted = true }
+      . = map_values(., recursive: true) -> |v| {
+        if is_string(v) {
+          s = string!(v)
           if strlen(s) > 8192 { s = truncate(s, 8192) + "...[cut at 8192 characters]" }
           s
         } else { v }
@@ -1048,38 +1057,88 @@ transforms:
       .timestamp = if us > 0 { from_unix_timestamp!(us, unit: "microseconds") } else { now() }
       del(.__CURSOR)
       del(.__MONOTONIC_TIMESTAMP)
+  # What reaches the store (the rest is dropped here), and why: each kept line's audit.kind is
+  # the rule that kept it. audit.agent names the agent it is about, audit.session the session
+  # (from the session unit) where a line comes from one. Every field these read is journald's own
+  # (_-prefixed, or UNIT from PID 1 or root), except the session unit name, which a line's own
+  # sender may set (so it labels, never decides). A sender can't set audit.* or level: journald
+  # takes only uppercase field names, and Envoy's JSON is nested under envoy.
   agents:
-    type: filter
+    type: remap
     inputs: [journal_fields]
-    condition:
-      type: vrl
-      source: |
-        uid = to_string(._UID) ?? ""
-        n = to_int(uid) ?? -1
-        owner = to_string(._SYSTEMD_OWNER_UID) ?? ""
-        unit = to_string(._SYSTEMD_UNIT) ?? ""
-        about = ""
-        if uid == "0" || uid == "" { about = to_string(.UNIT) ?? "" }
-        exe = to_string(._EXE) ?? ""
-        transport = to_string(._TRANSPORT) ?? ""
-        msg = to_string(.message) ?? ""
-        # Only fields journald sets decide who wrote a line (SYSLOG_IDENTIFIER and the like are the
-        # sender's to choose). Box output: podman's conmon (its binary) with a container's fields.
-        box_output = includes(["/usr/bin/conmon", "/usr/libexec/podman/conmon"], exe) && exists(.CONTAINER_ID)
-        # logind, machined and polkit by their units. (An agent's own sudo or su runs as root but
-        # stays in the agent's cgroup: the owner uid below keeps it. Nobody else's sudo is read.)
-        svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit)
-        names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
-        agent = includes($(vrl_strings "${uids[@]}"), uid) || $(IFS=' '; r=""; for s in "${subs[@]}"; do r="$r${r:+ || }$s"; done; echo "$r")
-        (agent && !box_output) ||
-          includes($(vrl_strings "${uids[@]}"), owner) ||
-          starts_with(unit, "airlock-envoy") || starts_with(unit, "airlock-audit") ||
-          match(unit, r'^user(@|-)($ualt)[.]') ||
-          match(about, r'(^|\s)user(@|-)($ualt)[.]') ||
-          (svc && names) ||
-          (unit == "systemd-journald.service" && contains(msg, "Suppressed") &&
-            match(msg, r'airlock-envoy|airlock-audit|user@($ualt)[.]')) ||
-          (transport == "kernel" && ($nft))
+    drop_on_abort: true
+    source: |
+      uid = to_string(._UID) ?? ""
+      n = to_int(uid) ?? -1
+      owner = to_string(._SYSTEMD_OWNER_UID) ?? ""
+      unit = to_string(._SYSTEMD_UNIT) ?? ""
+      about = ""
+      if uid == "0" || uid == "" { about = to_string(.UNIT) ?? "" }
+      exe = to_string(._EXE) ?? ""
+      transport = to_string(._TRANSPORT) ?? ""
+      msg = to_string(.message) ?? ""
+      # Only fields journald sets decide who wrote a line (SYSLOG_IDENTIFIER and the like are the
+      # sender's to choose). Box output: podman's conmon (its binary) with a container's fields.
+      box_output = includes(["/usr/bin/conmon", "/usr/libexec/podman/conmon"], exe) && exists(.CONTAINER_ID)
+      # logind, machined and polkit by their units. (An agent's own sudo or su runs as root but
+      # stays in the agent's cgroup: the owner uid below keeps it. Nobody else's sudo is read.)
+      svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit)
+      names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
+      own = includes($(vrl_strings "${uids[@]}"), uid)
+      sub = $(IFS=' '; r=""; for s in "${subs[@]}"; do r="$r${r:+ || }$s"; done; echo "$r")
+      by_agent = (own || sub) && !box_output
+      by_owner = includes($(vrl_strings "${uids[@]}"), owner)
+      envoy_unit = starts_with(unit, "airlock-envoy")
+      store_unit = starts_with(unit, "airlock-audit")
+      manager = match(unit, r'^user(@|-)($ualt)[.]') || match(about, r'(^|\s)user(@|-)($ualt)[.]')
+      named = svc && names
+      suppressed = unit == "systemd-journald.service" && contains(msg, "Suppressed") &&
+        match(msg, r'airlock-envoy|airlock-audit|user@($ualt)[.]')
+      dropped = transport == "kernel" && ($nft)
+      if !(by_agent || by_owner || envoy_unit || store_unit || manager || named || suppressed || dropped) { abort }
+      # Why it was kept, most specific first.
+      priv = includes(["/usr/bin/sudo", "/usr/bin/su", "/usr/bin/pkexec", "/usr/sbin/sudo", "/bin/su"], exe)
+      kind = "agent-process"
+      if dropped { kind = "nft-drop"
+      } else if suppressed { kind = "journald-suppressed"
+      } else if store_unit { kind = "store"
+      } else if envoy_unit { kind = "envoy-service"
+      } else if (by_agent || by_owner) && priv { kind = "privilege"
+      } else if named && unit == "polkit.service" { kind = "privilege"
+      } else if named { kind = "login"
+      } else if manager { kind = "session"
+      } else if by_owner && !by_agent { kind = "session" }
+      # Whose: the agent's own uid, its boxes' subordinate ids, the session owner, the manager's
+      # uid, or the name or uid a logind/machined/polkit line gives.
+      who = $(printf '{'; first=1; for i in "${!uids[@]}"; do [ "$first" = 1 ] || printf ', '; first=0; printf '"%s": "%s"' "${uids[$i]}" "${names[$i]}"; done; printf '}')
+      agent = ""
+      if own { agent = to_string(get!(who, [uid])) ?? "" }
+$(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s { agent = "%s" }\n' "${SUB[$r]}" "$(( SUB[$r] + SUB_COUNT ))" "${NAME[$r]}"; done)
+      if agent == "" && by_owner { agent = to_string(get!(who, [owner])) ?? "" }
+      if agent == "" && manager {
+        m = parse_regex(unit, r'^user(@|-)(?P<u>$ualt)[.]') ?? parse_regex(about, r'(^|\s)user(@|-)(?P<u>$ualt)[.]') ?? {}
+        key = if is_string(m.u) { string!(m.u) } else { "" }
+        agent = to_string(get!(who, [key])) ?? ""
+      }
+      if agent == "" && named {
+        m = parse_regex(msg, r'(unix-user:|\buid=)(?P<u>$ualt)\b') ?? {}
+        key = if is_string(m.u) { string!(m.u) } else { "" }
+        agent = to_string(get!(who, [key])) ?? ""
+        if agent == "" {
+          m = parse_regex(msg, r'(^|[^A-Za-z0-9_-])(?P<a>$alt)([^A-Za-z0-9_-]|$)') ?? {}
+          agent = if is_string(m.a) { string!(m.a) } else { "" }
+        }
+      }
+      .audit = {"kind": kind}
+      if agent != "" { .audit.agent = agent }
+      if by_agent || by_owner || manager {
+        for_each(["_SYSTEMD_USER_UNIT", "USER_UNIT", "UNIT"]) -> |_i, f| {
+          if !exists(.audit.session) {
+            m = parse_regex(to_string(get!(., [f])) ?? "", r'-session@(?P<s>[A-Za-z0-9][A-Za-z0-9_.-]{0,128})[.]service$') ?? {}
+            if exists(m.s) { .audit.session = m.s }
+          }
+        }
+      }
   typed:
     type: remap
     inputs: [agents]
@@ -1093,6 +1152,50 @@ transforms:
           .log_type = if unit == "airlock-envoy-web.service" { "envoy-web" } else { "envoy-access" }
         }
       }
+      # Envoy's lines: refused or allowed, by the same rules as the operator's audit denies:
+      # a deny- route, a TLS name no destination takes (NR) or an address entry refuses (RBAC),
+      # a protected branch (UAEX), any answer of Envoy's own Lua code, web failing to reach a
+      # name (UF, DF), and any other 4xx/5xx Envoy answered itself (not upstream's, not an
+      # upstream failure, not a timeout).
+      envoy_made_error = false
+      status = 0
+      if .log_type != "journal" {
+        route = to_string(.envoy.route) ?? ""
+        flags = to_string(.envoy.flags) ?? ""
+        details = to_string(.envoy.details) ?? ""
+        status = to_int(.envoy.status) ?? parse_int(to_string(.envoy.status) ?? "") ?? 0
+        envoy_made_error = status >= 400 && details != "via_upstream" &&
+          !match(details, r'^(upstream_|no_healthy_upstream)') && !contains(details, "timeout")
+        refused = match(flags, r'(^|,)(NR|UAEX)(,|$)') || details == "lua_response" ||
+          starts_with(details, "rbac_access_denied") || starts_with(route, "deny-") ||
+          (.log_type == "envoy-web" && match(flags, r'(^|,)(UF|DF)(,|$)')) || envoy_made_error
+        base = if .log_type == "envoy-web" { "envoy-web" } else { "envoy" }
+        .audit.kind = if refused { base + "-refused" } else { base + "-allowed" }
+        u = to_string(.envoy.user) ?? ""
+        if u != "" && match(u, r'^($alt)$') { .audit.agent = u }
+      }
+      # level (vmui's colour): journald's PRIORITY; for Envoy's lines, what happened.
+      k = to_string(.audit.kind) ?? ""
+      prio = parse_int(to_string(.PRIORITY) ?? "") ?? 6
+      if .log_type == "journal" {
+        .level = if prio <= 3 { "error" } else if prio == 4 { "warning" } else if prio == 7 { "debug" } else { "info" }
+      } else {
+        .level = if envoy_made_error && status >= 500 { "error" } else if ends_with(k, "-refused") { "warning" } else { "info" }
+      }
+      # audit.severity: a security rating for triage, apart from syslog's (high, medium, low,
+      # info). An agent's privilege attempt or a dropped packet is high; a refusal, a login, a
+      # suppression of the agents' lines medium; a failing session or service low.
+      msgl = downcase(to_string(.message) ?? "")
+      sev = "info"
+      if k == "nft-drop" { sev = "high"
+      } else if k == "privilege" && to_string(._SYSTEMD_UNIT) ?? "" != "polkit.service" { sev = "high"
+      } else if k == "privilege" && (contains(msgl, "failed") || contains(msgl, "not authorized")) { sev = "high"
+      } else if k == "privilege" { sev = "low"
+      } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
+      } else if k == "store" && prio <= 3 { sev = "medium"
+      } else if includes(["session", "envoy-service", "agent-process"], k) && prio <= 3 { sev = "low"
+      } else if k == "session" && prio == 4 { sev = "low" }
+      .audit.severity = sev
 $(render_audit_redact)
 sinks:
   store:

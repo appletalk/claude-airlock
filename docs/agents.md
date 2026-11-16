@@ -298,6 +298,32 @@ machine (nothing leaves it):
   notices when it suppressed any of these, and the store's own units. Who wrote a line is decided
   only by the fields journald itself sets (uid, process, unit), never by what the sender says. The rest of the journal stays where it is.
   Envoy's files are never read: Envoy's own account can write that directory.
+- **Classified as it is stored** (fields a sender can't set: journald takes only uppercase field
+  names, and Envoy's own JSON sits under `envoy.*`):
+  - `audit.kind`: which rule kept the line: `envoy-refused`, `envoy-allowed`, `envoy-web-refused`,
+    `envoy-web-allowed` (the same refusal rules as `audit denies`), `privilege` (an agent's own
+    sudo, su or pkexec, by its binary; polkit naming an agent), `login` (logind or machined
+    naming an agent), `session` (the agents' managers and their units), `nft-drop`,
+    `journald-suppressed`, `envoy-service` (Envoy's units' other lines), `store` (the store's
+    own units), `agent-process` (anything else an agent or its boxes logged);
+  - `audit.agent`: the agent the line is about (by uid, a box's subordinate id, the session's
+    owner, the manager's uid, or the name or uid a logind or polkit line gives; for Envoy, the
+    listener's user when it is an agent);
+  - `audit.session`: the session (`<project>.<name>`) from the session unit's name, where the
+    line comes from one. The unit name can be set by the line's own sender, so it labels, it
+    never decides what is kept;
+  - `level` (vmui's colour): journald's priority; for Envoy's lines, what happened (a refusal a
+    warning, an error Envoy answered itself an error);
+  - `audit.severity`, a security rating apart from syslog's: `high` for an agent's privilege
+    attempt (polkit only when it refused) or a dropped packet; `medium` for a refusal, a login,
+    journald suppressing the agents' lines or the store's own errors; `low` for a failing
+    session, Envoy service or agent process; `info` for the rest;
+  - `audit.redacted: true` when redaction changed the line (a box sent something
+    credential-shaped: flagged, not only hidden).
+
+  Lines stored before an update that adds fields don't have them: `sudo airlock-audit reset`
+  reads the journal back in with them (only what the journal still holds: compare its oldest
+  entry, `journalctl --list-boots | head -2`, with `airlock-audit status`'s oldest line first).
 - **Redacted before it is stored**, in every field: standard credential shapes (the values of
   query parameters named like `token`, `key`, `secret`, `password`, `sig` or `code`, cloud
   signature parameters; JSON keys, command-line flags and environment-style names of the same
