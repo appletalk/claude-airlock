@@ -86,7 +86,8 @@ sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
 ### 2. Install the launcher and build the images
 
 ```sh
-make install-airlock          # or: ./bin/install.sh
+make install                  # everything for this host, step by step (YES=1: no questions)
+make install-airlock          # the launcher and images alone (or: ./bin/install.sh)
 ```
 
 This links `airlock` into `~/.local/bin`, writes a default host config, builds the images

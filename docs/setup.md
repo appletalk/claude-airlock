@@ -3,6 +3,14 @@
 Install in levels. **Level 2, airlock-envoy, is the recommended setup**; level 1 alone is the
 quick start. The levels above it add agents.
 
+**One command per repo, for installing and for every update after:** in airlock-envoy
+`make install`, then here `make install`. Each says what its next step does and asks
+`[Y/n/q]` (n skips that step, q stops); `make install YES=1` runs every step without asking. A
+step that is already current says so. Here the steps are: the launcher and images (level 1),
+the agents toolkit and its apply (level 3, where agents are set up, or if you choose to set
+them up), the audit store's binaries (with `audit on`), the agents' own update and reload, and
+`airlock-audit check`. The per-level targets below still work alone.
+
 | Level | You get | Install |
 |---|---|---|
 | 1. claude-airlock | Claude in a sandboxed container, with a firewall | `make install-airlock` |

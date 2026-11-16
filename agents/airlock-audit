@@ -1,0 +1,113 @@
+#!/bin/bash
+# airlock-audit: the agents' audit store (docs/agents.md, Audit), for root.
+#
+#   airlock-audit status          the units, what the store holds (rows per kind, oldest and
+#                                 newest line), seccomp kills of its programs since it started
+#   airlock-audit restart         stop and start the store in order (the socket last)
+#   airlock-audit reset [--yes]   empty the store and the reader's cursor, then start again: the
+#                                 retention window is read back in. Asks first (--yes: doesn't)
+#   airlock-audit check           the store's guarantees, live: no host listener, one network
+#                                 namespace, the door refuses writes and path tricks, vmauth's own
+#                                 endpoints refuse without a key, a query answers. Exit 1 on any
+#                                 failure
+set -euo pipefail
+export LC_ALL=C
+
+ROOT="${AIRLOCK_AUDIT_ROOT:-}"   # test hook: file paths go under it (commands are stubbed); never set in use
+SOCK="$ROOT/run/airlock-audit/vl.sock"
+DATA="$ROOT/var/lib/airlock-audit/vl"
+CURSOR="$ROOT/var/lib/airlock-audit-journal/cursor"
+PROC="$ROOT/proc"
+# Stop order: the reader first (nothing written into a pipe nobody reads), the store last; start
+# in reverse, the socket last (a socket whose relay is still active refuses to start).
+STOP=(airlock-audit-journal.service airlock-audit-vector.service airlock-audit-vl-proxy.socket
+      airlock-audit-vl-proxy.service airlock-audit-vmauth.service airlock-audit-vl.service)
+START=(airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vector.service
+       airlock-audit-journal.service airlock-audit-vl-proxy.socket)
+SERVICES=(airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vector.service airlock-audit-journal.service)
+die() { echo "airlock-audit: $*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+
+[ $# -ge 1 ] || { usage; exit 2; }
+cmd=$1; shift
+case "$cmd" in -h|--help|help) usage; exit 0 ;; esac
+[ -n "$ROOT" ] || [ "$(id -u)" = 0 ] || die "run as root: sudo airlock-audit $cmd"
+systemctl cat airlock-audit-vl.service >/dev/null 2>&1 || die "no audit store here (agents.conf: audit on, then sudo airlock-agents-apply --confirm)"
+
+query() {  # query <LogsQL>: the store's answer, through its socket (vmauth: queries only)
+    curl -s --max-time 20 --unix-socket "$SOCK" 'http://x/select/logsql/query' --data-urlencode "query=$1"
+}
+field() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1; }   # field <name>, from one JSON line on stdin
+
+case "$cmd" in
+status)
+    [ $# = 0 ] || die "status takes no arguments"
+    for u in "${START[@]}"; do printf '%-34s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done
+    echo "== what the store holds"
+    if r="$(query '_time:3650d | stats min(_time) oldest, max(_time) newest, count() n')" && [ -n "$r" ]; then
+        printf 'lines %s, oldest %s, newest %s\n' "$(field n <<< "$r")" "$(field oldest <<< "$r")" "$(field newest <<< "$r")"
+        query '_time:3650d | stats by (log_type) count() n' | sed 's/^/  /'
+    else echo "  no answer through $SOCK"; fi
+    echo "== seccomp kills since the store started"
+    since="$(systemctl show -p ActiveEnterTimestamp --value airlock-audit-vl.service)"
+    kills="$(journalctl -k --no-pager -q ${since:+--since "$since"} 2>/dev/null \
+        | grep 'type=1326' | grep -E 'comm="(victoria-logs|vmauth|vector|journalctl|cat|systemd-socket-)' || true)"
+    if [ -z "$kills" ]; then echo "  none"; else while IFS= read -r l; do echo "  $l"; done <<< "$kills"; fi
+    ;;
+restart)
+    [ $# = 0 ] || die "restart takes no arguments"
+    systemctl stop "${STOP[@]}"
+    systemctl start "${START[@]}"
+    echo "restarted: ${START[*]}"
+    ;;
+reset)
+    yes=0
+    case "${1:-}" in --yes) yes=1 ;; '') ;; *) die "reset takes only --yes" ;; esac
+    size="$(du -sh "$DATA" 2>/dev/null | cut -f1)"
+    echo "This empties the audit store ($DATA, ${size:-?}) and the journal reader's cursor ($CURSOR),"
+    echo "then starts it again: the retention window is read back in from the journal. The journal"
+    echo "and Envoy's own files are not touched."
+    if [ "$yes" = 0 ]; then
+        { exec 3</dev/tty; } 2>/dev/null || die "no terminal to confirm on: airlock-audit reset --yes"
+        read -r -u 3 -p "Reset the audit store? [y/N] " a || a=
+        [[ "$a" == [yY]* ]] || { echo "nothing changed"; exit 1; }
+    fi
+    systemctl stop "${STOP[@]}"
+    [ ! -d "$DATA" ] || find "$DATA" -mindepth 1 -delete
+    rm -f "$CURSOR"
+    systemctl start "${START[@]}"
+    echo "reset: the store is empty and reading the journal back in (airlock-audit status shows it fill)"
+    ;;
+check)
+    [ $# = 0 ] || die "check takes no arguments"
+    fails=0
+    ok() { echo "ok   $*"; }
+    bad() { echo "FAIL $*"; fails=$((fails + 1)); }
+    for u in "${SERVICES[@]}" airlock-audit-vl-proxy.socket; do
+        if systemctl is-active --quiet "$u"; then ok "$u active"; else bad "$u is $(systemctl is-active "$u" 2>/dev/null || true)"; fi
+    done
+    if ss -ltnH 2>/dev/null | grep -qE ':(9428|8427)\b'; then bad "something listens on 9428 or 8427 in the host's network namespace"
+    else ok "no host listener on 9428 or 8427"; fi
+    host="$(readlink "$PROC/1/ns/net")" ns=""
+    for u in airlock-audit-vl airlock-audit-vmauth airlock-audit-vector; do
+        p="$(systemctl show -p MainPID --value "$u.service")"
+        n="$(readlink "$PROC/$p/ns/net" 2>/dev/null || true)"
+        if [ -z "$n" ] || [ "$n" = "$host" ]; then bad "$u: not in a network namespace of its own (${n:-none})"
+        elif [ -n "$ns" ] && [ "$n" != "$ns" ]; then bad "$u: in $n, not the store's $ns"
+        else ok "$u in the store's network namespace ($n)"; ns=$n; fi
+    done
+    # The door: writes, deletes and internal endpoints refused, with or without path tricks.
+    for p in /insert/jsonline //insert/jsonline /delete/run_task /internal/insert '/select/../insert/jsonline' '/select%2F..%2Finsert/jsonline'; do
+        c="$(curl -s -o /dev/null -w '%{http_code}' --path-as-is --max-time 10 --unix-socket "$SOCK" -X POST "http://x$p" -d '{}' || true)"
+        case "$c" in 2*) bad "the door let POST $p through ($c)" ;; 000|'') bad "no answer for POST $p" ;; *) ok "the door refuses POST $p ($c)" ;; esac
+    done
+    for p in /metrics /flags /-/reload /debug/pprof/; do
+        c="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --unix-socket "$SOCK" "http://x$p" || true)"
+        if [ "$c" = 401 ]; then ok "vmauth's $p refuses without its key (401)"; else bad "vmauth's $p answered $c, not 401"; fi
+    done
+    r="$(query '_time:1d | stats count() n' || true)"
+    if [ -n "$(field n <<< "$r")" ]; then ok "a query answers ($(field n <<< "$r") lines in the last day)"; else bad "no query answer through $SOCK"; fi
+    if [ "$fails" = 0 ]; then echo "==> the audit store holds up"; else echo "==> $fails check(s) failed"; exit 1; fi
+    ;;
+*) die "unknown command '$cmd' (status, restart, reset, check)" ;;
+esac

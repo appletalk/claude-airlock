@@ -14,7 +14,7 @@ SHELLCHECK ?= $(shell command -v shellcheck 2>/dev/null || echo .tooling/bin/she
 BATS       ?= $(shell command -v bats 2>/dev/null || echo .tooling/bin/bats)
 
 # Shell we lint. The zsh integration is excluded — shellcheck doesn't parse zsh.
-SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh bin/update-runsc bin/update-victorialogs \
+SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh bin/update-runsc bin/update-victorialogs bin/install-full.sh agents/airlock-audit \
                  image/init-firewall.sh image/entrypoint.sh \
                  config/airlock-statusline.sh \
                  hooks/pre-commit hooks/pre-merge-commit hooks/commit-msg scripts/private-names-check test/private-names-check-test.sh \
@@ -33,10 +33,13 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}'
 
-install-airlock: ## install the launcher + build base/dev images for you (packages refreshed weekly; see bin/install.sh)
+install: ## everything for this host, step by step (asks before each; YES=1: no questions): launcher, agents, audit store, checks
+	@YES="$(YES)" bash bin/install-full.sh
+
+install-airlock: ## the launcher + base/dev images for you alone (step 1 of make install; packages refreshed weekly)
 	@bash bin/install.sh
 
-install-agents: ## (root, optional) agent users with their own sessions; needs airlock-envoy running (docs/setup.md)
+install-agents: ## (root) the agents toolkit and its apply alone (step 2 of make install); needs airlock-envoy running
 	@bash agents/install.sh
 
 bundle: ## write the installed version (launcher + images) to DIR= for another account or an offline host
@@ -105,4 +108,4 @@ hooks: ## install the git pre-commit, pre-merge-commit and commit-msg hooks (sym
 bootstrap: ## vendor shellcheck + bats into .tooling/ (no sudo)
 	@bash scripts/bootstrap-tools.sh
 
-.PHONY: help install-airlock install-agents bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke bench-runtime check hooks bootstrap
+.PHONY: help install install-airlock install-agents bundle bundle-clean install-bundle refresh claude-installer-diff claude-installer-update lint test doctor image-smoke bench-runtime check hooks bootstrap

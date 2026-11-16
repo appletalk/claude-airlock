@@ -135,6 +135,7 @@ put 0755 "$SRC/operator" "$LIBDIR/operator"
 put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
 put 0755 "$SRC/../bin/update-runsc" /usr/local/sbin/update-runsc
 put 0755 "$SRC/../bin/update-victorialogs" /usr/local/sbin/update-victorialogs
+put 0755 "$SRC/airlock-audit" /usr/local/sbin/airlock-audit
 for f in containers.conf tmux.conf tmux-clipboard.conf completion.zsh completion.bash managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
 for f in "$SRC"/box/* "$SRC"/templates/*; do d=${f%/*}; put 0644 "$f" "$SHARE/${d##*/}/${f##*/}"; done
 put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
