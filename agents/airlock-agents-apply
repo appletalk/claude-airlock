@@ -1082,7 +1082,11 @@ transforms:
       box_output = includes(["/usr/bin/conmon", "/usr/libexec/podman/conmon"], exe) && exists(.CONTAINER_ID)
       # logind, machined and polkit by their units. (An agent's own sudo or su runs as root but
       # stays in the agent's cgroup: the owner uid below keeps it. Nobody else's sudo is read.)
-      svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit)
+      # sshd too (Arch's sshd.service, Debian's ssh.service, socket-activated sshd@...): an agent
+      # account logging in over SSH is never expected, and logind's line for it looks like the
+      # operator command's.
+      sshd = match(unit, r'^(ssh|sshd)(@.*)?[.]service$')
+      svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit) || sshd
       names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
       # logind's own structured field (the unit proves the sender): its lines about an agent's
       # sessions, the logout lines that don't name the user in their text included.
@@ -1135,6 +1139,10 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       # end in text the subject chooses (an agent registration's locale). machined's and other
       # polkit lines name no agent.
       if agent == "" && logind_agent { agent = logind_user }
+      if agent == "" && sshd && named {
+        m = parse_regex(msg, r'\bfor (invalid user )?(?P<a>$alt) from ') ?? {}
+        agent = if is_string(m.a) { string!(m.a) } else { "" }
+      }
       # (Not from polkit's stdout stream: journald splits that at newlines, and a split command
       # line could end in a planted tail.)
       if agent == "" && named && unit == "polkit.service" && starts_with(msg, "Operator of ") && transport != "stdout" {
@@ -1200,8 +1208,9 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       # info). An agent's privilege attempt or a dropped packet is high; a refusal, an unusual
       # login, a suppression of the agents' lines medium; a failing session or service low.
       # logind's routine lines (by its own message, its unit proven): a session of class user
-      # and type tty (the operator command's machinectl shell, the agents' only way in) low;
-      # a user manager's session and every session's end info.
+      # and type tty low (the operator command's machinectl shell; an SSH login with a terminal
+      # looks the same here, and shows high by sshd's own line); a user manager's session and
+      # every session's end info. sshd accepting an agent: high.
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
@@ -1212,6 +1221,8 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       } else if k == "privilege" && (to_string(._SYSTEMD_UNIT) ?? "") != "polkit.service" { sev = "high"
       } else if k == "privilege" && contains(msgl, "failed") { sev = "high"
       } else if k == "privilege" { sev = "low"
+      } else if k == "login" && match(unit, r'^(ssh|sshd)(@.*)?[.]service$') &&
+          match(to_string(.message) ?? "", r'^Accepted \S+ for ') { sev = "high"
       } else if k == "login" && unit == "systemd-logind.service" &&
           match(to_string(.message) ?? "", r'^(Session \S+ logged out\. |Removed session \S+\.$|New session \S+ of user \S+ with class .manager. )') { sev = "info"
       } else if k == "login" && unit == "systemd-logind.service" &&

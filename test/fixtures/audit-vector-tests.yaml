@@ -321,8 +321,8 @@ tests:
   - name: "enrich: any other new session of an agent's stays medium"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", USER_ID: "agent", message: "New session '9' of user 'agent' with class 'user' and type 'x11'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
-  - name: "enrich: a non-logind line shaped like logind's routine ones is not rated down"
-    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-machined.service", message: "Removed session 5. agent"}}]
+  - name: "enrich: a non-logind line in logind's exact routine format is not rated down"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-machined.service", message: "New session '5' of user 'agent' with class 'user' and type 'tty'."}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "medium")'}]}]
   - name: "enrich: pam_systemd_home's no-system-bus line in an agent's sudo is low; the attempt's own lines high"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _EXE: "/usr/bin/sudo", _SYSTEMD_UNIT: "session-9.scope", _SYSTEMD_OWNER_UID: "1100", message: "pam_systemd_home(sudo:auth): Failed to connect to system bus: No such file or directory"}}]
@@ -330,3 +330,15 @@ tests:
   - name: "enrich: pam_unix's failure in the same attempt stays high"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _EXE: "/usr/bin/sudo", _SYSTEMD_UNIT: "session-9.scope", _SYSTEMD_OWNER_UID: "1100", message: "pam_unix(sudo:auth): authentication failure; logname=agent uid=1100 euid=0 tty=/dev/pts/6 ruser=agent rhost=  user=agent"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "high")'}]}]
+  - name: "enrich: sshd accepting an agent's login is login, high, its agent"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "sshd.service", message: "Accepted publickey for agent-web from 10.99.0.5 port 52100 ssh2: ED25519 SHA256:abc"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "high"); assert_eq!(.audit.agent, "agent-web")'}]}]
+  - name: "enrich: a socket-activated sshd's refused attempt for an agent is login, medium"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "sshd@3-10.99.0.1:22-10.99.0.5:52100.service", message: "Failed publickey for invalid user agent from 10.99.0.5 port 52100 ssh2"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "medium"); assert_eq!(.audit.agent, "agent")'}]}]
+  - name: "enrich: sshd's lines about the operator stay out"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "ssh.service", message: "Accepted publickey for alice from 10.99.0.5 port 52100 ssh2"}}]
+    no_outputs_from: [agents]
+  - name: "enrich: an Accepted-shaped line not from sshd is not high"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", message: "Accepted publickey for agent from 10.99.0.5 port 1 ssh2"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "agent-process"); assert_eq!(.audit.severity, "info")'}]}]

@@ -294,7 +294,7 @@ machine (nothing leaves it):
   `log-journal on`: Envoy then writes each line to the journal too, where journald names the
   unit), and only the agents' other lines: their users, their boxes' subordinate ids and their
   managers (minus box output; an agent's own `sudo` or `su` counts, as it runs in the agent's
-  cgroup), airlock-envoy's units, logind, machined and polkit lines that name an agent (logind's also by its own `USER_ID` field, so its logout lines too) (nobody
+  cgroup), airlock-envoy's units, logind, machined, polkit and sshd lines that name an agent (logind's also by its own `USER_ID` field, so its logout lines too) (nobody
   else's `sudo` is even read), the kernel's drops starting with the agents' nft log prefixes, journald's
   notices when it suppressed any of these, and the store's own units. Who wrote a line is decided
   only by the fields journald itself sets (uid, process, unit), never by what the sender says. The rest of the journal stays where it is.
@@ -324,7 +324,9 @@ machine (nothing leaves it):
     low, a known complaint the agents' sandbox causes) or a dropped packet; `medium` for a refusal, an
     unusual login, journald suppressing the agents' lines or the store's own errors; `low` for a
     failing session, Envoy service or agent process, and for logind's new `user`/`tty` sessions
-    (the shape of the operator command's `machinectl shell`, the agents' only way in);
+    (the shape of the operator command's `machinectl shell`; an SSH login with a terminal looks
+    the same in logind's line, and is flagged by sshd's own: `high` when sshd accepts an agent,
+    `medium` for its other lines naming one);
     `info` for the rest, a user manager's session and every session's end included;
   - `audit.redacted: true` when redaction changed the line (a box sent something
     credential-shaped: flagged, not only hidden).
