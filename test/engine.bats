@@ -278,6 +278,50 @@ _doctor_out() {
   done
 }
 
+# The image smoke test's box too: without --dns, podman's fallback (8.8.8.8, 8.8.4.4) lands in
+# its resolv.conf on a loopback-only host, and each validator that resolves a name sends plain
+# queries there (seen as pasta drop bursts in a host's audit store, one per `update`).
+@test "the image smoke test's box gets the same --network, --dns and AIRLOCK_HOST_DNS as a launched box" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  for c in "podman pasta -" "podman slirp4netns -" "podman pasta 192.0.2.53 2001:db8::53" "old podman pasta -"; do
+    old=; [[ "$c" == old\ * ]] && { old=1; c="${c#old }"; }
+    read -r e net dns <<< "$c"; [ "$dns" = - ] && dns=
+    : > "$ENGINE_ARGS_FILE"
+    p="$(mkproj "engsmoke-$e-${net%%:*}-${dns%% *}${old:+-old}")"
+    STUB_PASTA_OLD="$old" STUB_PODMAN_VERSION="${old:+4.9.3}" \
+      AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns" \
+      AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+      AIRLOCK_ENGINE_OVERRIDE="$e" _launch "$p" >/dev/null 2>&1 || true
+    launched="$(_doctor_net_dns)"
+    : > "$ENGINE_ARGS_FILE"
+    env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+      ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE="$e" AIRLOCK_IMAGE=claude-airlock:dev \
+      AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+      ${old:+STUB_PASTA_OLD=1 STUB_PODMAN_VERSION=4.9.3} AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns" \
+      bash "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh" >/dev/null 2>&1 || true
+    smoke="$(_doctor_net_dns)"
+    [ -n "$launched" ] || { echo "$c: launcher recorded nothing"; false; }
+    [ "$smoke" = "$launched" ] \
+      || { printf '%s\nlauncher:\n%s\nsmoke:\n%s\n' "$c" "$launched" "$smoke"; false; }
+  done
+}
+
+@test "the image smoke test takes the network and resolvers from the host config" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  printf '%s\n' 'AIRLOCK_PODMAN_NETWORK=slirp4netns' 'AIRLOCK_DNS="192.0.2.53 2001:db8::53"' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  : > "$ENGINE_ARGS_FILE"
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+    ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE=podman AIRLOCK_IMAGE=claude-airlock:dev \
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+    bash "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh" >/dev/null 2>&1 || true
+  smoke="$(_doctor_net_dns)"
+  [[ "$smoke" == *"--dns=192.0.2.53"*"--dns=2001:db8::53"*"--network=slirp4netns"* ]] || { echo "smoke: $smoke"; false; }
+  : > "$ENGINE_ARGS_FILE"
+  _doctor podman
+  [ "$smoke" = "$(_doctor_net_dns)" ] || { printf 'smoke:\n%s\ndoctor:\n%s\n' "$smoke" "$(_doctor_net_dns)"; false; }
+}
+
 # `make doctor` and install.sh pass neither key, so the doctor must read them from the
 # host config itself, and must not let the config's AIRLOCK_IMAGE replace the image the
 # caller asked it to check.

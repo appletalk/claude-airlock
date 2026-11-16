@@ -16,6 +16,30 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="${AIRLOCK_ENGINE:-podman}"
 IMAGE="${AIRLOCK_IMAGE:-claude-airlock:dev}"
+# The two keys that shape a box's network, resolved as bin/claude-airlock and the doctor do:
+# the default, then the host config on top (install.sh passes neither). Only these two.
+PODMAN_NETWORK="${AIRLOCK_PODMAN_NETWORK:-pasta}"
+AIRLOCK_DNS="${AIRLOCK_DNS:-}"
+CONFIG_FILE="${AIRLOCK_CONFIG:-$HOME/.config/claude-airlock/config}"
+if [ -f "$CONFIG_FILE" ]; then
+  # in a subshell without -u (a config may build on a default this script doesn't set); taken
+  # only if the config ran to the end, as in scripts/airlock-doctor.sh
+  _cfg="$(
+    set +u
+    AIRLOCK_PODMAN_NETWORK="$PODMAN_NETWORK" AIRLOCK_ENGINE="$ENGINE"
+    # shellcheck disable=SC1090
+    { source "$CONFIG_FILE"; } >/dev/null 2>&1
+    trap - EXIT
+    printf '%s\n%s\nend\n' "$AIRLOCK_PODMAN_NETWORK" "$AIRLOCK_DNS"
+  )"
+  if [ "${_cfg##*$'\n'}" = end ]; then
+    { IFS= read -r PODMAN_NETWORK; IFS= read -r AIRLOCK_DNS; } <<< "$_cfg"
+  fi
+  unset _cfg
+fi
+export AIRLOCK_DNS
+# shellcheck disable=SC1091  # linted on its own (Makefile SHELL_SCRIPTS)
+source "$REPO_DIR/lib/host-dns.sh"
 
 if ! command -v "$ENGINE" >/dev/null 2>&1; then
   echo "image-smoke: '$ENGINE' not on PATH." >&2
@@ -28,10 +52,25 @@ fi
 
 printf '\033[1mimage smoke: %s (engine %s, egress minimal)\033[0m\n' "$IMAGE" "$ENGINE"
 
+# The same network and resolvers as a real box and the doctor's (lib/host-dns.sh). Without
+# --dns, a host whose only resolver is loopback gets podman's fallback, Google Public DNS, in
+# the box's resolv.conf, and every validator that resolves a name sends plain queries to
+# 8.8.8.8 and 8.8.4.4 (seen on a host's audit store: pasta dropping a burst per smoke test).
+net_args=()
+if [ "$ENGINE" = podman ]; then
+  case "$PODMAN_NETWORK" in pasta|pasta:*|'') airlock_podman_probe ;; esac
+  net_args+=( "$(airlock_podman_network_arg "$PODMAN_NETWORK")" )
+fi
+while IFS= read -r ns; do
+  if [ -n "$ns" ]; then net_args+=( "--dns=$ns" ); fi
+done < <(airlock_dns_forwarders "$ENGINE" "$PODMAN_NETWORK")
+
 # Same capability set the launcher and airlock-doctor use: enough to program
 # netfilter and drop privileges, nothing more. The firewall is raised as root and
 # the checks then run as the unprivileged dev user, exactly as a real session does.
 "$ENGINE" run --rm --log-driver none \
+  "${net_args[@]}" \
+  -e "AIRLOCK_HOST_DNS=$(airlock_host_nameservers)" \
   --cap-drop=ALL \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID \
   --security-opt=no-new-privileges \
