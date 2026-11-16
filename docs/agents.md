@@ -312,8 +312,10 @@ machine (nothing leaves it):
   whatever happens); VictoriaLogs logs each day it drops, among the store's own lines. The store
   is a copy for querying: the journal and Envoy's files stay the record.
 - **Where:** a VictoriaLogs under its own account `airlock-audit`, data in `/var/lib/airlock-audit`,
-  kept 90 days up to 5 GB (`audit on retention 180d max-disk 10G` to change). Vector 0.57 or later (your distribution's package) feeds it, reading the journal
-  as a member of `systemd-journal`, with no other rights. `make install-agents` installs
+  kept 90 days up to 5 GB (`audit on retention 180d max-disk 10G` to change). Vector 0.57 or later (your distribution's package) feeds it without
+  reading the journal itself: a small reader unit (a dynamic user, the only one in
+  `systemd-journal`, no network) runs `journalctl` with fixed matches and systemd hands its output
+  to Vector's own socket, so Vector only ever sees the candidate lines. `make install-agents` installs
   VictoriaLogs and vmauth from images pinned by digest (`sudo update-victorialogs`).
 - **Access:** the store has no network port. It, vmauth and Vector run in a network namespace of
   their own; the only way in is the socket `/run/airlock-audit/vl.sock`, which only

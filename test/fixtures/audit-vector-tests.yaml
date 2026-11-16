@@ -2,6 +2,16 @@
 # for the test site (agents agent, agent-web, agent-guard; uids 1100-1102, subuids 1100000+,
 # 1200000+, 1300000+; the toolkit's nft prefixes): test/agents.bats.
 tests:
+  # ---- journal_fields: journalctl -o json lines, as the reader writes them ---------------------
+  - name: a journalctl json line becomes message, host and journald's own time
+    inputs: [{insert_at: journal_fields, type: log, log_fields: {message: '{"MESSAGE":"hello","_HOSTNAME":"h1","_UID":"1100","__REALTIME_TIMESTAMP":"1763251200000000","_SOURCE_REALTIME_TIMESTAMP":"1000000","__CURSOR":"s=x"}'}}]
+    outputs: [{extract_from: journal_fields, conditions: [{type: vrl, source: 'assert_eq!(.message, "hello"); assert_eq!(.host, "h1"); assert_eq!(._UID, "1100"); assert_eq!(.timestamp, t''2025-11-16T00:00:00Z''); assert!(!exists(.MESSAGE) && !exists(.__CURSOR))'}]}]
+  - name: a byte-array field (control characters, invalid UTF-8) is withheld, its size kept
+    inputs: [{insert_at: journal_fields, type: log, log_fields: {message: '{"MESSAGE":[27,91,51,49,109,116,111,107],"_UID":"1100","__REALTIME_TIMESTAMP":"1763251200000000"}'}}]
+    outputs: [{extract_from: journal_fields, conditions: [{type: vrl, source: 'assert_eq!(.message, "withheld: 8 bytes not text")'}]}]
+  - name: a line that isn't a JSON object is dropped
+    inputs: [{insert_at: journal_fields, type: log, log_fields: {message: 'Failed to open journal'}}]
+    no_outputs_from: [journal_fields]
   # ---- agents: what the journal filter keeps -------------------------------------------------
   - name: keep an agent user's line
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "claude", _SYSTEMD_USER_UNIT: "agent-session@x.service", message: "hello"}}]

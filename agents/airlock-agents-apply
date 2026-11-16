@@ -692,10 +692,11 @@ render_web_research() { sed -e "s#{queue}#$QUEUE#g" -e "s/{operator}/$OPERATOR/g
 # to it there. The only way in from the host is the Unix socket airlock-audit-vl-proxy.socket
 # (0600, ACL entries for airlock-envoy, for an auditor's listener, and the operator), relayed by
 # systemd-socket-proxyd to vmauth, which passes /select/ (queries) and nothing else: no insert,
-# no delete, no internal endpoints. Vector reads only the journal, as a member of
-# systemd-journal, with no capabilities; Envoy's lines reach it there (airlock-envoy's
-# log-journal on), named by journald, so nothing the agents or airlock-envoy write can steer
-# what it reads.
+# no delete, no internal endpoints. Vector never reads the journal itself: a reader unit
+# (a DynamicUser, the only holder of systemd-journal) runs journalctl with fixed matches and
+# systemd connects its output to a socket only Vector and root can use, so Vector sees only the
+# candidate lines. Envoy's lines reach it there (airlock-envoy's log-journal on), named by
+# journald; nothing the agents or airlock-envoy write can steer what is read.
 AUDIT_USER=airlock-audit
 AUDIT_LIB=/var/lib/airlock-audit
 AUDIT_RUN=/run/airlock-audit
@@ -703,7 +704,8 @@ AUDIT_SOCK=$AUDIT_RUN/vl.sock
 AUDIT_VL=/usr/local/bin/victoria-logs
 AUDIT_VMAUTH=/usr/local/bin/vmauth
 AUDIT_ETC=/etc/airlock-audit
-AUDIT_UNITS=(airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vector.service)
+AUDIT_UNITS=(airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vector.service airlock-audit-journal.service)
+AUDIT_IN=/run/airlock-audit-collect/journal.sock
 # Vector's oldest release that reads ${1} in a config literally (environment interpolation off by
 # default since 0.57; the redact rules use ${1}).
 AUDIT_VECTOR_MIN=0.57
@@ -846,8 +848,9 @@ EOF
 render_audit_vector_unit() {
     cat <<EOF
 # Rendered by airlock-agents-apply: Vector feeding the audit store the agents' journal lines. It
-# reads the journal as a member of systemd-journal (no capabilities) and writes only its own
-# checkpoints and the store, in the store's network namespace.
+# can't read the journal: airlock-audit-journal.service writes it the candidate lines through
+# $AUDIT_IN (its own runtime directory, 0600). It writes only its checkpoints and the store, in
+# the store's network namespace; no capabilities.
 [Unit]
 Description=airlock audit collector (Vector)
 Requires=airlock-audit-vl.service
@@ -858,10 +861,81 @@ JoinsNamespaceOf=airlock-audit-vl.service
 ExecStart=/usr/bin/vector --config $AUDIT_ETC/vector.yaml
 Restart=on-failure
 RestartSec=5
-SupplementaryGroups=systemd-journal
+RuntimeDirectory=airlock-audit-collect
+RuntimeDirectoryMode=0700
 ReadWritePaths=$AUDIT_LIB/vector
 MemoryMax=512M
 $(audit_sandbox)
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+# The journal reader: the only holder of systemd-journal. journalctl's matches pick the
+# candidate lines (journald's own fields only); Vector's filter decides what is kept. Between
+# match groups "+" is an OR; within one, the same field ORs and different fields AND.
+render_audit_journal_unit() {
+    local r m=""
+    for r in "${ROLES[@]}"; do m="$m _UID=${UID_OF[$r]}"; done
+    m="$m +"
+    for r in "${ROLES[@]}"; do m="$m _SYSTEMD_OWNER_UID=${UID_OF[$r]}"; done
+    m="$m +"
+    for r in "${ROLES[@]}"; do m="$m _SYSTEMD_UNIT=user@${UID_OF[$r]}.service"; done
+    m="$m _SYSTEMD_UNIT=airlock-envoy.service _SYSTEMD_UNIT=airlock-envoy-web.service _SYSTEMD_UNIT=airlock-envoy-mint.service"
+    m="$m _SYSTEMD_UNIT=airlock-envoy-logrotate.service _SYSTEMD_UNIT=airlock-envoy-cred-expire.service"
+    for u in "${AUDIT_UNITS[@]}"; do [[ "$u" == *.service ]] && m="$m _SYSTEMD_UNIT=$u"; done
+    m="$m _SYSTEMD_UNIT=systemd-logind.service _SYSTEMD_UNIT=systemd-machined.service _SYSTEMD_UNIT=polkit.service _SYSTEMD_UNIT=systemd-journald.service"
+    m="$m + _UID=0 _COMM=sudo _COMM=su _COMM=runuser +"
+    for r in "${ROLES[@]}"; do m="$m UNIT=user@${UID_OF[$r]}.service"; done
+    m="$m _UID=0 +"
+    for r in "${ROLES[@]}"; do m="$m USER_UNIT=user@${UID_OF[$r]}.service"; done
+    m="$m _UID=0 + _TRANSPORT=kernel"
+    cat <<EOF
+# Rendered by airlock-agents-apply: reads the journal for the audit store, the only one of its
+# units that can (a DynamicUser in systemd-journal, no network, nothing writable but its cursor).
+# journalctl's matches pick the candidate lines; Vector's filter decides what is kept. systemd
+# connects its output to Vector's socket ($AUDIT_IN): only root and airlock-audit can, so nothing
+# else can put lines there. A Vector restart breaks the stream: this restarts with it, from its
+# cursor.
+[Unit]
+Description=airlock audit journal reader
+BindsTo=airlock-audit-vector.service
+After=airlock-audit-vector.service
+
+[Service]
+DynamicUser=yes
+SupplementaryGroups=systemd-journal
+StateDirectory=airlock-audit-journal
+# From its cursor once it has one; the first time, the last $AUDIT_RETENTION (journalctl takes
+# --since only without a cursor to resume from).
+ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; s=--since=-$AUDIT_RETENTION; [ ! -s "\$\$c" ] || s=; exec /usr/bin/journalctl --follow --output=json --no-pager --cursor-file="\$\$c" \$\$s$m'
+StandardOutput=file:$AUDIT_IN
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=256M
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -920,13 +994,38 @@ render_audit_vector() {
 data_dir: $AUDIT_LIB/vector
 sources:
   journal:
-    type: journald
-    current_boot_only: false
-    extra_args: ["--since=-$AUDIT_RETENTION"]
+    type: socket
+    mode: unix_stream
+    path: $AUDIT_IN
+    socket_file_mode: 0o600
+    framing:
+      method: newline_delimited
+      newline_delimited:
+        max_length: 1048576
 transforms:
+  # journalctl -o json: MESSAGE -> message, _HOSTNAME -> host, the time journald received the
+  # line (not the sender's _SOURCE_REALTIME_TIMESTAMP). A field with control characters or
+  # invalid UTF-8 arrives as a byte array, which redaction can't read: withheld, its size kept.
+  journal_fields:
+    type: remap
+    inputs: [journal]
+    drop_on_error: true
+    source: |
+      j, err = parse_json(to_string(.message) ?? "")
+      if err != null || !is_object(j) { abort }
+      . = object!(j)
+      . = map_values(.) -> |v| { if is_array(v) { "withheld: " + to_string(length(array!(v))) + " bytes not text" } else { v } }
+      m = del(.MESSAGE)
+      .message = if is_string(m) { m } else { "" }
+      h = del(._HOSTNAME)
+      .host = if is_string(h) { h } else { "unknown" }
+      us = parse_int(to_string(.__REALTIME_TIMESTAMP) ?? "") ?? 0
+      .timestamp = if us > 0 { from_unix_timestamp!(us, unit: "microseconds") } else { now() }
+      del(.__CURSOR)
+      del(.__MONOTONIC_TIMESTAMP)
   agents:
     type: filter
-    inputs: [journal]
+    inputs: [journal_fields]
     condition:
       type: vrl
       source: |
@@ -1058,6 +1157,7 @@ render_file() {  # render_file <dest path>
         /etc/systemd/system/airlock-audit-vl-proxy.socket) render_audit_socket ;;
         /etc/systemd/system/airlock-audit-vl-proxy.service) render_audit_proxy_unit ;;
         /etc/systemd/system/airlock-audit-vector.service) render_audit_vector_unit ;;
+        /etc/systemd/system/airlock-audit-journal.service) render_audit_journal_unit ;;
         "/usr/local/bin/$COMMAND") printf '#!/bin/sh\n# Rendered by airlock-agents-apply: the operator command, as %s.\nexec %s/operator "$@"\n' "$COMMAND" "$LIBDIR" ;;
         *) die "internal: no renderer for $p" ;;
     esac
@@ -1257,7 +1357,7 @@ if [ "$AUDIT" = on ]; then
         pause "audit on needs Vector $AUDIT_VECTOR_MIN or later (this is ${vv:-unknown}): older releases expand \${1} in its config as an environment variable"
     fi
     [ -n "$ROOT" ] || [ -x /usr/bin/setfacl ] || pause "audit on needs setfacl (the acl package): the store's socket gets ACL entries"
-    [ -n "$ROOT" ] || getent group systemd-journal >/dev/null || pause "audit on needs the systemd-journal group (the collector reads the journal as a member)"
+    [ -n "$ROOT" ] || getent group systemd-journal >/dev/null || pause "audit on needs the systemd-journal group (the store's journal reader runs in it)"
     [ -n "$ROOT" ] || [ -x /usr/lib/systemd/systemd-socket-proxyd ] || pause "audit on needs /usr/lib/systemd/systemd-socket-proxyd"
     [ -n "$ROOT" ] || getent passwd airlock-envoy >/dev/null || pause "audit on needs airlock-envoy installed (its account gets the store's socket, for the auditor)"
     for vl in "$AUDIT_VL" "$AUDIT_VMAUTH"; do
@@ -1538,7 +1638,7 @@ done < <(file_list)
 # record is the operator's decision, rm -r /var/lib/airlock-audit).
 if [ "$AUDIT" = off ] && as_installed /etc/systemd/system/airlock-audit-vl.service; then
     step "disable and stop the audit store (audit off; its data in /var/lib/airlock-audit stays)" \
-        systemctl disable --now airlock-audit-vector.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vmauth.service airlock-audit-vl.service
+        systemctl disable --now airlock-audit-journal.service airlock-audit-vector.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vmauth.service airlock-audit-vl.service
 fi
 # nftables now managed elsewhere (checked live above): stop its own unit before its files go.
 if [ -n "${EXTERNAL[nftables]:-}" ] && as_installed /etc/systemd/system/airlock-agents-nft.service; then
@@ -1761,14 +1861,15 @@ if [ "$AUDIT" = on ]; then
             && systemctl is-active --quiet airlock-audit-vl.service 2>/dev/null \
             && systemctl is-active --quiet airlock-audit-vmauth.service 2>/dev/null \
             && systemctl is-active --quiet airlock-audit-vl-proxy.socket 2>/dev/null \
-            && systemctl is-active --quiet airlock-audit-vector.service 2>/dev/null; then
+            && systemctl is-active --quiet airlock-audit-vector.service 2>/dev/null \
+            && systemctl is-active --quiet airlock-audit-journal.service 2>/dev/null; then
         ok "the audit store, its door and its collector enabled and running"
     else
         # The relay and its socket stop first: a socket whose service is still active refuses to
         # start again. The restart stays pending until it has run (a run cut short redoes it).
         pend audit
         step "enable and (re)start the audit store, its door, its socket and its collector" \
-            sh -c 'systemctl enable airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.socket airlock-audit-vector.service && systemctl stop airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service && systemctl restart airlock-audit-vl.service && systemctl restart airlock-audit-vmauth.service airlock-audit-vector.service && systemctl start airlock-audit-vl-proxy.socket'
+            sh -c 'systemctl enable airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.socket airlock-audit-vector.service airlock-audit-journal.service && systemctl stop airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service && systemctl restart airlock-audit-vl.service && systemctl restart airlock-audit-vmauth.service airlock-audit-vector.service && systemctl restart airlock-audit-journal.service && systemctl start airlock-audit-vl-proxy.socket'
         unpend audit
     fi
 fi
