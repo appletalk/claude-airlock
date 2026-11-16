@@ -476,3 +476,22 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     run "$OP" audit events
     [ "${#lines[@]}" = 3 ] || { echo "$output"; return 1; }
 }
+
+@test "events --full: a newline flood is cut at 40 lines; Envoy runs with other details don't collapse; wide text fits the width" {
+    row "$(python3 -c 'import json; print(json.dumps({"_time":"2026-11-15T20:35:15Z","audit.severity":"high","audit.kind":"agent-process","audit.agent":"agent","log_type":"journal","_msg":"x" + "\n"*2000}))')"
+    row '{"_time":"2026-11-15T20:35:01Z","audit.severity":"medium","audit.kind":"envoy-refused","audit.agent":"agent","log_type":"envoy-access","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/","envoy.route":"r","envoy.status":"503","envoy.details":"lua_response"}'
+    row '{"_time":"2026-11-15T20:35:00Z","audit.severity":"medium","audit.kind":"envoy-refused","audit.agent":"agent","log_type":"envoy-access","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/","envoy.route":"r","envoy.status":"503","envoy.details":"other"}'
+    row "$(python3 -c 'import json; print(json.dumps({"_time":"2026-11-15T20:34:00Z","audit.severity":"medium","audit.kind":"agent-process","audit.agent":"agent","log_type":"journal","_msg":"é"*150 + " " + "字"*150}))')"
+    COUNT=4 run "$OP" audit events --full
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(grep -c '^      $' <<< "$output")" -le 40 ] || { echo "flood not cut"; return 1; }
+    grep -qF '...[cut at 2000 characters or 40 lines]' <<< "$output" || return 1
+    [ "$(grep -c 'envoy-refused' <<< "$output")" = 2 ] || { echo "$output" | grep envoy; return 1; }
+    python3 -c '
+import sys, unicodedata
+for l in sys.stdin.read().splitlines():
+    w = sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in l)
+    assert w <= 200, (w, l[:40])
+    l.encode("utf-8")' <<< "$output" || return 1
+    grep -q 'éééé' <<< "$output" && grep -q '字字字' <<< "$output"
+}

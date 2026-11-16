@@ -1114,11 +1114,31 @@ audit_events() {
     cutoff="$(since_epoch "$since")"
     audit_ready
     set_cols
-    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" "$sev" "$kind" "$agent" "$full" "$W" <<"PY" | rows_out "$W"
-import datetime, json, re, subprocess, sys, textwrap
+    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" "$sev" "$kind" "$agent" "$full" "$W" <<"PY" | clean
+import datetime, json, re, subprocess, sys, textwrap, unicodedata
 sock, start, limit, cmd, sev, kind, agent = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
 full, width = sys.argv[8] == "1", int(sys.argv[9])
-FULL_MAX = 2000   # characters of one event's whole text under --full
+FULL_MAX, FULL_LINES = 2000, 40   # one event's whole text under --full: characters, lines
+
+# Lines are fitted to the terminal here, by display width (a wide character takes two columns),
+# not by the shell's cut, which counts bytes and would split a character.
+def cols(c):
+    return 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+
+def fit(s, w):
+    out, n = [], 0
+    for c in s:
+        n += cols(c)
+        if n > w:
+            break
+        out.append(c)
+    return "".join(out)
+
+def chunks(s, w):   # s in pieces of at most w columns
+    while s:
+        piece = fit(s, w) or s[0]
+        yield piece
+        s = s[len(piece):]
 ORDER = ["high", "medium", "low", "info"]
 levels = ORDER[:ORDER.index(sev) + 1]
 
@@ -1182,7 +1202,8 @@ for r in rows:
         who += "/" + r["audit.session"]
     flag = " (redacted)" if r.get("audit.redacted") == "true" else ""
     raw = (r.get("_msg"),) if r.get("log_type") not in ("envoy-access", "envoy-web") else tuple(
-        r.get(f) for f in ("envoy.method", "envoy.authority", "envoy.path", "envoy.route", "envoy.status", "envoy.sni"))
+        r.get(f) for f in ("envoy.listener", "envoy.method", "envoy.authority", "envoy.path", "envoy.route", "envoy.status",
+                           "envoy.sni", "envoy.flags", "envoy.details"))
     key = (r.get("audit.severity"), r.get("audit.kind"), who, flag) + raw
     if groups and groups[-1][3] == key:
         groups[-1][1] = r.get("_time")
@@ -1195,8 +1216,8 @@ lines = 0
 for r, oldest, n, _, what, who, flag in groups:
     lines += n
     run = f" (x{n}, from {when(oldest)})" if n > 1 else ""
-    print(f"{when(r.get('_time'))}  {printable(r.get('audit.severity') or '?', 6):<6}  {printable(r.get('audit.kind') or '?', 19):<19}  "
-          f"{printable(who, 28):<28}  {printable(what, 160)}{flag}{run}")
+    print(fit(f"{when(r.get('_time'))}  {printable(r.get('audit.severity') or '?', 6):<6}  {printable(r.get('audit.kind') or '?', 19):<19}  "
+              f"{printable(who, 28):<28}  {printable(what, 160)}{flag}{run}", width))
     if full:
         # The whole text under the row, each line cleaned (a newline in it starts a new one),
         # wrapped to the terminal, at most FULL_MAX characters in all.
@@ -1205,13 +1226,16 @@ for r, oldest, n, _, what, who, flag in groups:
                             "envoy.path", "envoy.sni", "envoy.route", "envoy.status", "envoy.flags", "envoy.details") if r.get(k))
         else:
             text = r.get("_msg") or ""
-        cut = len(text) > FULL_MAX
+        out = []
         for part in text[:FULL_MAX].split("\n"):
             for line in textwrap.wrap(printable(part, FULL_MAX), max(20, width - 6), break_long_words=True,
                                       break_on_hyphens=False) or [""]:
-                print("      " + line)
+                out.extend(chunks(line, max(20, width - 6)) if line else [""])
+        cut = len(text) > FULL_MAX or len(out) > FULL_LINES
+        for line in out[:FULL_LINES]:
+            print("      " + line)
         if cut:
-            print(f"      ...[cut at {FULL_MAX} characters]")
+            print(f"      ...[cut at {FULL_MAX} characters or {FULL_LINES} lines]")
 by = ", ".join(f"{s} {counts[s]}" for s in levels if s in counts) or "none"
 total = sum(int(v) for v in counts.values() if v.isdigit())
 if len(rows) == FETCH and len(groups) < limit and total > lines:
@@ -1220,7 +1244,7 @@ elif total > lines:
     more = f"; newest {len(groups)} rows ({lines} lines) shown, --limit <n> for more"
 else:
     more = ""
-print(f"({by} since {when(start)}, {sev} and above{more}; lines from before the store rated them are not counted)")
+print(fit(f"({by} since {when(start)}, {sev} and above{more}; lines from before the store rated them are not counted)", width))
 PY
 }
 audit() {

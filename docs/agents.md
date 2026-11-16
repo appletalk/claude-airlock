@@ -389,11 +389,12 @@ machine (nothing leaves it):
   above (medium and the last 24 hours by default), newest first: time, severity, kind, agent and
   session, what happened (a redacted line says so), then a count by severity. Repeats in a row
   (the same severity, kind, agent, session and whole text: every line of a journal message,
-  every field of an Envoy line) are one row with their count and when the run began, so one
+  every field of an Envoy line shown under `--full`) are one row with their count and when the run began, so one
   repeating failure doesn't push everything else out of view; `--limit` counts rows, from the
   newest 10,000 lines (the closing line says when that cap was reached). Rows are cut to the
   terminal's width; `--full` prints each event's whole text under its row, wrapped and cleaned
-  (up to 2,000 characters; for Envoy, its listener, request, route, status, flags and details). Kind and agent are
+  (up to 2,000 characters or 40 lines; for Envoy, its listener, request, route, status, flags and
+  details). A collapsed run shows its newest event's text; the run's events share all of it. Kind and agent are
   checked against their shape before they go into the fixed query, and matched exactly (`--agent
   agent` is not also `agent-web`). Lines stored before the store
   rated them don't show (a reset reads them in again).
