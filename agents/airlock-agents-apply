@@ -782,9 +782,9 @@ RestartSec=5
 ReadWritePaths=$AUDIT_LIB/vl
 MemoryMax=2G
 $(audit_sandbox)
-# mincore: VictoriaLogs asks which pages of its own memory-mapped parts are in RAM. systemd
-# leaves it out of @system-service (it can tell which file pages others touched); without it the
-# filter kills VictoriaLogs at its first write (SIGSYS).
+# mincore: VictoriaLogs asks which pages of its own memory-mapped parts are in RAM. Not in
+# @system-service on the first host run (seccomp killed VictoriaLogs at its first write: SIGSYS,
+# audit syscall=27 on x86_64); allowed for this unit alone.
 SystemCallFilter=mincore
 
 [Install]
