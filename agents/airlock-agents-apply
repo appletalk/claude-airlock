@@ -1042,7 +1042,6 @@ transforms:
         uid = to_string(._UID) ?? ""
         n = to_int(uid) ?? -1
         owner = to_string(._SYSTEMD_OWNER_UID) ?? ""
-        comm = to_string(._COMM) ?? ""
         unit = to_string(._SYSTEMD_UNIT) ?? ""
         about = ""
         if uid == "0" || uid == "" { about = to_string(.UNIT) ?? "" }
