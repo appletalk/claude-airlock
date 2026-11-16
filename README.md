@@ -16,12 +16,14 @@ allowlist, every connection is logged, and service credentials (GitHub, git, a c
 added by the proxy, so they never enter the box. It runs as a systemd service you install as
 root. The in-box firewall alone (setup step 2) is the quick start.
 
-![Three Unix users, each running Claude in its own airlock box: claude, the agent; claude-web, which researches the web for it; claude-guard, which checks each answer. airlock-envoy gives each its own listeners.](docs/agent-users.svg)
+![Four Unix users, each running Claude in its own airlock box: claude, the agent; claude-web, which researches the web for it; claude-guard, which checks each answer; claude-audit, which reads the audit record when you ask. airlock-envoy gives each its own listeners.](docs/agent-users.svg)
 
 With [agent users](docs/agents.md) on top of airlock-envoy, Claude runs as its own Unix user,
 `claude`, and never gets the open web. When it needs something from the web it queues a
 question: `claude-web` researches it in a fresh box with web tools only, `claude-guard` checks
-the report, and the agent reads the answer as data, never as instructions.
+the report, and the agent reads the answer as data, never as instructions. With the audit
+store on, `claude-audit` reviews what the agents did when you ask (`claude-agent audit`), in a
+fresh box that reaches nothing but Anthropic and the store's read-only queries.
 
 ## What it protects against
 
