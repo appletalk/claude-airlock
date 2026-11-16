@@ -283,7 +283,8 @@ _doctor_out() {
 # queries there (seen as pasta drop bursts in a host's audit store, one per `update`).
 @test "the image smoke test's box gets the same --network, --dns and AIRLOCK_HOST_DNS as a launched box" {
   printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
-  for c in "podman pasta -" "podman slirp4netns -" "podman pasta 192.0.2.53 2001:db8::53" "old podman pasta -"; do
+  for c in "podman pasta -" "podman pasta:--mtu,1400 -" "podman slirp4netns -" "docker pasta -" \
+           "podman pasta 192.0.2.53 2001:db8::53" "docker pasta 192.0.2.53" "old podman pasta -" "old podman pasta:--mtu,1400 -"; do
     old=; [[ "$c" == old\ * ]] && { old=1; c="${c#old }"; }
     read -r e net dns <<< "$c"; [ "$dns" = - ] && dns=
     : > "$ENGINE_ARGS_FILE"
@@ -320,6 +321,27 @@ _doctor_out() {
   : > "$ENGINE_ARGS_FILE"
   _doctor podman
   [ "$smoke" = "$(_doctor_net_dns)" ] || { printf 'smoke:\n%s\ndoctor:\n%s\n' "$smoke" "$(_doctor_net_dns)"; false; }
+}
+
+@test "the image smoke test's config read: a config building on a default it doesn't set still counts; one that exits midway doesn't" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
+  smoke() {
+    : > "$ENGINE_ARGS_FILE"
+    env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+      ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE=podman AIRLOCK_IMAGE=claude-airlock:dev \
+      AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+      bash "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh" 2>&1 >/dev/null || true
+  }
+  # (under set -u the unset AIRLOCK_ARTIFACT_DIRS would abort the read and lose the network)
+  printf '%s\n' 'AIRLOCK_ARTIFACT_DIRS="$AIRLOCK_ARTIFACT_DIRS target"' 'AIRLOCK_PODMAN_NETWORK=slirp4netns' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  smoke >/dev/null
+  grep -qx -- '--network=slirp4netns' "$ENGINE_ARGS_FILE" || { grep -- --network "$ENGINE_ARGS_FILE"; false; }
+  # a config that exits before its end: the defaults, said so
+  printf '%s\n' 'AIRLOCK_PODMAN_NETWORK=slirp4netns' 'exit 0' > "$AIRLOCK_HOME/.config/claude-airlock/config"
+  out="$(smoke)"
+  [[ "$out" == *"did not run to the end"* ]] || { echo "$out"; false; }
+  grep -q -- '--network=pasta' "$ENGINE_ARGS_FILE" || { grep -- --network "$ENGINE_ARGS_FILE"; false; }
 }
 
 # `make doctor` and install.sh pass neither key, so the doctor must read them from the

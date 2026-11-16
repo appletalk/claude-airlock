@@ -34,6 +34,8 @@ if [ -f "$CONFIG_FILE" ]; then
   )"
   if [ "${_cfg##*$'\n'}" = end ]; then
     { IFS= read -r PODMAN_NETWORK; IFS= read -r AIRLOCK_DNS; } <<< "$_cfg"
+  else
+    echo "image-smoke: $CONFIG_FILE did not run to the end; testing the default network and resolvers" >&2
   fi
   unset _cfg
 fi
