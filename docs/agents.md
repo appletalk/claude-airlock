@@ -320,7 +320,8 @@ machine (nothing leaves it):
   - `level` (vmui's colour): journald's priority; for Envoy's lines, what happened (a refusal a
     warning, an error Envoy answered itself an error);
   - `audit.severity`, a security rating apart from syslog's: `high` for an agent's privilege
-    attempt (polkit only when it refused) or a dropped packet; `medium` for a refusal, an
+    attempt (polkit only when it refused; `pam_systemd_home`'s "no system bus" line within it
+    low, a known complaint the agents' sandbox causes) or a dropped packet; `medium` for a refusal, an
     unusual login, journald suppressing the agents' lines or the store's own errors; `low` for a
     failing session, Envoy service or agent process, and for logind's new `user`/`tty` sessions
     (the shape of the operator command's `machinectl shell`, the agents' only way in);

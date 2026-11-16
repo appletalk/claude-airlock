@@ -1205,6 +1205,10 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
+      } else if k == "privilege" && match(to_string(.message) ?? "", r'^pam_systemd_home\([a-z0-9_-]+:[a-z]+\): Failed to connect to system bus') {
+        # Known noise: the agents have no system bus, so this module complains on every attempt;
+        # the attempt's own lines (sudo's, pam_unix's, faillock's) still rate high.
+        sev = "low"
       } else if k == "privilege" && (to_string(._SYSTEMD_UNIT) ?? "") != "polkit.service" { sev = "high"
       } else if k == "privilege" && contains(msgl, "failed") { sev = "high"
       } else if k == "privilege" { sev = "low"

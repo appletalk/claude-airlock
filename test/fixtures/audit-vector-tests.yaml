@@ -324,3 +324,9 @@ tests:
   - name: "enrich: a non-logind line shaped like logind's routine ones is not rated down"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-machined.service", message: "Removed session 5. agent"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: pam_systemd_home's no-system-bus line in an agent's sudo is low; the attempt's own lines high"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _EXE: "/usr/bin/sudo", _SYSTEMD_UNIT: "session-9.scope", _SYSTEMD_OWNER_UID: "1100", message: "pam_systemd_home(sudo:auth): Failed to connect to system bus: No such file or directory"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.severity, "low")'}]}]
+  - name: "enrich: pam_unix's failure in the same attempt stays high"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _EXE: "/usr/bin/sudo", _SYSTEMD_UNIT: "session-9.scope", _SYSTEMD_OWNER_UID: "1100", message: "pam_unix(sudo:auth): authentication failure; logname=agent uid=1100 euid=0 tty=/dev/pts/6 ruser=agent rhost=  user=agent"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "high")'}]}]
