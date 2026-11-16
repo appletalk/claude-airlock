@@ -909,9 +909,10 @@ After=airlock-audit-vector.service
 DynamicUser=yes
 SupplementaryGroups=systemd-journal
 StateDirectory=airlock-audit-journal
-# From its cursor once it has one; the first time, the last $AUDIT_RETENTION (journalctl takes
-# --since only without a cursor to resume from).
-ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; s=--since=-$AUDIT_RETENTION; [ ! -s "\$\$c" ] || s=; exec /usr/bin/journalctl --follow --all --output=json --no-pager --cursor-file="\$\$c" \$\$s$m'
+# From its cursor. journalctl refuses --since beside --cursor-file, so the first time the cursor
+# file is seeded with the oldest entry of the last $AUDIT_RETENTION (export format: its first
+# line is __CURSOR=...).
+ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; if [ ! -s "\$\$c" ]; then l=\$\$(/usr/bin/journalctl --since=-$AUDIT_RETENTION --no-pager --output=export | head -n 1); printf %%s "\$\${l#__CURSOR=}" > "\$\$c"; fi; exec /usr/bin/journalctl --follow --all --output=json --no-pager --cursor-file="\$\$c"$m'
 # --all: without it journalctl blanks any field of 4 KiB or more (a padded request would arrive
 # empty). Its own errors go to the journal, never down the pipe.
 StandardOutput=file:$AUDIT_IN

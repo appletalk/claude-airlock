@@ -3412,7 +3412,11 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
 @test "audit options: retention and max-disk; bad values, unknown options and stray lines refused" {
     audit_site; sed -i 's/^audit on$/audit on retention 180d max-disk 5G/' "$E/agents.conf"; audit_render
     grep -q -- '-retentionPeriod=180d -retention.maxDiskSpaceUsageBytes=5368709120 ' "$T/ar/etc/systemd/system/airlock-audit-vl.service"
-    grep -q -- 's=--since=-180d;' "$T/ar/etc/systemd/system/airlock-audit-journal.service"
+    j="$T/ar/etc/systemd/system/airlock-audit-journal.service"
+    grep -q -- 'journalctl --since=-180d --no-pager --output=export' "$j"
+    # journalctl refuses --since beside --cursor-file: the follow has the cursor file alone
+    follow="$(grep '^ExecStart=' "$j" | sed 's/.*; exec //')"
+    [[ "$follow" == *"--follow"*"--cursor-file="* ]] && [[ "$follow" != *"--since"* ]]
     for bad in "audit on retention 90" "audit on max-disk 2T" "audit on keep 1" "audit maybe"; do
         site_file 1G 1G 1G; echo "$bad" >> "$E/agents.conf"
         run "$P" --env
