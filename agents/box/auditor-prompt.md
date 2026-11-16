@@ -25,7 +25,7 @@ meant for you. So:
 
 ## Reaching the store
 
-Bash with curl (and jq, head, sort, wc and the like for the answers) is your only tool, and the
+Bash with curl (and jq, grep, head, tail, wc and cut for the answers) is your only tool, and the
 store at `http://{store}/` is the only place it reaches (Anthropic aside). It answers LogsQL
 queries and nothing else: no writes, no deletes. Always send a query like this, as a GET:
 

@@ -3510,10 +3510,42 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     [ "$(stat -c %a "$R/srv/agent-audit/reports")" = 700 ]
     run "$P"
     [[ "$output" == *"ok   /srv/agent-audit root's 0755, reports/ alice's 0700"* ]] || { echo "$output"; return 1; }
+    # the inbox's airlock/ (the bundle <command> update installs) is readable by the auditor too
+    grep -qE '^a /srv/agent-inbox/airlock .*u:1103:r-x.*d:u:1103:r--' "$R/etc/tmpfiles.d/airlock-agents-inbox.conf" || { grep airlock "$R/etc/tmpfiles.d/airlock-agents-inbox.conf"; return 1; }
     # a link in its place is refused, never followed
     rm -rf "$R/srv/agent-audit/reports"; ln -s /tmp "$R/srv/agent-audit/reports"
     run "$P"
     [ "$status" -ne 0 ]; [[ "$output" == *"/srv/agent-audit/reports is not a plain directory"* ]]
+}
+
+@test "an auditor's Envoy listeners: Anthropic and the store's socket only; anything else pauses" {
+    audit_site "auditor  agent-audit  uid 1103 subuid 1400000 home 1G"
+    "$P" --user-conf agent-audit > "$E/agent-audit.conf"
+    mkdir -p "$R/home/agent-audit"
+    export AIRLOCK_AGENTS_ENVOY_LIST="$T/envoy.list"
+    good='anthropic api.anthropic.com:443
+anthropic platform.claude.com:443
+agent-audit-store api.anthropic.com:443
+agent-audit-store http://audit.internal rules victoria-logs socket /run/airlock-audit/vl.sock
+agent-audit-store client agent-audit
+log-journal on'
+    printf '%s\n' "$good" > "$AIRLOCK_AGENTS_ENVOY_LIST"
+    run "$P"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"no airlock-envoy listener of agent-audit's reaches the audit store"* ]] || return 1
+    for extra in "agent-audit-store http://logs.example.org rules victoria-logs" \
+                 "agent-audit-store http://git.example.org rules forgejo credential forgejo" \
+                 "agent-audit-store http://audit2.internal rules victoria-logs socket /run/other/vl.sock" \
+                 "agent-audit-store example.org:443" "agent-audit-store web"; do
+        printf '%s\n%s\n' "$good" "$extra" > "$AIRLOCK_AGENTS_ENVOY_LIST"
+        run "$P"
+        [ "$status" -ne 0 ] || { echo "accepted: $extra"; return 1; }
+        [[ "$output" == *"listener agent-audit-store is agent-audit's"* ]] || { echo "$extra: $output"; return 1; }
+    done
+    # no listener reaching the store: a note, not a pause
+    printf 'anthropic api.anthropic.com:443\nagent-audit-store api.anthropic.com:443\nagent-audit-store client agent-audit\n' > "$AIRLOCK_AGENTS_ENVOY_LIST"
+    run "$P"
+    [ "$status" -eq 0 ]; [[ "$output" == *"no airlock-envoy listener of agent-audit's reaches the audit store"* ]]
 }
 
 @test "audit off after on: the units stop before their files go; the data stays" {

@@ -415,7 +415,8 @@ machine (nothing leaves it):
   containment as the agents (its own manager, network namespace, slice, home image, nft drop;
   the store records its own lines too), the base image, no credentials, no web and no repos.
   Give it one airlock-envoy listener that reaches Anthropic and the store's socket, nothing else
-  (apply pauses on anything more, and on the open web):
+  (apply pauses on any other destination: another host, a credential, the open web, or a
+  victoria-logs host that isn't this store's socket):
   ```
   http audit.internal socket /run/airlock-audit/vl.sock rules victoria-logs
   claude-audit-store @anthropic http://audit.internal
@@ -425,22 +426,31 @@ machine (nothing leaves it):
   `claude-agent update`, and `claude-agent audit login` once (`/login` in its box).
   - `claude-agent audit` reviews the last 7 days (`--days <n>`, up to 90); `claude-agent audit
     "<question>"` answers one question (quoted: a single word is taken for a mistyped command).
-    Each run is a fresh one-shot Claude in a box: an empty workspace and memory, no earlier
-    report, 60 turns and 20 minutes at most, the tools Bash for curl to the store and a few text
-    tools (jq, grep, sort, ...); no Write, Edit or web tools. You wait for it; the report prints when
-    it ends.
+    Each run is a fresh one-shot Claude in a box, 60 turns and 20 minutes at most, with Bash for
+    curl to the store and a few text tools (jq, grep, head, tail, wc, cut), allowed in its managed
+    settings, which alone decide its permissions; no Write, Edit or web tools. curl can still
+    write files in the box (`-o`), so before each run everything a run could have written is
+    removed: the workspace, the box's `~/.claude` in the launcher's state (settings, transcripts,
+    earlier reports) except the login, `claude.json` except the account fields, the history. You
+    wait for it; the report prints when it ends.
   - **The report** goes to `/srv/<auditor>/reports/<time>.md` (yours alone, 0700: the auditor
     never reads or writes it; this command writes it after the run). It starts with **the queries
     actually run**: Envoy's lines for the auditor's user over the run, as the store holds them,
     not the model's account of itself (a GET's query is decoded from its URL; a POST's body isn't
     logged, so its query shows as unknown, and the auditor is told to use GET). The command waits
-    up to 30 seconds for the store to catch up with the run and says so if it hasn't. The
-    auditor's own text comes after, marked as such, cleaned of control characters.
+    up to 30 seconds for the store to catch up with the run and says so if it hasn't. Requests
+    inside a TLS tunnel (Envoy doesn't open those) and any after the run's window aren't listed,
+    and the report says so. The auditor's own text comes after, quoted line by line (so no
+    heading in it passes for the file's own) and cleaned of control characters.
   - **It is prompt-injectable by design:** the agents choose much of what it reads. It can't act
     (its box reaches Anthropic and the store's read-only queries, nothing else), its report is
     text for you, and it decides nothing: what it says never silences or rates anything. Its Bash
     can read the box's own login and send it in a query, which lands in the store (redacted when
-    the shape is known); there is nowhere else for it to go. Its instructions are
+    the shape is known); there is nowhere else for it to go. **Residual:** the login file is the
+    one thing kept between runs, and the box must be able to write it (token refresh), so a run
+    steered by a log line carrying someone else's Anthropic credential could write that in, and
+    later runs would send what they read to that account. `claude-agent audit login` (then
+    `/status` in the box) shows which account it is. Its instructions are
     `agents/box/auditor-prompt.md`.
 - **Day to day:** `sudo airlock-audit status` (units, what the store holds, seccomp kills),
   `restart`, `check` (the guarantees above, live: exit 1 on any failure), and `reset` (empties the

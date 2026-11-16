@@ -4,7 +4,11 @@
 # dir, the auditor's instructions, Bash for curl to the audit store (and a few text tools for its
 # answers), nothing else; capped in time and turns. The report (Claude's last message) goes to
 # stdout; the operator command cleans it, adds the queries Envoy logged for this user and writes
-# the report file, which this user never sees. Nothing here keeps state between runs.
+# the report file, which this user never sees. Its tools can write files (curl -o), so before
+# each run everything the box could have written is removed: the workspace, its memory dir, the
+# launcher's dot-claude (settings, transcripts, todos) but the login, claude.json but the account
+# fields, ~/.claude/projects. What one run wrote can't steer the next, except the login file
+# itself (the box must write it: token refresh), docs/agents.md, Audit.
 #
 #   audit-run review <days>      a look back over the last <days> days (1 to 90)
 #   audit-run ask <question>     the operator's question
@@ -17,7 +21,8 @@ AIRLOCK="${AGENTS_AUDIT_AIRLOCK:-$HOME/.local/bin/airlock}"                # tes
 PROMPT="${AGENTS_AUDIT_PROMPT:-$AGENTS_SHARE/box/auditor-prompt.md}"
 TIMEOUT="${AGENTS_AUDIT_TIMEOUT:-20m}"
 TURNS=60
-TOOLS="Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(sort:*),Bash(uniq:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)"
+# (as managed-settings-auditor.json's allow list, which alone counts there; no sort or uniq: they write files)
+TOOLS="Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)"
 ws="$HOME/audit"                                  # one workspace for every run: one login
 export PATH=/usr/local/bin:/usr/bin
 
@@ -54,10 +59,29 @@ exec 9> "$run_dir/audit-run.lock" || die "no lock file in $run_dir"
 flock -n 9 || die "another audit run is going (one at a time)"
 
 # Nothing from an earlier run is left: not in the workspace (a CLAUDE.md or .claude/ there would
-# load into this one), not in its memory dir (the launcher makes it again, empty).
+# load into this one), not in the launcher's state for it (the box's ~/.claude: settings a run
+# planted would hold for the next, its transcripts hold earlier reports), not in the shared
+# history. Only the login stays (a regular file; anything else by that name goes too).
 { mkdir -p "$ws" && find "$ws" -mindepth 1 -delete && [ -z "$(find "$ws" -mindepth 1 -print -quit)" ]; } \
     || die "the workspace $ws could not be emptied; nothing runs until it is"
-rm -rf -- "$HOME/.config/claude-airlock/state/$(printf '%s' "$ws" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')/box-memory"
+st="$HOME/.config/claude-airlock/state/$(printf '%s' "$ws" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+rm -rf -- "$st/box-memory" "$HOME/.claude/projects"
+if [ -d "$st/dot-claude" ] && [ ! -L "$st/dot-claude" ]; then
+    for f in "$st/dot-claude"/* "$st/dot-claude"/.[!.]* "$st/dot-claude"/..?*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        [ "$f" = "$st/dot-claude/.credentials.json" ] && [ -f "$f" ] && [ ! -L "$f" ] && continue
+        rm -rf -- "$f" || die "could not empty $st/dot-claude; nothing runs until it is"
+    done
+fi
+[ -z "$(find "$st/dot-claude" -mindepth 1 ! -path "$st/dot-claude/.credentials.json" -print -quit 2>/dev/null)" ] \
+    || die "$st/dot-claude could not be emptied; nothing runs until it is"
+if [ -e "$st/claude.json" ] || [ -L "$st/claude.json" ]; then
+    if [ -f "$st/claude.json" ] && [ ! -L "$st/claude.json" ] \
+        && jq '{oauthAccount, userID, hasCompletedOnboarding, lastOnboardingVersion} | with_entries(select(.value != null))' \
+            "$st/claude.json" > "$st/claude.json.new" 2>/dev/null; then
+        mv -f -- "$st/claude.json.new" "$st/claude.json"
+    else rm -f -- "$st/claude.json" "$st/claude.json.new"; fi
+fi
 
 # The site's names into the instructions (each checked by the apply's parser: no sed specials).
 agents="$(printf '%s ' "$AGENTS_AGENT" ${AGENTS_WEB:+"$AGENTS_WEB"} ${AGENTS_GUARD:+"$AGENTS_GUARD"} "$AGENTS_AUDITOR" | sed 's/ $//; s/ /, /g')"

@@ -454,6 +454,8 @@ polkit.addRule(function(action, subject) {
 EOF
 }
 
+# The users besides the agent that install the bundle from the inbox's airlock/ (<command> update).
+bundle_readers() { local r; for r in "${ROLES[@]}"; do [ "$r" = agent ] || echo "$r"; done; }
 render_inbox_tmpfiles() {
     cat <<EOF
 # Rendered by airlock-agents-apply: $INBOX, what $OPERATOR hands $AGENT, transiently. The inbox
@@ -466,7 +468,9 @@ D $INBOX/pastes   2750 $OPERATOR ${UID_OF[agent]} 1d
 D $INBOX/airlock  2750 $OPERATOR ${UID_OF[agent]} 1d
 EOF
     # The ACL is always replaced, so readers taken out of agents.conf lose their entries.
-    if [ "$WEB_ON" = 1 ]; then echo "a $INBOX/airlock  -    -     -    -   u:${UID_OF[web]}:r-x,u:${UID_OF[guard]}:r-x,d:u:${UID_OF[web]}:r--,d:u:${UID_OF[guard]}:r--"
+    local r a="" d=""
+    for r in $(bundle_readers); do a="$a${a:+,}u:${UID_OF[$r]}:r-x" d="$d,d:u:${UID_OF[$r]}:r--"; done
+    if [ -n "$a" ]; then echo "a $INBOX/airlock  -    -     -    -   $a$d"
     else echo "a $INBOX/airlock  -    -     -    -   u::rwx,g::r-x,o::---,d:u::rwx,d:g::r-x,d:o::---"; fi
 }
 
@@ -1480,8 +1484,10 @@ done
 # Envoy's site file through its own parser, when this host has one.
 if [ -z "$ROOT" ] && { ! command -v airlock-envoy-apply >/dev/null || [ ! -r /etc/airlock-envoy/site.conf ]; }; then
     pause "no airlock-envoy-apply or no readable /etc/airlock-envoy/site.conf: the agents' listeners can't be checked for the open web"
-elif [ -z "$ROOT" ]; then
-    if ! envoy_list="$(airlock-envoy-apply --list /etc/airlock-envoy/site.conf 2>/dev/null)"; then
+elif [ -z "$ROOT" ] || [ -n "${AIRLOCK_AGENTS_ENVOY_LIST:-}" ]; then
+    # (test hook: under a test root, AIRLOCK_AGENTS_ENVOY_LIST is a file standing in for --list)
+    if [ -n "$ROOT" ]; then envoy_list="$(cat "$AIRLOCK_AGENTS_ENVOY_LIST")"
+    elif ! envoy_list="$(airlock-envoy-apply --list /etc/airlock-envoy/site.conf 2>/dev/null)"; then
         pause "airlock-envoy-apply --list failed on its site file: the agents' listeners can't be checked for the open web"
         envoy_list=""
     fi
@@ -1509,9 +1515,11 @@ elif [ -z "$ROOT" ]; then
                 case "$d" in
                     client|web) ;;
                     http://*)
-                        if [[ " $rest " != *" rules victoria-logs "* || " $rest " == *" credential "* ]]; then
-                            pause "airlock-envoy listener $l is $AUDITOR's and reaches $d ($rest): an auditor's listener reaches Anthropic and the audit store (rules victoria-logs, no credential) only"
-                        elif [[ " $rest " == *" socket $AUDIT_SOCK "* ]]; then store=1; fi ;;
+                        # the store's own socket only: another victoria-logs host (a site's main
+                        # log store) would hand the auditor's model logs that were never redacted
+                        if [[ " $rest " != *" rules victoria-logs "* || " $rest " == *" credential "* || " $rest " != *" socket $AUDIT_SOCK "* ]]; then
+                            pause "airlock-envoy listener $l is $AUDITOR's and reaches $d ($rest): an auditor's listener reaches Anthropic and the audit store's socket $AUDIT_SOCK (rules victoria-logs, no credential) only"
+                        else store=1; fi ;;
                     *) grep -qxF -- "$d" <<< "$anth" \
                         || pause "airlock-envoy listener $l is $AUDITOR's and reaches $d: an auditor's listener reaches Anthropic and the audit store only" ;;
                 esac
@@ -2008,8 +2016,12 @@ gid_of() { case "$1" in root) echo 0 ;; "$OPERATOR") echo "$OP_GID" ;; *) echo "
 
 # The drop box: the operator writes, the agent reads, never writes.
 inbox_acl="default:group::r-x" inbox_what="$INBOX root 0755, pastes/ and airlock/ $OPERATOR:$AGENT 2750"
-[ "$WEB_ON" = 0 ] || inbox_what="$inbox_what, airlock/ readable by $WEB and $GUARD"
-[ "$WEB_ON" = 0 ] || inbox_acl="user:${UID_OF[web]}:r-x user:${UID_OF[guard]}:r-x default:user:${UID_OF[web]}:r-- default:user:${UID_OF[guard]}:r--"
+[ -z "$(bundle_readers)" ] || inbox_what="$inbox_what, airlock/ readable by $(for r in $(bundle_readers); do printf '%s ' "${NAME[$r]}"; done | sed 's/ $//; s/ / and /g')"
+if [ -n "$(bundle_readers)" ]; then
+    inbox_acl="" inbox_def=""
+    for r in $(bundle_readers); do inbox_acl="$inbox_acl user:${UID_OF[$r]}:r-x" inbox_def="$inbox_def default:user:${UID_OF[$r]}:r--"; done
+    inbox_acl="${inbox_acl# }$inbox_def"
+fi
 # shellcheck disable=SC2086  # the ACL list splits on purpose
 if [ "$(stat -c %u:%g:%a "$ROOT$INBOX" 2>/dev/null)" = "0:0:755" ] \
         && [ "$(stat -c %u:%g:%a "$ROOT$INBOX/pastes" 2>/dev/null)" = "$OP_UID:${UID_OF[agent]}:2750" ] \

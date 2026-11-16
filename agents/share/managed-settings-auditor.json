@@ -16,9 +16,20 @@
       "Edit",
       "NotebookEdit",
       "Read(~/.claude/**)"
+    ],
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(jq:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(cut:*)",
+      "Bash(grep:*)",
+      "Bash(date:*)"
     ]
   },
   "crossSessionInbound": "refuse",
   "disableRemoteControl": true,
-  "allowManagedHooksOnly": true
+  "allowManagedHooksOnly": true,
+  "allowManagedPermissionRulesOnly": true
 }

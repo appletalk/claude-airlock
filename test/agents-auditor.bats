@@ -117,7 +117,9 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
         jq -e --arg d "$d" '.permissions.deny | index($d)' "$s" >/dev/null || { echo "no deny for $d"; return 1; }
     done
     jq -e '.permissions.deny | index("Bash") | not' "$s" >/dev/null
-    jq -e '.disableRemoteControl == true and .crossSessionInbound == "refuse" and .allowManagedHooksOnly == true' "$s" >/dev/null
+    jq -e '.disableRemoteControl == true and .crossSessionInbound == "refuse" and .allowManagedHooksOnly == true and .allowManagedPermissionRulesOnly == true' "$s" >/dev/null
+    # no tool that writes files beyond curl (sort -o, uniq OUT)
+    ! jq -e '.permissions.allow | map(select(test("^Bash[(](sort|uniq|tee|sed|awk|python|bash|sh|dd|cp|mv)[:)]"))) | length > 0' "$s" >/dev/null
 }
 
 # ---- audit-run -----------------------------------------------------------------------------------
@@ -134,7 +136,9 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     for want in -p --restricted --strict-mcp-config --tools Bash --permission-mode dontAsk --max-turns 60 --output-format text --append-system-prompt; do
         grep -qxF -- "$want" "$a" || { echo "lacks $want"; cat "$a"; return 1; }
     done
-    [ "$(sed -n '/^--allowedTools$/{n;p;}' "$a")" = "Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(sort:*),Bash(uniq:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)" ]
+    [ "$(sed -n '/^--allowedTools$/{n;p;}' "$a")" = "Bash(curl:*),Bash(jq:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(cut:*),Bash(grep:*),Bash(date:*)" ]
+    # the same list is the managed settings' allow list, which alone counts there
+    [ "$(jq -r '.permissions.allow | join(",")' "$REPO/agents/share/managed-settings-auditor.json")" = "$(sed -n '/^--allowedTools$/{n;p;}' "$a")" ]
     [[ "$(sed -n '/^-p$/{n;p;}' "$a")" == "Review the last 7 days in the audit store (from "* ]]
     # the instructions with the site's names and the store's host from the manifest
     grep -qF "curl -sS -G 'http://audit.internal/select/logsql/query'" "$a"
@@ -183,14 +187,18 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     [ "$(sed -n 1p "$f")" = "# Audit report, $(date -u +%Y-%m-%d) $(sed -n 1p "$f" | grep -oE '[0-9]{2}:[0-9]{2}:[0-9]{2}') UTC" ]
     grep -qx -- '- What: a review of the last 7 days' "$f"
     grep -qx '3 request(s) to plain-HTTP hosts (1 not answered 2xx); 1 tunnel(s) to api.anthropic.com:443.' "$f"
-    grep -qx -- '- 10:00:02  200  GET audit.internal/select/logsql/query' "$f"
-    grep -qx '        _time:7d | stats by (audit.kind) count() n' "$f"
+    grep -qx '    10:00:02  200  GET audit.internal/select/logsql/query' "$f"
+    grep -qx '            _time:7d | stats by (audit.kind) count() n' "$f"
     grep -qF "(a POST body of 57 bytes: Envoy doesn't log bodies, its query is unknown)" "$f"
-    grep -qx -- '- 10:00:04  403  GET audit.internal/insert/jsonline  \[deny-audit.internal\]' "$f"
-    # Envoy's list comes first; the model's own text (a forged section included) only after the marker
+    grep -qx '    10:00:04  403  GET audit.internal/insert/jsonline  \[deny-audit.internal\]' "$f"
+    grep -qF "Requests inside a tunnel are TLS Envoy doesn't open: not listed." "$f"
+    # Envoy's list comes first and is the only heading of its kind; the model's text, a forged
+    # copy of that heading included, is quoted after the marker
+    [ "$(grep -c '^## Queries actually run' "$f")" = 1 ]
     q="$(grep -n '^## Queries actually run (Envoy' "$f" | cut -d: -f1)" m="$(grep -n "^## The auditor's report$" "$f" | cut -d: -f1)"
-    forged="$(grep -n '^## Queries actually run$' "$f" | cut -d: -f1)"
+    forged="$(grep -n '^> ## Queries actually run$' "$f" | cut -d: -f1)"
     [ "$q" -lt "$m" ] && [ "$m" -lt "$forged" ]
+    grep -qx '> All quiet.' "$f"
     # the store was asked for the auditor's own Envoy lines over the run, after it caught up
     grep -q '^_time:>.* | stats count() n$' "$CALLS"
     grep -qF "log_type:envoy-access envoy.user:=\"$ME\" | sort by (_time)" "$CALLS"
@@ -202,7 +210,7 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     f="$(report_file)"
     ! grep -q $'\033' "$f"; ! grep -q $'\007' "$f"
-    grep -qx 'ok red' "$f"
+    grep -qx '> ok red' "$f"
     grep -qx -- "- What: the operator's question:" "$f"
     grep -qx '    what did agent reach today?' "$f"
     grep -q 'exit 124 (timed out: the report may be missing or cut)' "$f"
@@ -246,4 +254,43 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
 @test "audit login: the auditor's box in its workspace" {
     run "$OP" audit login
     grep -q "machinectl shell -q $ME@ $T/nd/systemd-run --user --pty --wait --collect --quiet --same-dir -- /bin/bash -c" "$CALLS.machinectl"
+}
+
+@test "audit: Envoy's fields are the agents' text too: control and bidi characters never reach the file; a // path stays whole" {
+    row "{\"_time\":\"2026-11-16T10:00:02Z\",\"envoy.method\":\"GET\",\"envoy.authority\":\"audit.internal\\u001b[2J\",\"envoy.path\":\"//evil/select/logsql/query?query=a%E2%80%AEb%1B%5D0%3Bx%07\",\"envoy.status\":\"200\"}"
+    run "$OP" audit
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    f="$(report_file)"
+    ! grep -q $'\033' "$f"; ! grep -q $'\007' "$f"; ! grep -q $'\u202e' "$f"
+    grep -qx '    10:00:02  200  GET audit.internal?\[2J//evil/select/logsql/query' "$f" || { cat "$f"; return 1; }
+    grep -qx '            a?b?\]0;x?' "$f"
+}
+
+@test "audit: an exit 64 without audit-run's own line is a run like any other (the report is kept)" {
+    RC=64 run "$OP" audit
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -q 'exit 64' "$(report_file)"
+}
+
+@test "audit-run: nothing a run wrote reaches the next: the box's ~/.claude but the login, claude.json but the account, the history" {
+    st="$T/home/.config/claude-airlock/state/$(printf '%s' "$T/home/audit" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+    mkdir -p "$st/dot-claude/projects/x" "$st/dot-claude/todos" "$T/home/.claude/projects/old"
+    echo '{"permissions":{"allow":["Bash"]},"env":{"BASH_ENV":"/x"}}' > "$st/dot-claude/settings.json"
+    echo report > "$st/dot-claude/projects/x/earlier.jsonl"
+    echo '{"token":"t"}' > "$st/dot-claude/.credentials.json"
+    echo hidden > "$st/dot-claude/.hidden"; echo dots > "$st/dot-claude/..dots"
+    ln -s /etc/passwd "$st/dot-claude/link"
+    echo '{"oauthAccount":{"emailAddress":"a@example.org"},"userID":"u","projects":{"/w":{"allowedTools":["Bash"]}},"mcpServers":{"x":{}}}' > "$st/claude.json"
+    echo old > "$T/home/.claude/projects/old/t.jsonl"
+    run "$REPO/agents/lib/audit-run" review 7
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(ls -A "$st/dot-claude")" = .credentials.json ] || { ls -A "$st/dot-claude"; return 1; }
+    [ "$(cat "$st/dot-claude/.credentials.json")" = '{"token":"t"}' ]
+    [ "$(jq -c . "$st/claude.json")" = '{"oauthAccount":{"emailAddress":"a@example.org"},"userID":"u"}' ]
+    [ ! -e "$T/home/.claude/projects" ]
+    [ -e /etc/passwd ]
+    # a login file that isn't a regular file goes too
+    rm "$st/dot-claude/.credentials.json"; ln -s /etc/passwd "$st/dot-claude/.credentials.json"
+    run "$REPO/agents/lib/audit-run" review 7
+    [ "$status" -eq 0 ]; [ -z "$(ls -A "$st/dot-claude")" ]
 }
