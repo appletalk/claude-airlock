@@ -406,7 +406,7 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     run "$OP" audit events --severity medium --kind privilege --agent agent --since 2h
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     q="$(sed -n 1p "$CALLS")"
-    [[ "$q" == '_time:>='????-??-??T??:??:??Z' audit.severity:in(high,medium) audit.kind:="privilege" audit.agent:="agent" | sort by (_time desc) | limit 50 | fields '* ]] || { echo "$q"; return 1; }
+    [[ "$q" == '_time:>='????-??-??T??:??:??Z' audit.severity:in(high,medium) audit.kind:="privilege" audit.agent:="agent" | sort by (_time desc) | limit 10000 | fields '* ]] || { echo "$q"; return 1; }
     [[ "$(sed -n 2p "$CALLS")" == *'| stats by (audit.severity) count() n' ]]
     [[ "${lines[0]}" == "2026-11-15 14:05:00  high    privilege            agent/proj.main               agent : user NOT in sudoers" ]] || { echo "$output"; return 1; }
     [[ "${lines[1]}" == *"medium  envoy-refused        agent                         CONNECT example.org:443  [deny-connect 403]" ]] || { echo "$output"; return 1; }
@@ -438,4 +438,18 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     ! printf '%s' "$output" | LC_ALL=C grep -qP '[\x00-\x08\x0b-\x1f\x7f]' || return 1
     [[ "${lines[0]}" == *"x?]52;c;aGk=?y (redacted)" ]] || { echo "$output"; return 1; }
     [[ "${lines[1]}" == "(high 3 since "* ]] || { echo "$output"; return 1; }
+}
+
+@test "events: repeats in a row are one row with their count and when the run began; --limit counts rows" {
+    for s in 13:07 13:03 13:00; do
+        row "{\"_time\":\"2026-11-15T19:$s.000Z\",\"audit.severity\":\"medium\",\"audit.kind\":\"store\",\"log_type\":\"journal\",\"_msg\":\"Please specify only one\"}"
+    done
+    row '{"_time":"2026-11-15T19:12:00Z","audit.severity":"high","audit.kind":"privilege","audit.agent":"agent","log_type":"journal","_msg":"user NOT in sudoers"}'
+    row '{"_time":"2026-11-15T19:11:00Z","audit.severity":"medium","audit.kind":"store","log_type":"journal","_msg":"Please specify only one"}'
+    COUNT=5 run "$OP" audit events --limit 2
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == "2026-11-15 19:13:07  medium  store                -                             Please specify only one (x3, from 2026-11-15 19:13:00)" ]] || { echo "$output"; return 1; }
+    [[ "${lines[1]}" == *"high    privilege            agent                         user NOT in sudoers" ]] || { echo "$output"; return 1; }
+    [ "${#lines[@]}" = 3 ] || { echo "$output"; return 1; }
+    [[ "${lines[2]}" == *"newest 2 rows (4 lines) shown, --limit <n> for more"* ]] || { echo "$output"; return 1; }
 }
