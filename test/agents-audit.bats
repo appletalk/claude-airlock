@@ -462,3 +462,17 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     [ "${#lines[@]}" = 3 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" != *"(x2"* && "${lines[1]}" != *"(x2"* ]] || { echo "$output"; return 1; }
 }
+
+@test "events --full: each event's whole text under its row, every line cleaned and wrapped; rows alone without it" {
+    row "$(printf '{"_time":"2026-11-15T20:35:15Z","audit.severity":"high","audit.kind":"privilege","audit.agent":"agent","log_type":"journal","_msg":"agent : user NOT in sudoers ; COMMAND=/usr/bin/true\\nsecond line \\u001b]52;c;aGk=\\u0007end %s"}' "$(printf 'w%.0s' $(seq 150))")"
+    row '{"_time":"2026-11-15T20:35:00Z","audit.severity":"medium","audit.kind":"envoy-refused","audit.agent":"agent","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.method":"CONNECT","envoy.authority":"example.org:443","envoy.route":"deny-connect","envoy.status":"403","envoy.details":"direct_response"}'
+    COUNT=2 run "$OP" audit events --full
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    ! printf '%s' "$output" | LC_ALL=C grep -qP '[\x00-\x08\x0b-\x1f\x7f]' || return 1
+    [[ "${lines[1]}" == "      agent : user NOT in sudoers ; COMMAND=/usr/bin/true" ]] || { echo "$output"; return 1; }
+    [[ "${lines[2]}" == "      second line ?]52;c;aGk=?end "* ]] || { echo "$output"; return 1; }
+    for l in "${lines[@]}"; do [ "${#l}" -le 200 ] || { echo "a line over 200: $l"; return 1; }; done
+    grep -qx '      listener=agent-infra method=CONNECT authority=example.org:443 route=deny-connect status=403 details=direct_response' <<< "$output" || { echo "$output"; return 1; }
+    run "$OP" audit events
+    [ "${#lines[@]}" = 3 ] || { echo "$output"; return 1; }
+}

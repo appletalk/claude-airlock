@@ -57,11 +57,12 @@
 #   <command> audit ui [--port <n>]     the store's web UI on http://127.0.0.1:9429/select/vmui/,
 #                                       for you alone, until Ctrl-C (or 30 min idle, 4 h at most)
 #   <command> audit events [--severity high|medium|low|info] [--kind <kind>] [--agent <name>]
-#                          [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]
+#                          [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] [--full]
 #                                       what the store rated, at that severity and above (default
 #                                       medium, the last 24 h, newest 50 rows): severity, kind, agent,
 #                                       session and what happened (repeats in a row as one, counted;
-#                                       the newest 10000 lines read),
+#                                       the newest 10000 lines read); --full: each event's whole
+#                                       text under its row, wrapped to the terminal
 #                                       then a count by severity
 set -euo pipefail
 # Internal to this script (set per call below), never taken from the caller's environment.
@@ -1097,7 +1098,7 @@ audit_ui() {
 # above, newest first, from one fixed query: kind and agent are checked against their shape
 # before they go in (no quote or space can reach the query).
 audit_events() {
-    local since=24h limit=50 sev=medium kind="" agent="" cutoff W
+    local since=24h limit=50 sev=medium kind="" agent="" full=0 cutoff W
     while [ $# -gt 0 ]; do
         case "$1" in
             --since) [ $# -ge 2 ] || die "--since needs <n>d, <n>h or YYYY-MM-DD"; since=$2; shift ;;
@@ -1105,16 +1106,19 @@ audit_events() {
             --severity) [ $# -ge 2 ] && [[ "$2" =~ ^(high|medium|low|info)$ ]] || die "--severity needs high, medium, low or info"; sev=$2; shift ;;
             --kind) [ $# -ge 2 ] && [[ "$2" =~ ^[a-z][a-z-]{0,31}$ ]] || die "--kind needs a kind (envoy-refused, privilege, login, session, nft-drop, ...)"; kind=$2; shift ;;
             --agent) [ $# -ge 2 ] && [[ "$2" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "--agent needs an agent user's name"; agent=$2; shift ;;
-            *) die "usage: $CMD audit events [--severity high|medium|low|info] [--kind <kind>] [--agent <name>] [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]" ;;
+            --full) full=1 ;;
+            *) die "usage: $CMD audit events [--severity high|medium|low|info] [--kind <kind>] [--agent <name>] [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] [--full]" ;;
         esac
         shift
     done
     cutoff="$(since_epoch "$since")"
     audit_ready
     set_cols
-    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" "$sev" "$kind" "$agent" <<"PY" | rows_out "$W"
-import datetime, json, re, subprocess, sys
+    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" "$sev" "$kind" "$agent" "$full" "$W" <<"PY" | rows_out "$W"
+import datetime, json, re, subprocess, sys, textwrap
 sock, start, limit, cmd, sev, kind, agent = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
+full, width = sys.argv[8] == "1", int(sys.argv[9])
+FULL_MAX = 2000   # characters of one event's whole text under --full
 ORDER = ["high", "medium", "low", "info"]
 levels = ORDER[:ORDER.index(sev) + 1]
 
@@ -1162,7 +1166,7 @@ if agent:
 FETCH = 10000
 rows = query(f"{f} | sort by (_time desc) | limit {FETCH} | fields _time, audit.severity, audit.kind, audit.agent, "
              "audit.session, audit.redacted, log_type, _msg, envoy.method, envoy.authority, envoy.path, envoy.route, "
-             "envoy.status, envoy.sni")
+             "envoy.status, envoy.sni, envoy.flags, envoy.details, envoy.listener")
 counts = {r.get("audit.severity", ""): r.get("n", "0") for r in query(f"{f} | stats by (audit.severity) count() n")}
 groups = []   # [first row (newest), oldest time, count, key, what, who, flag]
 for r in rows:
@@ -1193,6 +1197,21 @@ for r, oldest, n, _, what, who, flag in groups:
     run = f" (x{n}, from {when(oldest)})" if n > 1 else ""
     print(f"{when(r.get('_time'))}  {printable(r.get('audit.severity') or '?', 6):<6}  {printable(r.get('audit.kind') or '?', 19):<19}  "
           f"{printable(who, 28):<28}  {printable(what, 160)}{flag}{run}")
+    if full:
+        # The whole text under the row, each line cleaned (a newline in it starts a new one),
+        # wrapped to the terminal, at most FULL_MAX characters in all.
+        if r.get("log_type") in ("envoy-access", "envoy-web"):
+            text = " ".join(f"{k.split('.', 1)[1]}={r[k]}" for k in ("envoy.listener", "envoy.method", "envoy.authority",
+                            "envoy.path", "envoy.sni", "envoy.route", "envoy.status", "envoy.flags", "envoy.details") if r.get(k))
+        else:
+            text = r.get("_msg") or ""
+        cut = len(text) > FULL_MAX
+        for part in text[:FULL_MAX].split("\n"):
+            for line in textwrap.wrap(printable(part, FULL_MAX), max(20, width - 6), break_long_words=True,
+                                      break_on_hyphens=False) or [""]:
+                print("      " + line)
+        if cut:
+            print(f"      ...[cut at {FULL_MAX} characters]")
 by = ", ".join(f"{s} {counts[s]}" for s in levels if s in counts) or "none"
 total = sum(int(v) for v in counts.values() if v.isdigit())
 if len(rows) == FETCH and len(groups) < limit and total > lines:

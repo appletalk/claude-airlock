@@ -64,7 +64,7 @@ _airlock_agents() {
                     case "${COMP_WORDS[COMP_CWORD-1]}" in
                         --severity) words=(high medium low info) ;;
                         --kind) words=(envoy-refused envoy-web-refused privilege login session nft-drop journald-suppressed envoy-service store agent-process envoy-allowed envoy-web-allowed) ;;
-                        *) words=(--severity --kind --agent --since --limit) ;;
+                        *) words=(--severity --kind --agent --since --limit --full) ;;
                     esac
                 fi ;;
         esac
