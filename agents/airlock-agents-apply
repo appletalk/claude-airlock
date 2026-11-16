@@ -18,7 +18,9 @@
 # subordinate id ranges, home image sizes and resource ceilings, and for web research the web
 # and guard users, the inbox and queue paths and the names the question check holds back.
 # Names derive from the users: units <user>-session@, <web>-worker, the queue /srv/<web>, the
-# inbox /srv/<agent>-inbox, unless the site file says otherwise.
+# inbox /srv/<agent>-inbox, unless the site file says otherwise. With `audit on`, also the audit
+# store (docs/agents.md, Audit): the airlock-audit account, a local VictoriaLogs behind a Unix
+# socket and Vector feeding it the agents' lines.
 # shellcheck disable=SC2016  # sh -c '...' _ args: expanded by the inner shell, on purpose
 set -euo pipefail
 umask 022
@@ -54,7 +56,8 @@ if [ "$mode" = record ]; then
     [ "$(id -u)" = 0 ] || [ -n "$ROOT" ] || die "run as root"
     t="$(mktemp)"; trap 'rm -f "$t"' EXIT
     { find "$ROOT$LIBDIR" -maxdepth 1 -type f; find "$ROOT$SHARE" -type f ! -name 'TOOLKIT.sha256*'; echo "$ROOT/usr/local/sbin/airlock-agents-apply"
-        [ ! -f "$ROOT/usr/local/sbin/update-runsc" ] || echo "$ROOT/usr/local/sbin/update-runsc"; } \
+        [ ! -f "$ROOT/usr/local/sbin/update-runsc" ] || echo "$ROOT/usr/local/sbin/update-runsc"
+        [ ! -f "$ROOT/usr/local/sbin/update-victorialogs" ] || echo "$ROOT/usr/local/sbin/update-victorialogs"; } \
         | LC_ALL=C sort | sed "s#^$ROOT##" | while IFS= read -r f; do printf '%s  %s\n' "$(sha256sum < "$ROOT$f" | cut -d' ' -f1)" "$f"; done > "$t"
     install -m 0644 "$t" "$ROOT$SHARE/TOOLKIT.sha256.new" && mv -f "$ROOT$SHARE/TOOLKIT.sha256.new" "$ROOT$SHARE/TOOLKIT.sha256"
     echo "recorded $(wc -l < "$ROOT$SHARE/TOOLKIT.sha256") toolkit files"
@@ -66,6 +69,7 @@ site="${site:-$ROOT$ETC/agents.conf}"
 # ---- parse ------------------------------------------------------------------------------------
 
 OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on OP_UID="" OP_GID=""
+AUDIT=off AUDIT_RETENTION=90d AUDIT_MAX_DISK=2G AUDIT_PREFIXES=()
 # The first systemd whose ProtectControlGroups=private works for user@.service (render_manager).
 CGNS_SYSTEMD=258
 ROLES=(agent web guard)
@@ -97,6 +101,27 @@ while IFS= read -r line || [ -n "$line" ]; do
             # Boxes don't run under it yet.
             [ "${#w[@]}" = 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: runsc on|off"
             RUNSC=${w[1]} ;;
+        audit)
+            # on: the audit store (docs/agents.md, Audit). Options: retention <n>d (default 90d),
+            # max-disk <n>G (default 2G: VictoriaLogs drops the oldest days past it).
+            [ "${#w[@]}" -ge 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: audit on|off [retention <n>d] [max-disk <n>G]"
+            AUDIT=${w[1]}
+            i=2
+            while [ "$i" -lt "${#w[@]}" ]; do
+                k=${w[$i]} v=${w[$((i + 1))]:-}
+                [ -n "$v" ] || die "$where: $k needs a value"
+                case "$k" in
+                    retention) [[ "$v" =~ ^[1-9][0-9]{0,3}d$ ]] || die "$where: bad retention '$v' (like 90d)"; AUDIT_RETENTION=$v ;;
+                    max-disk) [[ "$v" =~ ^[1-9][0-9]{0,4}G$ ]] || die "$where: bad max-disk '$v' (like 2G)"; AUDIT_MAX_DISK=$v ;;
+                    *) die "$where: unknown audit option '$k' (retention, max-disk)" ;;
+                esac
+                i=$((i + 2))
+            done ;;
+        audit-nft-prefix)
+            # The log prefixes of the nftables rules that drop the agents' traffic, when the site
+            # writes those rules itself (external nftables); the toolkit's own table's otherwise.
+            [ "${#w[@]}" -gt 1 ] || die "$where: audit-nft-prefix lists nothing"
+            for v in "${w[@]:1}"; do [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}:?$ ]] || die "$where: bad nft log prefix '$v' (letters, digits, _ . -, an optional trailing colon)"; AUDIT_PREFIXES+=("$v"); done ;;
         operator|command|inbox|queue|daily-cap)
             [ "${#w[@]}" = 2 ] || die "$where: want: ${w[0]} <value>"
             v=${w[1]}
@@ -154,7 +179,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         internal-host)
             [ "${#w[@]}" -gt 1 ] || die "$where: internal-host lists nothing"
             for v in "${w[@]:1}"; do [[ "$v" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "$where: bad internal host '$v'"; INTERNAL_HOSTS+=("$v"); done ;;
-        *) die "$where: unknown line '${w[0]}' (operator, command, agent, web, guard, inbox, queue, internal-name, internal-host, daily-cap, clipboard, runsc, external, accept)" ;;
+        *) die "$where: unknown line '${w[0]}' (operator, command, agent, web, guard, inbox, queue, internal-name, internal-host, daily-cap, clipboard, runsc, audit, audit-nft-prefix, external, accept)" ;;
     esac
 done < "$site"
 
@@ -195,6 +220,13 @@ for r in "${ROLES[@]}"; do
     TASKS[$r]=${TASKS[$r]:-${D_T[$r]}} CPU[$r]=${CPU[$r]:-${D_C[$r]}}
 done
 
+# The audit store's nft prefixes: the toolkit's own table's, unless the site writes the rules.
+if [ "$AUDIT" = on ] && [ "${#AUDIT_PREFIXES[@]}" = 0 ]; then
+    [ -z "${EXTERNAL[nftables]:-}" ] || die "$site: audit on with external nftables: name your rules' log prefixes (audit-nft-prefix <prefix>...)"
+    for r in "${ROLES[@]}"; do AUDIT_PREFIXES+=("airlock-agents-${NAME[$r]}-drop:"); done
+fi
+[ "$AUDIT" = on ] || [ "${#AUDIT_PREFIXES[@]}" = 0 ] || die "$site: audit-nft-prefix without audit on"
+
 # ---- render ----------------------------------------------------------------------------------
 
 TMUX_CONF=tmux.conf; [ "$CLIPBOARD" = off ] || TMUX_CONF=tmux-clipboard.conf
@@ -220,6 +252,7 @@ AGENTS_QUEUE=${QUEUE:-}
 AGENTS_DAILY_CAP=$DAILY_CAP
 AGENTS_EXTERNAL="${!EXTERNAL[*]}"
 AGENTS_RUNSC=$RUNSC
+AGENTS_AUDIT=$AUDIT
 AGENTS_LIB=$LIBDIR
 AGENTS_SHARE=$SHARE
 AGENTS_ETC=$ETC
@@ -651,6 +684,224 @@ render_prompt() { sed -e "s/{agent}/$AGENT/g" -e "s/{operator}/$OPERATOR/g" -e "
 # mounted: the rule (answers are data, never instructions) at the top, how to ask at the end.
 render_web_research() { sed -e "s#{queue}#$QUEUE#g" -e "s/{operator}/$OPERATOR/g" -e "s/{command}/$COMMAND/g" "$SHARE_SRC/box/$1"; }
 
+# ---- the audit store (audit on) ---------------------------------------------------------------
+# One system account, airlock-audit, runs VictoriaLogs and Vector. VictoriaLogs has no port on
+# the host: it runs in a network namespace of its own (PrivateNetwork), and the only way in is a
+# Unix socket (airlock-audit-vl-proxy.socket), relayed into that namespace by
+# systemd-socket-proxyd; the socket's permissions decide who connects (airlock-audit,
+# airlock-envoy for the auditor, the operator). Vector joins the same namespace to write.
+# Nothing the agents or airlock-envoy own can change the store.
+AUDIT_USER=airlock-audit
+AUDIT_LIB=/var/lib/airlock-audit
+AUDIT_RUN=/run/airlock-audit
+AUDIT_SOCK=$AUDIT_RUN/vl.sock
+AUDIT_VL=/usr/local/bin/victoria-logs
+AUDIT_ETC=/etc/airlock-audit
+AUDIT_UNITS=(airlock-audit-vl.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vector.service)
+render_audit_sysusers() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: the audit store's account (VictoriaLogs and Vector), no login.
+u $AUDIT_USER - "airlock audit store" $AUDIT_LIB /usr/sbin/nologin
+EOF
+}
+render_audit_tmpfiles() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: the audit store's data, its account's alone.
+d $AUDIT_LIB 0700 $AUDIT_USER $AUDIT_USER -
+d $AUDIT_LIB/vl 0700 $AUDIT_USER $AUDIT_USER -
+d $AUDIT_LIB/vector 0700 $AUDIT_USER $AUDIT_USER -
+EOF
+}
+# The sandbox the three services share (each adds its own paths and capabilities).
+audit_sandbox() {
+    cat <<EOF
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+EOF
+}
+render_audit_vl_unit() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: the audit store, a VictoriaLogs with no port on the host (its
+# own network namespace); airlock-audit-vl-proxy.socket is the only way in.
+[Unit]
+Description=airlock audit store (VictoriaLogs)
+
+[Service]
+User=$AUDIT_USER
+Group=$AUDIT_USER
+ExecStart=$AUDIT_VL -storageDataPath=$AUDIT_LIB/vl -retentionPeriod=$AUDIT_RETENTION -retention.maxDiskSpaceUsageBytes=$(( ${AUDIT_MAX_DISK%G} * 1073741824 )) -httpListenAddr=127.0.0.1:9428 -loggerLevel=WARN
+Restart=on-failure
+RestartSec=5
+CapabilityBoundingSet=
+ReadWritePaths=$AUDIT_LIB/vl
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=2G
+$(audit_sandbox)
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+render_audit_socket() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: the one way into the audit store. Connecting needs write on
+# the socket: $AUDIT_USER owns it (0600); airlock-envoy (the auditor's listener) and $OPERATOR
+# get an ACL entry, nobody else.
+[Unit]
+Description=airlock audit store socket
+
+[Socket]
+ListenStream=$AUDIT_SOCK
+SocketUser=$AUDIT_USER
+SocketGroup=$AUDIT_USER
+SocketMode=0600
+DirectoryMode=0711
+ExecStartPost=/usr/bin/setfacl -m u:airlock-envoy:rw,u:$OPERATOR:rw $AUDIT_SOCK
+
+[Install]
+WantedBy=sockets.target
+EOF
+}
+render_audit_proxy_unit() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: relays airlock-audit-vl-proxy.socket into the store's
+# network namespace.
+[Unit]
+Description=airlock audit store socket relay
+Requires=airlock-audit-vl.service
+After=airlock-audit-vl.service
+JoinsNamespaceOf=airlock-audit-vl.service
+
+[Service]
+User=$AUDIT_USER
+Group=$AUDIT_USER
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:9428
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+$(audit_sandbox)
+EOF
+}
+render_audit_vector_unit() {
+    cat <<EOF
+# Rendered by airlock-agents-apply: Vector feeding the audit store the agents' lines. It reads
+# with CAP_DAC_READ_SEARCH (Envoy's logs are 0600, the journal its group's), but sees only
+# Envoy's log directory and the journal: the rest of /var/log and every home are hidden.
+[Unit]
+Description=airlock audit collector (Vector)
+Requires=airlock-audit-vl.service
+After=airlock-audit-vl.service
+JoinsNamespaceOf=airlock-audit-vl.service
+
+[Service]
+User=$AUDIT_USER
+Group=$AUDIT_USER
+ExecStart=/usr/bin/vector --config $AUDIT_ETC/vector.yaml
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+TemporaryFileSystem=/var/log
+BindReadOnlyPaths=-/var/log/airlock-envoy -/var/log/journal
+ReadWritePaths=$AUDIT_LIB/vector
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=512M
+$(audit_sandbox)
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+# A VRL array of strings, from values the parser already restricted (no quotes, no backslashes).
+vrl_strings() { local v out=""; for v in "$@"; do out="$out${out:+, }\"$v\""; done; printf '[%s]' "$out"; }
+render_audit_vector() {
+    local r p uids=() names=() alt ualt nft=""
+    for r in "${ROLES[@]}"; do uids+=("${UID_OF[$r]}"); names+=("${NAME[$r]}"); done
+    alt="$(IFS='|'; echo "${names[*]}")" ualt="$(IFS='|'; echo "${uids[*]}")"
+    for p in "${AUDIT_PREFIXES[@]}"; do nft="$nft${nft:+ || }contains(msg, \"$p\")"; done
+    cat <<EOF
+# Rendered by airlock-agents-apply from agents.conf: what reaches the audit store. Envoy's two
+# logs, read as they are written; from the journal only the agents' lines: their users and
+# managers (minus box output), airlock-envoy's and the store's own units, logins, polkit and
+# sudo lines naming an agent, and the kernel's drops with the agents' nft log prefixes.
+data_dir: $AUDIT_LIB/vector
+sources:
+  envoy:
+    type: file
+    include: [/var/log/airlock-envoy/access.jsonl*, /var/log/airlock-envoy/web.jsonl*]
+    exclude: ["/var/log/airlock-envoy/*.gz"]
+    read_from: beginning
+    fingerprint:
+      strategy: device_and_inode
+  journal:
+    type: journald
+    current_boot_only: false
+    extra_args: ["--since=-$AUDIT_RETENTION"]
+transforms:
+  envoy_fields:
+    type: remap
+    inputs: [envoy]
+    source: |
+      .log_type = if contains(to_string(.file) ?? "", "/web.jsonl") { "envoy-web" } else { "envoy-access" }
+      parsed, err = parse_json(to_string(.message) ?? "")
+      if err == null && is_object(parsed) { . = merge(., object!(parsed)) }
+  journal_agents:
+    type: filter
+    inputs: [journal]
+    condition:
+      type: vrl
+      source: |
+        uid = to_string(._UID) ?? ""
+        comm = to_string(._COMM) ?? ""
+        unit = to_string(._SYSTEMD_UNIT) ?? ""
+        about = to_string(.UNIT) ?? to_string(.USER_UNIT) ?? ""
+        ident = to_string(.SYSLOG_IDENTIFIER) ?? ""
+        transport = to_string(._TRANSPORT) ?? ""
+        msg = to_string(.message) ?? ""
+        (includes($(vrl_strings "${uids[@]}"), uid) && comm != "conmon") ||
+          starts_with(unit, "airlock-envoy") || starts_with(unit, "airlock-audit") ||
+          match(about, r'^user(@|-)($ualt)[.]') ||
+          (includes(["systemd-logind", "systemd-machined", "polkitd", "sudo"], ident) &&
+            match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)')) ||
+          (transport == "kernel" && ($nft))
+  journal_fields:
+    type: remap
+    inputs: [journal_agents]
+    source: |
+      .log_type = "journal"
+sinks:
+  store:
+    type: elasticsearch
+    inputs: [envoy_fields, journal_fields]
+    endpoints: ["http://127.0.0.1:9428/insert/elasticsearch/"]
+    api_version: v8
+    compression: gzip
+    healthcheck:
+      enabled: false
+    query:
+      _msg_field: message
+      _time_field: timestamp
+      _stream_fields: log_type,host
+EOF
+}
+
 # Where the static files come from: the installed copy, or this checkout's (tests, --render).
 SHARE_SRC="$(dirname "$(readlink -f "$0")")"
 [ -d "$SHARE_SRC/box" ] || SHARE_SRC=$SHARE   # installed: box/ and templates/ there
@@ -682,6 +933,12 @@ file_list() {
         for f in web.py agent_web.py verdict.schema.json web-research.md web-research-rule.md; do echo "$QUEUE/lib/$f 0644"; done
     fi
     echo "/usr/local/bin/$COMMAND 0755"
+    if [ "$AUDIT" = on ]; then
+        echo "/etc/sysusers.d/airlock-audit.conf 0644"
+        echo "/etc/tmpfiles.d/airlock-audit.conf 0644"
+        echo "$AUDIT_ETC/vector.yaml 0644"
+        for u in "${AUDIT_UNITS[@]}"; do echo "/etc/systemd/system/$u 0644"; done
+    fi
 }
 render_file() {  # render_file <dest path>
     local p=$1 r
@@ -704,6 +961,13 @@ render_file() {  # render_file <dest path>
         "$QUEUE/lib/"*-prompt.md) render_prompt "${p##*/}" ;;
         "$QUEUE/lib/web-research.md"|"$QUEUE/lib/web-research-rule.md") render_web_research "${p##*/}" ;;
         "$QUEUE/lib/"*) cat "$SHARE_SRC/box/${p##*/}" ;;
+        /etc/sysusers.d/airlock-audit.conf) render_audit_sysusers ;;
+        /etc/tmpfiles.d/airlock-audit.conf) render_audit_tmpfiles ;;
+        "$AUDIT_ETC/vector.yaml") render_audit_vector ;;
+        /etc/systemd/system/airlock-audit-vl.service) render_audit_vl_unit ;;
+        /etc/systemd/system/airlock-audit-vl-proxy.socket) render_audit_socket ;;
+        /etc/systemd/system/airlock-audit-vl-proxy.service) render_audit_proxy_unit ;;
+        /etc/systemd/system/airlock-audit-vector.service) render_audit_vector_unit ;;
         "/usr/local/bin/$COMMAND") printf '#!/bin/sh\n# Rendered by airlock-agents-apply: the operator command, as %s.\nexec %s/operator "$@"\n' "$COMMAND" "$LIBDIR" ;;
         *) die "internal: no renderer for $p" ;;
     esac
@@ -886,6 +1150,21 @@ if [ -n "${EXTERNAL[polkit]:-}" ]; then
         done
         [ "$granted" = 1 ] || pause "polkit is managed elsewhere, but no rule lets $OPERATOR open a host shell as ${NAME[$r]}: see --render's external/etc/polkit-1/rules.d/50-airlock-agents.rules"
     done
+fi
+# The audit store's parts the host provides: Vector (the distribution's package) and
+# systemd-socket-proxyd. VictoriaLogs is the toolkit's (sudo update-victorialogs); missing, the
+# store waits (a note), and a copy anyone but root can write is a pause (it runs as airlock-audit
+# over the record of what the agents did).
+if [ "$AUDIT" = on ]; then
+    [ -n "$ROOT" ] || [ -x /usr/bin/vector ] || pause "audit on needs Vector at /usr/bin/vector (Arch: pacman -S vector; Debian/Ubuntu: Vector's own apt repository, vector.dev)"
+    [ -n "$ROOT" ] || [ -x /usr/lib/systemd/systemd-socket-proxyd ] || pause "audit on needs /usr/lib/systemd/systemd-socket-proxyd"
+    [ -n "$ROOT" ] || getent passwd airlock-envoy >/dev/null || pause "audit on needs airlock-envoy installed (its account gets the store's socket, for the auditor)"
+    vl="$ROOT$AUDIT_VL"
+    if [ -e "$vl" ] || [ -L "$vl" ]; then
+        if [ -L "$vl" ] || [ ! -f "$vl" ] || { [ -z "$ROOT" ] && [ "$(stat -c %u "$vl")" != 0 ]; } || [ $(( 8#$(stat -c %a "$vl") & 8#022 )) != 0 ]; then
+            pause "$AUDIT_VL must be a regular file owned by root and writable by root alone (sudo update-victorialogs installs it so)"
+        fi
+    fi
 fi
 # gVisor's runsc: boxes don't run under it yet, so a missing one is only a note (none with runsc
 # off). One anyone but root can write is a pause whatever the setting, while it is there: the
@@ -1119,7 +1398,7 @@ else step "chmod 0700 $OP_HOME (was $mode_h)" chmod 0700 "$ROOT$OP_HOME"; fi
 
 # The rendered files, each installed when it differs (written beside and renamed in), and the
 # ones an earlier apply installed that this one no longer renders removed.
-units_changed=0 user_units_changed=0 nft_changed=0
+units_changed=0 user_units_changed=0 nft_changed=0 audit_changed=0
 # What an earlier run changed but didn't get to apply (it stopped half-way): done now.
 pending="$ROOT$ETC/.pending"
 if [ -f "$pending" ]; then
@@ -1150,8 +1429,15 @@ while read -r p m; do
     cp "$work/f" "$work/f.$changes"
     step "install $p" install_file "$work/f.$changes" "$ROOT$p" "$m"
     manifest_set "$p" "$(sha256sum < "$work/f" | cut -d' ' -f1)"
+    case "$p" in /etc/systemd/system/airlock-audit-*|"$AUDIT_ETC"/*) audit_changed=1 ;; esac
     case "$p" in /etc/systemd/system/*) units_changed=1; pend reload ;; /etc/systemd/user/*) user_units_changed=1; pend user-units ;; /etc/airlock-agents.nft) nft_changed=1; pend nft ;; esac
 done < <(file_list)
+# The audit store turned off: its units stop before their files go (its data stays: removing a
+# record is the operator's decision, rm -r /var/lib/airlock-audit).
+if [ "$AUDIT" = off ] && as_installed /etc/systemd/system/airlock-audit-vl.service; then
+    step "disable and stop the audit store (audit off; its data in /var/lib/airlock-audit stays)" \
+        systemctl disable --now airlock-audit-vector.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vl.service
+fi
 # nftables now managed elsewhere (checked live above): stop its own unit before its files go.
 if [ -n "${EXTERNAL[nftables]:-}" ] && as_installed /etc/systemd/system/airlock-agents-nft.service; then
     step "disable airlock-agents-nft.service (nftables is managed elsewhere now)" systemctl disable --now airlock-agents-nft.service
@@ -1161,7 +1447,7 @@ if [ -f "$manifest" ]; then
         first_field_is "$p" < "$work/now" && continue
         [ -e "$ROOT$p" ] || continue
         case "$p" in
-            /etc/systemd/*|/etc/polkit-1/rules.d/50-airlock-agents.rules|/etc/tmpfiles.d/airlock-agents-*|/etc/airlock-agents.nft|/etc/profile.d/airlock-agents.sh|/srv/*/lib/*|/usr/local/bin/*) ;;
+            /etc/systemd/*|/etc/polkit-1/rules.d/50-airlock-agents.rules|/etc/tmpfiles.d/airlock-agents-*|/etc/airlock-agents.nft|/etc/profile.d/airlock-agents.sh|/srv/*/lib/*|/usr/local/bin/*|/etc/sysusers.d/airlock-audit.conf|/etc/tmpfiles.d/airlock-audit.conf|/etc/airlock-audit/*) ;;
             *) echo "note: $manifest names $p, which this toolkit never renders; left alone"; continue ;;
         esac
         # only exactly what it wrote; anything else there is someone's (a site's own copy of a part
@@ -1180,6 +1466,7 @@ if [ "$units_changed" = 1 ]; then
         units=()
         [ -n "${EXTERNAL[nftables]:-}" ] || units+=(/etc/systemd/system/airlock-agents-nft.service)
         for r in "${ROLES[@]}"; do units+=("/etc/systemd/system/$(mount_unit "/home/${NAME[$r]}")"); done
+        if [ "$AUDIT" = on ]; then for u in "${AUDIT_UNITS[@]}"; do units+=("/etc/systemd/system/$u"); done; fi
         for u in "${units[@]}"; do
             systemd-analyze verify "$u" || die "systemd-analyze verify rejected $u (installed, not reloaded; fix and rerun)"
         done
@@ -1354,6 +1641,26 @@ for r in "${ROLES[@]}"; do
         else echo "would: starter dirs in $home, created as $u"; fi
     fi
 done
+
+# The audit store: its account, its data directories, its units enabled and running.
+if [ "$AUDIT" = on ]; then
+    if getent passwd "$AUDIT_USER" >/dev/null; then ok "account $AUDIT_USER"
+    else step "create the account $AUDIT_USER (systemd-sysusers)" systemd-sysusers /etc/sysusers.d/airlock-audit.conf; fi
+    if [ "$(stat -c %a "$ROOT$AUDIT_LIB/vl" 2>/dev/null)" = 700 ] && [ "$(stat -c %a "$ROOT$AUDIT_LIB/vector" 2>/dev/null)" = 700 ] \
+            && { [ -n "$ROOT" ] || [ "$(stat -c %U "$AUDIT_LIB/vl")" = "$AUDIT_USER" ]; }; then ok "$AUDIT_LIB: $AUDIT_USER's, 0700"
+    else step "$AUDIT_LIB: $AUDIT_USER's, 0700" systemd-tmpfiles --create /etc/tmpfiles.d/airlock-audit.conf; fi
+    if [ ! -f "$ROOT$AUDIT_VL" ]; then
+        echo "note: the audit store waits for VictoriaLogs: sudo update-victorialogs, then apply again" >&2
+    elif [ "$audit_changed" = 0 ] && systemctl is-enabled --quiet airlock-audit-vl.service 2>/dev/null \
+            && systemctl is-active --quiet airlock-audit-vl.service 2>/dev/null \
+            && systemctl is-active --quiet airlock-audit-vl-proxy.socket 2>/dev/null \
+            && systemctl is-active --quiet airlock-audit-vector.service 2>/dev/null; then
+        ok "the audit store and its collector enabled and running"
+    else
+        step "enable and (re)start the audit store, its socket and its collector" \
+            sh -c 'systemctl enable airlock-audit-vl.service airlock-audit-vl-proxy.socket airlock-audit-vector.service && systemctl restart airlock-audit-vl.service && systemctl restart airlock-audit-vl-proxy.socket airlock-audit-vector.service'
+    fi
+fi
 
 # What airlock-envoy must give each agent user (its site file is the operator's to change).
 missing_socks=""

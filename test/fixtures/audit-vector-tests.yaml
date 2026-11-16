@@ -1,0 +1,48 @@
+# Unit tests for the audit store's Vector filter (vector test), against the config apply renders
+# for the test site (agents agent, agent-web, agent-guard; uids 1100-1102): test/agents.bats.
+tests:
+  - name: keep agent user line
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "1100", _COMM: "claude", _SYSTEMD_USER_UNIT: "agent-session@x.service", message: "hello"}}]
+    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(.message == "hello")'}]}]
+  - name: drop conmon box output
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "1100", _COMM: "conmon", message: "screen"}}]
+    no_outputs_from: [journal_agents]
+  - name: keep envoy unit
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "airlock-envoy-mint.service", message: "minted"}}]
+    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(.message == "minted")'}]}]
+  - name: keep system manager line about user@1101
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "init.scope", UNIT: "user@1101.service", message: "Started User Manager"}}]
+    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(.message == "Started User Manager")'}]}]
+  - name: drop system manager line about another user
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "init.scope", UNIT: "user@1000.service", message: "Started User Manager"}}]
+    no_outputs_from: [journal_agents]
+  - name: keep logind line naming agent-web
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 5 of user agent-web."}}]
+    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "agent-web"))'}]}]
+  - name: drop logind line for operator
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 6 of user alice."}}]
+    no_outputs_from: [journal_agents]
+  - name: drop logind line naming agentx (no boundary)
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 7 of user agentx."}}]
+    no_outputs_from: [journal_agents]
+  - name: keep sudo line naming agent
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "sudo", message: "agent : user NOT in sudoers ; TTY=pts/1"}}]
+    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(starts_with(string!(.message), "agent :"))'}]}]
+  - name: drop unrelated sudo
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "sudo", message: "alice : TTY=pts/1 ; COMMAND=/usr/bin/ls"}}]
+    no_outputs_from: [journal_agents]
+  - name: keep kernel agent drop
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_TRANSPORT: "kernel", message: "airlock-agents-agent-web-drop: IN= OUT=eth0 SRC=10.0.0.5"}}]
+    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "-drop:"))'}]}]
+  - name: drop other kernel drop
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_TRANSPORT: "kernel", message: "host-input-drop: IN=eth0 SRC=1.2.3.4"}}]
+    no_outputs_from: [journal_agents]
+  - name: drop unrelated service
+    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "sshd.service", message: "Accepted publickey for alice"}}]
+    no_outputs_from: [journal_agents]
+  - name: envoy access line parsed
+    inputs: [{insert_at: envoy_fields, type: log, log_fields: {file: "/var/log/airlock-envoy/access.jsonl", message: '{"status":"403","route":"deny-connect","user":"agent"}'}}]
+    outputs: [{extract_from: envoy_fields, conditions: [{type: vrl, source: 'assert!(.log_type == "envoy-access" && .route == "deny-connect" && .user == "agent")'}]}]
+  - name: envoy web line typed
+    inputs: [{insert_at: envoy_fields, type: log, log_fields: {file: "/var/log/airlock-envoy/web.jsonl-20261115T000000Z", message: 'not json'}}]
+    outputs: [{extract_from: envoy_fields, conditions: [{type: vrl, source: 'assert!(.log_type == "envoy-web" && .message == "not json")'}]}]

@@ -14,7 +14,7 @@ SHELLCHECK ?= $(shell command -v shellcheck 2>/dev/null || echo .tooling/bin/she
 BATS       ?= $(shell command -v bats 2>/dev/null || echo .tooling/bin/bats)
 
 # Shell we lint. The zsh integration is excluded — shellcheck doesn't parse zsh.
-SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh bin/update-runsc \
+SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bundle.sh bin/update-runsc bin/update-victorialogs \
                  image/init-firewall.sh image/entrypoint.sh \
                  config/airlock-statusline.sh \
                  hooks/pre-commit hooks/pre-merge-commit hooks/commit-msg scripts/private-names-check test/private-names-check-test.sh \

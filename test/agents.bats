@@ -100,7 +100,7 @@ S
 [ -n "${MOUNTED:-}" ]
 S
     printf '#!/bin/sh\nexit 0\n' > "$T/bin/crun"                  # installed (the agents' box runtime)
-    for c in systemctl loginctl mkfs.xfs chown nft; do
+    for c in systemctl loginctl mkfs.xfs chown nft systemd-sysusers; do
         printf '#!/bin/bash\necho "%s $*" >> "$LOG"\n' "$c" > "$T/bin/$c"
     done
     # Read-only queries are not actions: systemctl is-enabled/is-active and nft list answer
@@ -2637,6 +2637,17 @@ EOF
     [ "$status" -eq 1 ]; [[ "$output" == *"toolkit files differ from the install"*"update-runsc"* ]] || { echo "$output"; return 1; }
 }
 
+@test "the toolkit record lists update-victorialogs when it is installed" {
+    mkdir -p "$R/usr/local/share/airlock-agents" "$R/usr/local/lib/airlock-agents" "$R/usr/local/sbin"
+    cp "$REPO/agents/airlock-agents-apply" "$R/usr/local/sbin/airlock-agents-apply"
+    cp "$REPO/bin/update-victorialogs" "$R/usr/local/sbin/update-victorialogs"
+    run "$P" --record-toolkit
+    grep -q "^$(sha256sum < "$REPO/bin/update-victorialogs" | cut -d' ' -f1)  /usr/local/sbin/update-victorialogs$" "$R/usr/local/share/airlock-agents/TOOLKIT.sha256"
+    echo '# changed' >> "$R/usr/local/sbin/update-victorialogs"
+    run "$P"
+    [ "$status" -eq 1 ]; [[ "$output" == *"toolkit files differ from the install"*"update-victorialogs"* ]] || { echo "$output"; return 1; }
+}
+
 @test "external nftables: the toolkit's own table, or a drop outside an output chain, is not the site's drop" {
     printf 'external nftables\n' >> "$E/agents.conf"
     export NFT_RULESET="$T/ruleset"
@@ -3316,4 +3327,124 @@ P
     grep -q 'No RestrictAddressFamilies, SystemCallArchitectures or SystemCallFilter: before systemd 255' "$f"
     grep -qx 'TemporaryFileSystem=/mnt:ro' "$f"
     grep -qx 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "$RENDER/etc/systemd/system/user@1100.service.d/10-airlock-agents.conf"
+}
+
+# ---- the audit store (audit on) ---------------------------------------------------------------
+
+# audit_site [extra lines...]: the test site with audit on (and the given lines)
+audit_site() { site_file 1G 1G 1G; printf '%s\n' "audit on" "$@" >> "$E/agents.conf"; }
+audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
+
+@test "audit off (the default): no audit file is rendered" {
+    ! find "$RENDER" -path '*airlock-audit*' | grep -q .
+    ! grep -q '^AGENTS_AUDIT=on' "$AIRLOCK_AGENTS_ENV"
+}
+
+@test "audit on renders the account, data dirs, units and the collector's config" {
+    audit_site; audit_render
+    for f in etc/sysusers.d/airlock-audit.conf etc/tmpfiles.d/airlock-audit.conf etc/airlock-audit/vector.yaml \
+             etc/systemd/system/airlock-audit-vl.service etc/systemd/system/airlock-audit-vl-proxy.socket \
+             etc/systemd/system/airlock-audit-vl-proxy.service etc/systemd/system/airlock-audit-vector.service; do
+        [ -f "$T/ar/$f" ] || { echo "missing $f"; return 1; }
+    done
+    u="$T/ar/etc/systemd/system"
+    # the store: its own namespace, no host port; 90 days, 2 GB by default
+    grep -qx 'PrivateNetwork=yes' "$u/airlock-audit-vl.service"
+    grep -q -- '-retentionPeriod=90d -retention.maxDiskSpaceUsageBytes=2147483648 -httpListenAddr=127.0.0.1:9428' "$u/airlock-audit-vl.service"
+    grep -qx 'CapabilityBoundingSet=' "$u/airlock-audit-vl.service"
+    # the one way in: a 0600 socket with ACL entries for airlock-envoy and the operator alone
+    grep -qx 'ListenStream=/run/airlock-audit/vl.sock' "$u/airlock-audit-vl-proxy.socket"
+    grep -qx 'SocketMode=0600' "$u/airlock-audit-vl-proxy.socket"
+    grep -qx 'ExecStartPost=/usr/bin/setfacl -m u:airlock-envoy:rw,u:alice:rw /run/airlock-audit/vl.sock' "$u/airlock-audit-vl-proxy.socket"
+    # the relay and the collector join the store's namespace
+    grep -qx 'JoinsNamespaceOf=airlock-audit-vl.service' "$u/airlock-audit-vl-proxy.service"
+    grep -qx 'JoinsNamespaceOf=airlock-audit-vector.service' "$u/airlock-audit-vector.service" && return 1
+    grep -qx 'JoinsNamespaceOf=airlock-audit-vl.service' "$u/airlock-audit-vector.service"
+    # the collector reads 0600 files, but sees only Envoy's logs and the journal under /var/log
+    grep -qx 'CapabilityBoundingSet=CAP_DAC_READ_SEARCH' "$u/airlock-audit-vector.service"
+    grep -qx 'TemporaryFileSystem=/var/log' "$u/airlock-audit-vector.service"
+    grep -qx 'BindReadOnlyPaths=-/var/log/airlock-envoy -/var/log/journal' "$u/airlock-audit-vector.service"
+    # every sandboxed unit has NoNewPrivileges once (the collector's capability is ambient, kept)
+    for f in airlock-audit-vl.service airlock-audit-vl-proxy.service airlock-audit-vector.service; do
+        [ "$(grep -cx 'NoNewPrivileges=yes' "$u/$f")" = 1 ] || { echo "$f"; return 1; }
+    done
+    grep -q '^AGENTS_AUDIT=on' <("$P" --env)
+}
+
+@test "audit options: retention and max-disk; bad values, unknown options and stray lines refused" {
+    audit_site; sed -i 's/^audit on$/audit on retention 180d max-disk 5G/' "$E/agents.conf"; audit_render
+    grep -q -- '-retentionPeriod=180d -retention.maxDiskSpaceUsageBytes=5368709120 ' "$T/ar/etc/systemd/system/airlock-audit-vl.service"
+    grep -q -- '--since=-180d' "$T/ar/etc/airlock-audit/vector.yaml"
+    for bad in "audit on retention 90" "audit on max-disk 2T" "audit on keep 1" "audit maybe"; do
+        site_file 1G 1G 1G; echo "$bad" >> "$E/agents.conf"
+        run "$P" --env
+        [ "$status" -ne 0 ] || { echo "accepted: $bad"; return 1; }
+    done
+    site_file 1G 1G 1G; echo "audit-nft-prefix host-drop:" >> "$E/agents.conf"
+    run "$P" --env
+    [ "$status" -ne 0 ]; [[ "$output" == *"audit-nft-prefix without audit on"* ]]
+    audit_site 'audit-nft-prefix bad"prefix'
+    run "$P" --env
+    [ "$status" -ne 0 ]; [[ "$output" == *"bad nft log prefix"* ]]
+}
+
+@test "audit nft prefixes: the toolkit table's by default; with external nftables the site must name its own" {
+    audit_site; audit_render
+    for u in agent agent-web agent-guard; do grep -qF "contains(msg, \"airlock-agents-$u-drop:\")" "$T/ar/etc/airlock-audit/vector.yaml"; done
+    audit_site "external nftables"
+    run "$P" --env
+    [ "$status" -ne 0 ]; [[ "$output" == *"name your rules' log prefixes"* ]]
+    audit_site "external nftables" "audit-nft-prefix site-agent-drop: site-web-drop:"; audit_render
+    grep -qF 'contains(msg, "site-agent-drop:") || contains(msg, "site-web-drop:")' "$T/ar/etc/airlock-audit/vector.yaml"
+    ! grep -q 'airlock-agents-agent-drop' "$T/ar/etc/airlock-audit/vector.yaml"
+}
+
+@test "the collector's filter keeps the agents' lines and drops the rest (vector validate + vector test)" {
+    command -v vector >/dev/null || skip "no vector here"
+    audit_site; audit_render
+    sed "s#^data_dir: .*#data_dir: $T/vdata#" "$T/ar/etc/airlock-audit/vector.yaml" > "$T/v.yaml"; mkdir -p "$T/vdata"
+    run vector validate --no-environment "$T/v.yaml"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run vector test "$T/v.yaml" "$REPO/test/fixtures/audit-vector-tests.yaml"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *failed* ]]
+    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 15 ]
+}
+
+@test "apply with audit on: the account, the data dirs, then waits for VictoriaLogs; with it, enables the store" {
+    audit_site
+    run "$P"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"would: install /etc/systemd/system/airlock-audit-vl.service"* ]]
+    [[ "$output" == *"would: create the account airlock-audit (systemd-sysusers)"* ]]
+    [[ "$output" == *"would: /var/lib/airlock-audit: airlock-audit's, 0700"* ]]
+    [[ "$output" == *"note: the audit store waits for VictoriaLogs: sudo update-victorialogs"* ]]
+    mkdir -p "$R/usr/local/bin"; printf '\x7fELF' > "$R/usr/local/bin/victoria-logs"; chmod 0755 "$R/usr/local/bin/victoria-logs"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'systemd-sysusers /etc/sysusers.d/airlock-audit.conf' "$LOG"
+    grep -qx 'systemd-tmpfiles --create /etc/tmpfiles.d/airlock-audit.conf' "$LOG"
+    grep -qx 'systemctl enable airlock-audit-vl.service airlock-audit-vl-proxy.socket airlock-audit-vector.service' "$LOG"
+    grep -qx 'systemctl restart airlock-audit-vl.service' "$LOG"
+    # a VictoriaLogs others can write pauses the apply
+    chmod 0777 "$R/usr/local/bin/victoria-logs"
+    run "$P"
+    [[ "$output" == *"/usr/local/bin/victoria-logs must be a regular file owned by root and writable by root alone"* ]]
+}
+
+@test "audit off after on: the units stop before their files go; the data stays" {
+    audit_site
+    mkdir -p "$R/usr/local/bin" "$R/var/lib/airlock-audit/vl"; printf '\x7fELF' > "$R/usr/local/bin/victoria-logs"; chmod 0755 "$R/usr/local/bin/victoria-logs"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    site_file 1G 1G 1G
+    : > "$LOG"
+    run "$P" --confirm
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'systemctl disable --now airlock-audit-vector.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vl.service' "$LOG"
+    [ ! -e "$R/etc/systemd/system/airlock-audit-vl.service" ]
+    [ ! -e "$R/etc/airlock-audit/vector.yaml" ]
+    [ -d "$R/var/lib/airlock-audit/vl" ]
+    # the disable comes first: its log line precedes the reload that follows the removal
+    [ "$(grep -n 'disable --now airlock-audit' "$LOG" | cut -d: -f1)" -lt "$(grep -n 'daemon-reload' "$LOG" | tail -1 | cut -d: -f1)" ]
 }

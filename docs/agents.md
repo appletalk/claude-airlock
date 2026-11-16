@@ -282,6 +282,30 @@ A user config is yours once written: a later apply never changes it, but names a
 newer default has that it lacks (`note ... has no ...`). Add the line, or a commented-out one to
 say you've decided.
 
+## Audit (optional)
+
+`audit on` in `agents.conf` keeps a local record of what the agents did, for review on this
+machine (nothing leaves it):
+
+- **What goes in:** airlock-envoy's two logs (every request, tunnel and refusal, read as they
+  are written), and from the journal only the agents' lines: their users and user managers
+  (minus box output), airlock-envoy's units, logins, polkit and sudo lines that name an agent
+  user, and the kernel's drops with the agents' nft log prefixes. The rest of the journal stays
+  where it is.
+- **Where:** a VictoriaLogs (`/usr/local/bin/victoria-logs`, installed by `make install-agents`
+  from an image pinned by digest, `sudo update-victorialogs`) under its own account
+  `airlock-audit`, data in `/var/lib/airlock-audit`, kept 90 days up to 2 GB
+  (`audit on retention 180d max-disk 5G` to change). Vector (your distribution's package) feeds
+  it. Neither the agent users nor airlock-envoy can change what it holds.
+- **Access:** the store has no network port. It runs in a network namespace of its own; the
+  only way in is the socket `/run/airlock-audit/vl.sock`, which only `airlock-audit`,
+  `airlock-envoy` (for an auditor's listener) and you can connect to. To query it by hand:
+  `curl --unix-socket /run/airlock-audit/vl.sock http://x/select/logsql/query -d 'query=_time:1h | limit 10'`.
+- **With external nftables**, name your drop rules' log prefixes: `audit-nft-prefix
+  myhost-agent-drop: myhost-agent-web-drop:`.
+- `audit off` stops and disables the units; the data in `/var/lib/airlock-audit` stays until you
+  remove it.
+
 ## Good to know
 
 - Each box is named after its session: `airlock-<project>.<name>` (a web session's, its label),

@@ -18,6 +18,13 @@
 #                            /usr/local/bin when there is none, and otherwise reports a waiting
 #                            update (sudo update-runsc applies it). off: no runsc. Boxes don't
 #                            run under it yet (docs/gvisor.md)
+#   audit on|off [retention <n>d] [max-disk <n>G]
+#                            the audit store (default off; docs/agents.md, Audit): a local
+#                            VictoriaLogs behind a Unix socket, fed Envoy's logs and the agents'
+#                            journal lines by Vector (needs Vector installed; install-agents
+#                            installs VictoriaLogs). Defaults: retention 90d, max-disk 2G
+#   audit-nft-prefix <p>...  the log prefixes of your own nftables drop rules for the agents
+#                            (with external nftables); the toolkit's table's otherwise
 #   external <part>...       parts your own config repo manages: nftables, polkit, profile, runsc.
 #                            Not written here; checked live (--render shows what they must provide)
 #   accept <finding>...      findings you accept, so they don't pause an apply: wsl-interop,

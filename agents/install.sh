@@ -134,6 +134,7 @@ put 0644 "$SRC/../lib/clipboard-image.sh" "$LIBDIR/clipboard-image.sh"   # the o
 put 0755 "$SRC/operator" "$LIBDIR/operator"
 put 0755 "$SRC/airlock-agents-apply" /usr/local/sbin/airlock-agents-apply
 put 0755 "$SRC/../bin/update-runsc" /usr/local/sbin/update-runsc
+put 0755 "$SRC/../bin/update-victorialogs" /usr/local/sbin/update-victorialogs
 for f in containers.conf tmux.conf tmux-clipboard.conf completion.zsh completion.bash managed-settings-agent.json managed-settings-web.json managed-settings-guard.json; do put 0644 "$SRC/share/$f" "$SHARE/$f"; done
 for f in "$SRC"/box/* "$SRC"/templates/*; do d=${f%/*}; put 0644 "$f" "$SHARE/${d##*/}/${f##*/}"; done
 put 0644 "$SRC/agents.conf.example" "$SHARE/agents.conf.example"
@@ -162,6 +163,18 @@ if [ "${AGENTS_RUNSC:-on}" = on ]; then
         10) echo "==> gVisor: stop the agents' sessions ($AGENTS_COMMAND stop$([ -z "$AGENTS_WEB" ] || echo ", $AGENTS_COMMAND web stop")), then: sudo update-runsc; start them again after"
             echo "    (a runsc you installed yourself is replaced by that: to keep it, put external runsc in agents.conf instead)" ;;
         *) echo "install-agents: WARNING: runsc not installed or checked (above); boxes don't run under it yet. Retry: sudo update-runsc" >&2 ;;
+    esac
+fi
+
+# The audit store's VictoriaLogs (agents.conf: audit on): installed when there is none, otherwise
+# only checked against the pin (an update restarts the store, so it stays a step of its own).
+if [ "${AGENTS_AUDIT:-off}" = on ]; then
+    echo "==> VictoriaLogs (the audit store)"
+    rc=0; /usr/local/sbin/update-victorialogs --first || rc=$?
+    case "$rc" in
+        0) ;;
+        10) echo "==> VictoriaLogs differs from the pin: sudo update-victorialogs, then sudo systemctl restart airlock-audit-vl" ;;
+        *) echo "install-agents: WARNING: VictoriaLogs not installed (above); the audit store waits for it. Retry: sudo update-victorialogs" >&2 ;;
     esac
 fi
 
