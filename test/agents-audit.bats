@@ -104,11 +104,26 @@ denies() { run "$OP" audit denies "$@"; }
         [[ "$q" == *envoy.method:CONNECT* ]] || continue
         n=$((n + 1)); [ "${#q}" -lt 16384 ] || { echo "query $n is ${#q} bytes"; return 1; }
     done < "$CALLS"
-    [ "$n" = 4 ] || { echo "$n lookups"; return 1; }
+    [ "$n" -ge 2 ] || { echo "$n lookups"; return 1; }
     for i in 0 99 100 349; do grep -q "envoy.connection:in([0-9,]*$((100000 + i))[,)]" "$CALLS" || { echo "id $((100000 + i)) never looked up"; return 1; }; done
     # each batch asks only for its own windows' ids: the first (oldest) batch not for the newest refusal's
     first="$(grep -m1 envoy.method:CONNECT "$CALLS")"
     [[ "$first" == *"100349"* && "$first" != *"100000"* ]] || { echo "${first:0:300}"; return 1; }
+}
+
+@test "a burst of refused TLS names in one window with long ids: split across queries, each under 16 KiB" {
+    for i in $(seq 0 999); do
+        printf '{"_time":"2026-11-15T14:00:%02d.%03dZ","log_type":"envoy-access","envoy.connection":"1%019d","envoy.sni":"n.example.org","envoy.flags":"NR"}\n' \
+            "$((i / 50))" "$((i % 50))" "$i" >> "$T/rows"
+    done
+    denies --limit 1000
+    [ "$status" -eq 0 ] || { echo "$output" | tail -3; return 1; }
+    n=0; while IFS= read -r q; do
+        [[ "$q" == *envoy.method:CONNECT* ]] || continue
+        n=$((n + 1)); [ "${#q}" -lt 16384 ] || { echo "query $n is ${#q} bytes"; return 1; }
+    done < "$CALLS"
+    [ "$n" -ge 2 ] || { echo "$n lookups"; return 1; }
+    for i in 0 500 999; do grep -q "$(printf '1%019d' "$i")[,)]" "$CALLS" || { echo "id $i never looked up"; return 1; }; done
 }
 
 @test "an HTTP line without a method (the parser refused it) is not taken for a TLS refusal or joined" {

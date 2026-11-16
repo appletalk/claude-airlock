@@ -948,14 +948,15 @@ def is_sni(r):
 # dropped in a flood must not pin the refusal on an older tunnel with the same id (shown as ?).
 # One time window per row (merged where they overlap), and only the tunnel's first and last
 # lines (not the periodic ones a long tunnel logs every minute), so the lookup stays small; in
-# batches of at most 100 windows, each query well under VictoriaLogs' length limit (16 KiB).
+# batches cut by size, each query well under VictoriaLogs' length limit (16 KiB): a window with
+# many ids (a burst) is split across queries.
 JOIN_BEFORE, JOIN_AFTER = 20, 3   # after: Envoy flushes its log once a second
 sni_rows = [r for r in rows if is_sni(r) and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))]
 ids = sorted({r["envoy.connection"] for r in sni_rows})
 opened = {}
 def utc(t):
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-JOIN_BATCH = 100
+JOIN_BYTES = 10000   # windows and ids per query (the rest of the query is under 300 bytes)
 if ids:
     spans = []   # [start, end, {ids}]
     for k, cid in sorted((when(r.get("_time"))[0][0], r["envoy.connection"]) for r in sni_rows):
@@ -964,10 +965,22 @@ if ids:
             spans[-1][2].add(cid)
         else:
             spans.append([k - JOIN_BEFORE, k + JOIN_AFTER + 1, {cid}])
-    for i in range(0, len(spans), JOIN_BATCH):
-        batch = spans[i:i + JOIN_BATCH]
+    batches, cur, size = [], [], 0   # each: [(start, end, [ids])]
+    for a, b, s in spans:
+        win = len(f"_time:[{utc(a)}, {utc(b)}] or ")
+        todo = sorted(s, key=int)
+        while todo:
+            if cur and size + win + len(todo[0]) + 1 > JOIN_BYTES:
+                batches.append(cur); cur, size = [], 0
+            room, take = JOIN_BYTES - size - win, []
+            while todo and (not take or room >= len(todo[0]) + 1):
+                room -= len(todo[0]) + 1; take.append(todo.pop(0))
+            cur.append((a, b, take)); size = JOIN_BYTES - room
+    if cur:
+        batches.append(cur)
+    for batch in batches:
         times = " or ".join(f"_time:[{utc(a)}, {utc(b)}]" for a, b, _ in batch)
-        bids = sorted(set().union(*(s for _, _, s in batch)), key=int)
+        bids = sorted({i for _, _, t in batch for i in t}, key=int)
         for c in query(f'({times}) log_type:envoy-access envoy.method:CONNECT '
                        f'envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) '
                        f'envoy.connection:in({",".join(bids)}) | sort by (_time desc) | limit 10000 '
