@@ -290,33 +290,40 @@ machine (nothing leaves it):
 - **What goes in, all from the journal:** airlock-envoy's access log lines (turn on its
   `log-journal on`: Envoy then writes each line to the journal too, where journald names the
   unit), and only the agents' other lines: their users, their boxes' subordinate ids and their
-  managers (minus box output), airlock-envoy's units, logins, polkit, `su` and `sudo` lines that
-  name an agent, the kernel's drops with the agents' nft log prefixes, journald's notices when it
-  suppressed any of these, and the store's own units. The rest of the journal stays where it is.
+  managers (minus box output), airlock-envoy's units, logind, machined, polkit and `su` lines
+  that name an agent, `sudo` lines run by or as an agent (not yours that merely mention an
+  agent's file), the kernel's drops starting with the agents' nft log prefixes, journald's
+  notices when it suppressed any of these, and the store's own units. Who wrote a line is decided
+  only by the fields journald itself sets (uid, process, unit), never by what the sender says. The rest of the journal stays where it is.
   Envoy's files are never read: Envoy's own account can write that directory.
 - **Redacted before it is stored**, in every field: standard credential shapes (the values of
   query parameters named like `token`, `key`, `secret`, `password`, `sig` or `code`, cloud
-  signature parameters; `Bearer`/`Basic` values and `Authorization` or API key headers;
-  credentials in URLs; GitHub, GitLab, Slack, Anthropic, OpenAI, Google and AWS key formats;
-  JWTs; private key blocks). The parameter name stays, so a refused `?token=` still shows. Envoy
+  signature parameters; JSON keys, command-line flags and environment-style names of the same
+  kind; `Bearer`/`Basic` values, `Authorization`, API key and token headers, cookies;
+  credentials in URLs; common vendor key formats (GitHub, GitLab, Slack, Anthropic, OpenAI,
+  Stripe, Hugging Face, npm, Docker Hub, PyPI, Google, AWS); JWTs; private key blocks), then
+  every field cut at 8 KiB. A key printed line by line reaches the journal as separate lines:
+  only its first line is recognised. The parameter name stays, so a refused `?token=` still shows. Envoy
   never logs the credentials it adds; this is for secrets a box sends itself, since whatever
   reads the store (an auditor's model included) may send it on. The raw lines stay in Envoy's
   files and the journal.
-- **Rate-limited per source** (2000 lines a minute per kind and uid): a flood can't push older
-  days out of the store's disk cap. What the limit drops, Vector logs as a line of its own.
+- **Nothing is dropped for volume:** a rate limit would let a box hide one request behind a burst
+  of others. A flood can push old days out of the disk cap (the store keeps the last two days
+  whatever happens); VictoriaLogs logs each day it drops, among the store's own lines. The store
+  is a copy for querying: the journal and Envoy's files stay the record.
 - **Where:** a VictoriaLogs under its own account `airlock-audit`, data in `/var/lib/airlock-audit`,
-  kept 90 days up to 2 GB (`audit on retention 180d max-disk 5G` to change; it always keeps the
-  last two days). Vector 0.57 or later (your distribution's package) feeds it, reading the journal
+  kept 90 days up to 5 GB (`audit on retention 180d max-disk 10G` to change). Vector 0.57 or later (your distribution's package) feeds it, reading the journal
   as a member of `systemd-journal`, with no other rights. `make install-agents` installs
   VictoriaLogs and vmauth from images pinned by digest (`sudo update-victorialogs`).
 - **Access:** the store has no network port. It, vmauth and Vector run in a network namespace of
   their own; the only way in is the socket `/run/airlock-audit/vl.sock`, which only
   `airlock-audit`, `airlock-envoy` (for an auditor's listener), you and root can connect to, and
-  which leads to vmauth: queries (`/select/`) pass, nothing else (no inserts, no deletes). To
-  query by hand:
+  which leads to vmauth: queries (`/select/`) pass, nothing else (no inserts, no deletes; vmauth's
+  own endpoints take a random key made at each start that nobody holds). To query by hand:
   `curl --unix-socket /run/airlock-audit/vl.sock http://x/select/logsql/query -d 'query=_time:1h | limit 10'`.
-- **With external nftables**, name your drop rules' log prefixes: `audit-nft-prefix
-  myhost-agent-drop: myhost-agent-web-drop:`.
+- **With external nftables**, name your drop rules' log prefixes, 16 characters or more (a
+  shorter one could be forged by a process name): `audit-nft-prefix myhost-agent-drop:
+  myhost-agentweb-drop:`.
 - `audit off` stops and disables the units; the data in `/var/lib/airlock-audit` stays until you
   remove it.
 

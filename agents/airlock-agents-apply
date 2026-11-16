@@ -69,7 +69,7 @@ site="${site:-$ROOT$ETC/agents.conf}"
 # ---- parse ------------------------------------------------------------------------------------
 
 OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on OP_UID="" OP_GID=""
-AUDIT=off AUDIT_RETENTION=90d AUDIT_MAX_DISK=2G AUDIT_PREFIXES=()
+AUDIT=off AUDIT_RETENTION=90d AUDIT_MAX_DISK=5G AUDIT_PREFIXES=()
 # The first systemd whose ProtectControlGroups=private works for user@.service (render_manager).
 CGNS_SYSTEMD=258
 ROLES=(agent web guard)
@@ -103,7 +103,7 @@ while IFS= read -r line || [ -n "$line" ]; do
             RUNSC=${w[1]} ;;
         audit)
             # on: the audit store (docs/agents.md, Audit). Options: retention <n>d (default 90d),
-            # max-disk <n>G (default 2G: VictoriaLogs drops the oldest days past it).
+            # max-disk <n>G (default 5G: VictoriaLogs drops the oldest days past it).
             [ "${#w[@]}" -ge 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: audit on|off [retention <n>d] [max-disk <n>G]"
             AUDIT=${w[1]}
             i=2
@@ -121,7 +121,9 @@ while IFS= read -r line || [ -n "$line" ]; do
             # The log prefixes of the nftables rules that drop the agents' traffic, when the site
             # writes those rules itself (external nftables); the toolkit's own table's otherwise.
             [ "${#w[@]}" -gt 1 ] || die "$where: audit-nft-prefix lists nothing"
-            for v in "${w[@]:1}"; do [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}:?$ ]] || die "$where: bad nft log prefix '$v' (letters, digits, _ . -, an optional trailing colon)"; AUDIT_PREFIXES+=("$v"); done ;;
+            # 16 characters at least: a process name (15 at most) shows at the start of the kernel's
+            # own lines about it (a crash, say), so a shorter prefix could be forged by naming one.
+            for v in "${w[@]:1}"; do [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{14,40}:?$ ]] || die "$where: bad nft log prefix '$v' (16 to 42 characters: letters, digits, _ . -, an optional trailing colon)"; AUDIT_PREFIXES+=("$v"); done ;;
         operator|command|inbox|queue|daily-cap)
             [ "${#w[@]}" = 2 ] || die "$where: want: ${w[0]} <value>"
             v=${w[1]}
@@ -708,9 +710,8 @@ AUDIT_VECTOR_MIN=0.57
 render_audit_sysusers() {
     cat <<EOF
 # Rendered by airlock-agents-apply: the audit store's account (VictoriaLogs, vmauth, Vector), no
-# login. A member of systemd-journal: Vector reads the journal (read-only) and nothing else.
+# login. Not in systemd-journal: Vector alone gets that group, in its own unit.
 u $AUDIT_USER - "airlock audit store" $AUDIT_LIB /usr/sbin/nologin
-m $AUDIT_USER systemd-journal
 EOF
 }
 render_audit_tmpfiles() {
@@ -764,11 +765,12 @@ render_audit_vl_unit() {
     cat <<EOF
 # Rendered by airlock-agents-apply: the audit store, a VictoriaLogs with no port on the host (the
 # audit services' own network namespace). Only Vector writes to it; reads come through vmauth.
+# At INFO: it logs each day it drops for the disk cap, and those lines land in the store too.
 [Unit]
 Description=airlock audit store (VictoriaLogs)
 
 [Service]
-ExecStart=$AUDIT_VL -storageDataPath=$AUDIT_LIB/vl -retentionPeriod=$AUDIT_RETENTION -retention.maxDiskSpaceUsageBytes=$(( ${AUDIT_MAX_DISK%G} * 1073741824 )) -httpListenAddr=127.0.0.1:9428 -loggerLevel=WARN
+ExecStart=$AUDIT_VL -storageDataPath=$AUDIT_LIB/vl -retentionPeriod=$AUDIT_RETENTION -retention.maxDiskSpaceUsageBytes=$(( ${AUDIT_MAX_DISK%G} * 1073741824 )) -httpListenAddr=127.0.0.1:9428 -loggerLevel=INFO
 Restart=on-failure
 RestartSec=5
 ReadWritePaths=$AUDIT_LIB/vl
@@ -790,7 +792,13 @@ After=airlock-audit-vl.service
 JoinsNamespaceOf=airlock-audit-vl.service
 
 [Service]
-ExecStart=$AUDIT_VMAUTH -auth.config=$AUDIT_ETC/vmauth.yaml -httpListenAddr=127.0.0.1:8427 -loggerLevel=WARN
+# vmauth's own endpoints (metrics, flags, config reload, pprof) take a key nobody has: a random
+# one made at each start, in memory (this unit's runtime directory), never stored or shown.
+RuntimeDirectory=airlock-audit-vmauth
+RuntimeDirectoryMode=0700
+ExecStartPre=/bin/sh -c 'umask 077; k() { head -c 32 /dev/urandom | od -An -tx1 | tr -d " \\n"; }; printf "VM_metricsAuthKey=%%s\\nVM_flagsAuthKey=%%s\\nVM_pprofAuthKey=%%s\\nVM_reloadAuthKey=%%s\\n" "\$\$(k)" "\$\$(k)" "\$\$(k)" "\$\$(k)" > "\$\$RUNTIME_DIRECTORY/keys"'
+EnvironmentFile=$AUDIT_RUN-vmauth/keys
+ExecStart=$AUDIT_VMAUTH -envflag.enable -envflag.prefix=VM_ -auth.config=$AUDIT_ETC/vmauth.yaml -httpListenAddr=127.0.0.1:8427 -loggerLevel=WARN
 Restart=on-failure
 RestartSec=5
 MemoryMax=256M
@@ -869,18 +877,23 @@ render_audit_redact() {
     cat <<'EOF'
   redact:
     type: remap
-    inputs: [throttle]
+    inputs: [typed]
     source: |
       . = map_values(., recursive: true) -> |v| {
         if is_string(v) {
           s = string!(v)
           s = replace(s, r'(?i)([?&;](?:access_token|refresh_token|id_token|private_token|token|api_key|apikey|api-key|key|secret|client_secret|password|passwd|pwd|auth|sig|signature|code|session|sessionid|jwt|x-amz-security-token|x-amz-signature|x-amz-credential|x-goog-signature|x-goog-credential)=)[^&;\s"#\\]*', "${1}REDACTED")
+          s = replace(s, r'(?i)("(?:access_token|refresh_token|id_token|token|auth_token|api_key|apikey|secret|client_secret|password|passwd|private_key)"\s*:\s*")[^"]*', "${1}REDACTED")
+          s = replace(s, r'(?i)((?:^|\s)--?(?:password|passwd|token|secret|api-key|apikey|auth-token|access-token)(?:=|\s+))[^\s"]+', "${1}REDACTED")
+          s = replace(s, r'\b((?:[A-Z][A-Z0-9_]*_)?(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)(?:_[A-Z0-9_]*)?=)[^\s"\x27&]+', "${1}REDACTED")
           s = replace(s, r'\b([Bb]earer|[Bb]asic|BEARER|BASIC)(\s+)[A-Za-z0-9+/=._~-]*[0-9+/=_~][A-Za-z0-9+/=._~-]*', "${1}${2}REDACTED")
-          s = replace(s, r'(?i)((?:\b|_)(?:authorization|x-api-key|api-key)["\x27]?\s*[:=]\s*["\x27]?)([A-Za-z]+\s+)?[A-Za-z0-9+/=._~-]{8,}', "${1}${2}REDACTED")
+          s = replace(s, r'(?i)((?:\b|_)(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|private-token)["\x27]?\s*[:=]\s*["\x27]?)([A-Za-z]+\s+)?[A-Za-z0-9+/=._~-]{8,}', "${1}${2}REDACTED")
+          s = replace(s, r'(?i)(\b(?:set-)?cookie["\x27]?\s*:\s*)[^\r\n"]+', "${1}REDACTED")
           s = replace(s, r'(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s@"]+@', "${1}REDACTED@")
-          s = replace(s, r'\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255}|glpat-[A-Za-z0-9_-]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{35}|(?:AKIA|ASIA)[A-Z0-9]{16})\b', "REDACTED")
+          s = replace(s, r'\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255}|glpat-[A-Za-z0-9_-]{20,}|glsa_[A-Za-z0-9_]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{48}|[sr]k_live_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{36}|dckr_pat_[A-Za-z0-9_-]{20,}|pypi-[A-Za-z0-9_-]{50,}|ya29\.[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{35}|(?:AKIA|ASIA)[A-Z0-9]{16})\b', "REDACTED")
           s = replace(s, r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', "REDACTED-JWT")
-          s = replace(s, r'(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)', "REDACTED-PRIVATE-KEY")
+          s = replace(s, r'(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)', "REDACTED-PRIVATE-KEY")
+          if length(s) > 8192 { s = truncate(s, 8192) + "...[cut at 8 KiB]" }
           s
         } else { v }
       }
@@ -890,7 +903,7 @@ render_audit_vector() {
     local r p uids=() names=() subs=() alt ualt nft=""
     for r in "${ROLES[@]}"; do uids+=("${UID_OF[$r]}"); names+=("${NAME[$r]}"); subs+=("(n >= ${SUB[$r]} && n < $(( SUB[$r] + SUB_COUNT )))"); done
     alt="$(IFS='|'; echo "${names[*]}")" ualt="$(IFS='|'; echo "${uids[*]}")"
-    for p in "${AUDIT_PREFIXES[@]}"; do nft="$nft${nft:+ || }contains(msg, \"$p\")"; done
+    for p in "${AUDIT_PREFIXES[@]}"; do nft="$nft${nft:+ || }starts_with(msg, \"$p\")"; done
     cat <<EOF
 # Rendered by airlock-agents-apply from agents.conf: what reaches the audit store, all from the
 # journal (journald sets the _-prefixed fields; no process can claim them). Kept:
@@ -901,8 +914,9 @@ render_audit_vector() {
 #   _SYSTEMD_OWNER_UID); logins, polkit, su and sudo lines naming an agent or its uid;
 # - the kernel's drops with the agents' nft log prefixes; journald's own suppression notices for
 #   any of these units; the store's own units.
-# Then a rate limit per source (a flood can't push older days out of the store's disk cap; what
-# it drops, Vector logs as its own line), and standard credential shapes blanked.
+# Then standard credential shapes blanked and each field cut at 8 KiB. Nothing is dropped for
+# volume: a limit would let a box hide a request behind a burst of others. The store is a copy
+# for querying; the journal and Envoy's files stay the record.
 data_dir: $AUDIT_LIB/vector
 sources:
   journal:
@@ -923,18 +937,25 @@ transforms:
         unit = to_string(._SYSTEMD_UNIT) ?? ""
         about = ""
         if uid == "0" || uid == "" { about = (to_string(.UNIT) ?? "") + " " + (to_string(.USER_UNIT) ?? "") }
-        ident = to_string(.SYSLOG_IDENTIFIER) ?? ""
+        exe = to_string(._EXE) ?? ""
         transport = to_string(._TRANSPORT) ?? ""
         msg = to_string(.message) ?? ""
-        box_output = comm == "conmon" && exists(.CONTAINER_ID)
+        # Only fields journald sets decide who wrote a line (SYSLOG_IDENTIFIER and the like are the
+        # sender's to choose). Box output: podman's conmon (its binary) with a container's fields.
+        box_output = ends_with(exe, "/conmon") && exists(.CONTAINER_ID)
+        # logind, machined and polkit by their units; su, runuser and sudo as root processes.
+        svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit)
+        rootcmd = uid == "0" && includes(["su", "runuser", "sudo"], comm)
+        names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
+        # sudo: only what an agent ran, or what ran as one (not every command naming an agent's path)
+        sudo_agent = match(msg, r'^\s*($alt) :|\bUSER=($alt) ;|\bby ($alt)\(uid=|for user ($alt)\(uid=')
         agent = includes($(vrl_strings "${uids[@]}"), uid) || $(IFS=' '; r=""; for s in "${subs[@]}"; do r="$r${r:+ || }$s"; done; echo "$r")
         (agent && !box_output) ||
           includes($(vrl_strings "${uids[@]}"), owner) ||
           starts_with(unit, "airlock-envoy") || starts_with(unit, "airlock-audit") ||
           match(unit, r'^user(@|-)($ualt)[.]') ||
           match(about, r'(^|\s)user(@|-)($ualt)[.]') ||
-          (includes(["systemd-logind", "systemd-machined", "polkitd", "polkit-agent-helper-1", "sudo", "su", "runuser", "machinectl"], ident) &&
-            match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')) ||
+          ((svc || (rootcmd && comm != "sudo")) && names) || (rootcmd && comm == "sudo" && sudo_agent) ||
           (unit == "systemd-journald.service" && contains(msg, "Suppressed") &&
             match(msg, r'airlock-envoy|airlock-audit|user@($ualt)[.]')) ||
           (transport == "kernel" && ($nft))
@@ -951,12 +972,6 @@ transforms:
           .log_type = if unit == "airlock-envoy-web.service" { "envoy-web" } else { "envoy-access" }
         }
       }
-  throttle:
-    type: throttle
-    inputs: [typed]
-    threshold: 2000
-    window_secs: 60
-    key_field: "{{ log_type }}-{{ _UID }}"
 $(render_audit_redact)
 sinks:
   store:

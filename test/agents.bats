@@ -3351,7 +3351,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     u="$T/ar/etc/systemd/system"
     # the store: its own namespace, no host port; 90 days, 2 GB by default
     grep -qx 'PrivateNetwork=yes' "$u/airlock-audit-vl.service"
-    grep -q -- '-retentionPeriod=90d -retention.maxDiskSpaceUsageBytes=2147483648 -httpListenAddr=127.0.0.1:9428' "$u/airlock-audit-vl.service"
+    grep -q -- '-retentionPeriod=90d -retention.maxDiskSpaceUsageBytes=5368709120 -httpListenAddr=127.0.0.1:9428' "$u/airlock-audit-vl.service"
     grep -qx 'CapabilityBoundingSet=' "$u/airlock-audit-vl.service"
     # the one way in: a 0600 socket with ACL entries for airlock-envoy and the operator alone
     grep -qx 'ListenStream=/run/airlock-audit/vl.sock' "$u/airlock-audit-vl-proxy.socket"
@@ -3370,7 +3370,19 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     grep -qx '    url_prefix: "http://127.0.0.1:9428"' "$T/ar/etc/airlock-audit/vmauth.yaml"
     # the collector reads the journal as a member of systemd-journal: no capabilities, no files
     grep -qx 'SupplementaryGroups=systemd-journal' "$u/airlock-audit-vector.service"
-    grep -qx 'm airlock-audit systemd-journal' "$T/ar/etc/sysusers.d/airlock-audit.conf"
+    # ...and only the collector: the account itself isn't in the group (the store, the door and
+    # the relay never read the journal)
+    ! grep -q 'systemd-journal' "$T/ar/etc/sysusers.d/airlock-audit.conf"
+    for f in airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.service; do
+        ! grep -q 'systemd-journal' "$u/$f" || { echo "$f"; return 1; }
+    done
+    # nothing dropped for volume
+    ! grep -q 'type: throttle' "$T/ar/etc/airlock-audit/vector.yaml"
+    # vmauth's own endpoints take a throwaway key made at each start, never stored
+    grep -qx 'RuntimeDirectory=airlock-audit-vmauth' "$u/airlock-audit-vmauth.service"
+    grep -qx 'EnvironmentFile=/run/airlock-audit-vmauth/keys' "$u/airlock-audit-vmauth.service"
+    grep -q '^ExecStart=/usr/local/bin/vmauth -envflag.enable -envflag.prefix=VM_ ' "$u/airlock-audit-vmauth.service"
+    for k in metrics flags pprof reload; do grep -q "VM_${k}AuthKey=" "$u/airlock-audit-vmauth.service" || { echo "$k"; return 1; }; done
     ! grep -q 'type: file' "$T/ar/etc/airlock-audit/vector.yaml"
     ! grep -q 'airlock-envoy/' "$T/ar/etc/airlock-audit/vector.yaml"
     # every audit unit: no capabilities, no new privileges, its own network namespace
@@ -3390,7 +3402,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
         run "$P" --env
         [ "$status" -ne 0 ] || { echo "accepted: $bad"; return 1; }
     done
-    site_file 1G 1G 1G; echo "audit-nft-prefix host-drop:" >> "$E/agents.conf"
+    site_file 1G 1G 1G; echo "audit-nft-prefix host-agents-drop:" >> "$E/agents.conf"
     run "$P" --env
     [ "$status" -ne 0 ]; [[ "$output" == *"audit-nft-prefix without audit on"* ]]
     audit_site 'audit-nft-prefix bad"prefix'
@@ -3400,12 +3412,16 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
 
 @test "audit nft prefixes: the toolkit table's by default; with external nftables the site must name its own" {
     audit_site; audit_render
-    for u in agent agent-web agent-guard; do grep -qF "contains(msg, \"airlock-agents-$u-drop:\")" "$T/ar/etc/airlock-audit/vector.yaml"; done
+    for u in agent agent-web agent-guard; do grep -qF "starts_with(msg, \"airlock-agents-$u-drop:\")" "$T/ar/etc/airlock-audit/vector.yaml"; done
     audit_site "external nftables"
     run "$P" --env
     [ "$status" -ne 0 ]; [[ "$output" == *"name your rules' log prefixes"* ]]
-    audit_site "external nftables" "audit-nft-prefix site-agent-drop: site-web-drop:"; audit_render
-    grep -qF 'contains(msg, "site-agent-drop:") || contains(msg, "site-web-drop:")' "$T/ar/etc/airlock-audit/vector.yaml"
+    audit_site "external nftables" "audit-nft-prefix site-agent-drop: site-agentweb-drop:"; audit_render
+    grep -qF 'starts_with(msg, "site-agent-drop:") || starts_with(msg, "site-agentweb-drop:")' "$T/ar/etc/airlock-audit/vector.yaml"
+    # shorter than 16 characters: a process name could forge it at the start of a kernel line
+    audit_site "external nftables" "audit-nft-prefix web-drop:"
+    run "$P" --env
+    [ "$status" -ne 0 ]; [[ "$output" == *"bad nft log prefix 'web-drop:' (16 to 42 characters"* ]]
     ! grep -q 'airlock-agents-agent-drop' "$T/ar/etc/airlock-audit/vector.yaml"
 }
 
@@ -3418,7 +3434,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     run vector test "$T/v.yaml" "$REPO/test/fixtures/audit-vector-tests.yaml"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *failed* ]]
-    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 36 ]
+    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 41 ]
 }
 
 @test "apply with audit on: the account, the data dirs, then waits for VictoriaLogs; with it, enables the store" {

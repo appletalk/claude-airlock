@@ -23,9 +23,9 @@
 #                            VictoriaLogs behind a queries-only Unix socket, fed the agents' and
 #                            Envoy's journal lines by Vector (needs Vector 0.57+ and airlock-envoy's
 #                            log-journal on; install-agents installs VictoriaLogs and vmauth).
-#                            Defaults: retention 90d, max-disk 2G
-#   audit-nft-prefix <p>...  the log prefixes of your own nftables drop rules for the agents
-#                            (with external nftables); the toolkit's table's otherwise
+#                            Defaults: retention 90d, max-disk 5G
+#   audit-nft-prefix <p>...  the log prefixes (16+ characters) of your own nftables drop rules
+#                            for the agents (with external nftables); the toolkit's otherwise
 #   external <part>...       parts your own config repo manages: nftables, polkit, profile, runsc.
 #                            Not written here; checked live (--render shows what they must provide)
 #   accept <finding>...      findings you accept, so they don't pause an apply: wsl-interop,
