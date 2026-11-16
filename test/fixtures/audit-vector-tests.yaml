@@ -333,6 +333,15 @@ tests:
   - name: "enrich: the same text from a process in a unit of the manager (not the manager) keeps its rating"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _SYSTEMD_UNIT: "user@1100.service", _SYSTEMD_USER_UNIT: "app.slice", _EXE: "/usr/lib/systemd/systemd", PRIORITY: "3", message: "Failed to connect to system bus: No such file or directory"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "low")'}]}]
+  - name: "enrich: the no-bus text from another binary in the manager's own scope keeps its rating"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _SYSTEMD_UNIT: "user@1100.service", _SYSTEMD_USER_UNIT: "init.scope", _EXE: "/home/agent/.local/bin/systemd", PRIORITY: "3", message: "Failed to connect to system bus: No such file or directory"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "low")'}]}]
+  - name: "enrich: the no-bus text in an agent's session scope (not its manager) keeps its rating"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "session-9.scope", _SYSTEMD_OWNER_UID: "1100", _EXE: "/usr/lib/systemd/systemd", PRIORITY: "3", message: "Failed to connect to system bus: No such file or directory"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "session"); assert_eq!(.audit.severity, "low")'}]}]
+  - name: "enrich: a manager line only mentioning the system bus later keeps its rating"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _SYSTEMD_UNIT: "user@1100.service", _SYSTEMD_USER_UNIT: "init.scope", _EXE: "/usr/lib/systemd/systemd", PRIORITY: "3", message: "agent-session@p.main.service: Failed to connect to system bus"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "low")'}]}]
   - name: "enrich: the manager's other errors stay low"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _SYSTEMD_UNIT: "user@1100.service", _SYSTEMD_USER_UNIT: "init.scope", _EXE: "/usr/lib/systemd/systemd", PRIORITY: "3", message: "Failed to start agent-session@p.main.service"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "low")'}]}]

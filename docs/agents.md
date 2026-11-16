@@ -440,8 +440,12 @@ machine (nothing leaves it):
     actually run**: Envoy's lines for the auditor's user over the run, as the store holds them,
     not the model's account of itself (a GET's query is decoded from its URL; a POST's body isn't
     logged, so its query shows as unknown, and the auditor is told to use GET). The command waits
-    until the store's count of those lines holds still (6 seconds after the run at least, 30 at
-    most; Envoy's lines arrive within a second or two) and says so if it never did. Requests
+    until the list is complete and settled: every tunnel the run opened has its own closing line
+    (paired by Envoy's connection id, so a refused CONNECT's close stands in for nothing), there
+    is at least one (its model traffic rides one, so none means the store is behind) and the
+    count of those lines has held still for three polls (from 5 seconds after the run, about 30 at most;
+    Envoy's lines arrive within a second or two). It says so when the list never settled, or the
+    store didn't answer. Another run, or an `audit login`, in that window shows in the list too. Requests
     inside a TLS tunnel (Envoy doesn't open those) and any after the run's window aren't listed,
     and the report says so. The auditor's own text comes after, quoted line by line (so no
     heading in it passes for the file's own) and cleaned of control characters.

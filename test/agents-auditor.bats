@@ -58,12 +58,16 @@ q=""; for a; do case "$a" in query=*) q=${a#query=} ;; esac; done
 printf '%s\n' "$q" >> "$CALLS"
 case "$q" in
     # the auditor's line count: CHANGING makes it grow on every poll
-    # (with the tunnels opened and closed: OPENED, CLOSED, default 1 and 1; NOCOUNT: no answer)
-    *'stats count() n,'*)
+    # the run's tunnels by connection id: OPENED and CLOSED (default "7" and "7"; a close with
+    # no open is a refused or failed CONNECT); NOCOUNT: no answer
+    *'stats by (envoy.log_type, envoy.connection)'*)
+        for i in ${OPENED-7}; do echo "{\"envoy.log_type\":\"DownstreamTunnelSuccessfullyEstablished\",\"envoy.connection\":\"$i\",\"c\":\"1\"}"; done
+        for i in ${CLOSED-7}; do echo "{\"envoy.log_type\":\"DownstreamEnd\",\"envoy.connection\":\"$i\",\"c\":\"1\"}"; done ;;
+    *'envoy.user:="'*'" | stats count() n'*)
         date +%s >> "$CALLS.counttimes"
         if [ -n "${NOCOUNT:-}" ]; then printf 'server error\n500'; exit 0; fi
-        if [ -n "${CHANGING:-}" ]; then c=$(( $(cat "$CALLS.count" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$CALLS.count"; else c=${CAUGHT:-1}; fi
-        echo "{\"n\":\"$c\",\"opened\":\"${OPENED:-1}\",\"closed\":\"${CLOSED:-1}\"}" ;;
+        if [ -n "${CHANGING:-}" ]; then c=$(( $(cat "$CALLS.count" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$CALLS.count"; else c=${CAUGHT:-3}; fi
+        echo "{\"n\":\"$c\"}" ;;
     *'stats count() n'*) echo "{\"n\":\"${CAUGHT:-1}\"}" ;;
     *) cat "$(dirname "$CALLS")/rows" ;;
 esac
@@ -211,7 +215,8 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     [ "$q" -lt "$m" ] && [ "$m" -lt "$forged" ]
     grep -qx '> All quiet.' "$f"
     # the store was asked for the auditor's own Envoy lines over the run, once their count held still
-    [ "$(grep -cF "log_type:envoy-access envoy.user:=\"$ME\" | stats count() n, count() if (envoy.method:CONNECT envoy.log_type:DownstreamTunnelSuccessfullyEstablished) opened, count() if (envoy.method:CONNECT envoy.log_type:DownstreamEnd) closed" "$CALLS")" -ge 3 ]
+    [ "$(grep -cF "log_type:envoy-access envoy.user:=\"$ME\" | stats count() n" "$CALLS")" -ge 3 ]
+    grep -qF "log_type:envoy-access envoy.user:=\"$ME\" envoy.method:CONNECT envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) | stats by (envoy.log_type, envoy.connection) count() c" "$CALLS"
     ! grep -q '^_time:>' "$CALLS" || false
     ! grep -q 'still changing' "$f" || false
     grep -qF "log_type:envoy-access envoy.user:=\"$ME\" | sort by (_time)" "$CALLS"
@@ -239,8 +244,8 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -q "The auditor's lines in the store were incomplete or still changing 30 s after the run (" "$(report_file)"
     rm -f "$T/reports/"*
-    # no line at all after the run (a quiet host): settled within seconds, no warning
-    SECONDS=0; CAUGHT=0 run "$OP" audit
+    # a quiet host (nothing else logs after the run): settled within seconds, no warning
+    SECONDS=0; run "$OP" audit
     [ "$status" -eq 0 ]; [ "$SECONDS" -lt 20 ]
     ! grep -q 'still changing' "$(report_file)" || false
 }
@@ -372,13 +377,20 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
 }
 
 @test "audit: a settled count is not complete while a tunnel is unclosed or none is in; a store not answering is said" {
-    OPENED=2 CLOSED=1 run timeout 60 "$OP" audit
+    OPENED="7 8" CLOSED="7" run timeout 60 "$OP" audit
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -qF "(1 lines, 1 of 2 tunnels closed): this list may be short" "$(report_file)" || { grep may "$(report_file)"; return 1; }
+    grep -qF "(3 lines, 1 of 2 tunnels closed): this list may be short" "$(report_file)" || { grep may "$(report_file)"; return 1; }
     rm -f "$T/reports/"*
-    # a run that reached the model always has a tunnel: none in means the store is behind (a stall)
-    CAUGHT=0 OPENED=0 CLOSED=0 run timeout 60 "$OP" audit
-    grep -qF "(0 lines, 0 of 0 tunnels closed): this list may be short" "$(report_file)"
+    # a refused or failed CONNECT's close (no open of its own) doesn't stand in for an open one's
+    OPENED="7" CLOSED="9" run timeout 60 "$OP" audit
+    grep -qF "(3 lines, 0 of 1 tunnels closed): this list may be short" "$(report_file)" || { grep may "$(report_file)"; return 1; }
+    rm -f "$T/reports/"*
+    # a run always has a tunnel (its model traffic): none in means the store is behind, whatever the exit
+    for rc in 0 1 124; do
+        CAUGHT=0 OPENED="" CLOSED="" RC=$rc run timeout 60 "$OP" audit
+        grep -qF "(0 lines, 0 of 0 tunnels closed): this list may be short" "$(report_file)" || { echo "rc $rc"; return 1; }
+        rm -f "$T/reports/"*
+    done
     rm -f "$T/reports/"*
     NOCOUNT=1 run timeout 60 "$OP" audit
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }

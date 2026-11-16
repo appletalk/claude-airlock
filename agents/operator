@@ -1154,29 +1154,31 @@ def query(q, limit=30):
 
 # Envoy writes each line when its request ends and the store has it within a second or two
 # (measured on the first host runs: 0.02 to 1 s). The list is in when it is complete and settled:
-# every tunnel the run opened has its closing line (the box's model traffic rides one, so a run
-# that reached the model has one; Envoy writes the close last, when the box goes), and the count
-# of the auditor's lines has held still for three polls; from 5 s after the run, about 30 s at
-# most, then what is there, said so. A count the store didn't answer never counts as settled.
-# (Another run or an audit login in this window shows here too.)
+# every tunnel the run opened has its own closing line, paired by Envoy's connection id (a
+# refused or failed CONNECT logs a close with no open, and must not stand in for one), there is
+# at least one (the run's model traffic rides one: none means the store is behind, whatever the
+# run's exit), and the auditor's lines have held still for three polls; from 5 s after the run,
+# about 30 s at most, then what is there, said so. A count the store didn't answer never counts
+# as settled. (Another run or an audit login in this window shows here too.)
 win = f"_time:[{iso(start - 1)}, {iso(end + 10)}]"
-COUNT = (f'{win} log_type:envoy-access envoy.user:="{auditor}" | stats count() n, '
-         f'count() if (envoy.method:CONNECT envoy.log_type:DownstreamTunnelSuccessfullyEstablished) opened, '
-         f'count() if (envoy.method:CONNECT envoy.log_type:DownstreamEnd) closed')
+COUNT = f'{win} log_type:envoy-access envoy.user:="{auditor}" | stats count() n'
+TUNNELS = (f'{win} log_type:envoy-access envoy.user:="{auditor}" envoy.method:CONNECT '
+           f'envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) '
+           f'| stats by (envoy.log_type, envoy.connection) count() c | limit 5000')
 caught, answered, last, still, seen = False, False, None, 0, ("?", "?", "?")
 deadline = time.monotonic() + 30
 time.sleep(min(6, max(0, end + 6 - time.time())))
 while time.monotonic() < deadline:
     r = query(COUNT, deadline - time.monotonic())
+    t = query(TUNNELS, deadline - time.monotonic()) if r else None
     cur = None
-    if r:
-        cur = tuple(r[0].get(k, "") for k in ("n", "opened", "closed"))
-        if not all(v.isdigit() for v in cur):
-            cur = None
+    if r and t is not None and r[0].get("n", "").isdigit():
+        opened = {x.get("envoy.connection") for x in t if x.get("envoy.log_type") == "DownstreamTunnelSuccessfullyEstablished"}
+        closed = {x.get("envoy.connection") for x in t if x.get("envoy.log_type") == "DownstreamEnd"}
+        cur = (r[0]["n"], len(opened), len(opened & closed))
     if cur is not None:
-        answered, seen = True, cur
-        opened, closed = int(cur[1]), int(cur[2])
-        complete = closed >= opened and (opened > 0 or rc != 0)
+        answered, seen = True, tuple(str(v) for v in cur)
+        complete = cur[1] > 0 and cur[2] == cur[1]
         if cur == last and complete:
             still += 1
             if still >= 2:
