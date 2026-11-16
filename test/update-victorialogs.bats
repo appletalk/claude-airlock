@@ -21,7 +21,7 @@ vmauth $B"
 #!/bin/bash
 echo "podman $*" >> "$CALLS"
 case "$1" in
-    image) printf '%s\n' "${ENTRY-/app-prod}" ;;
+    image) e=${ENTRY-/app-prod}; printf '%s\n' "${e%%$'\n'*}"; [ "$e" = "${e#*$'\n'}" ] || { sleep 0.2; printf '%s\n' "${e#*$'\n'}"; } ;;
     create) echo "cid-${2##*/}" | cut -d: -f1 ;;
     cp) src=${2#*:}; e=${ENTRY-/app-prod}; [ "$src" = "${e%%$'\n'*}" ] || exit 1
         if [ -n "${CP_LINK:-}" ]; then ln -s /etc/passwd "$3"; else printf '%b' "${BINARY-\x7fELF ${2%%:*}}" > "$3"; fi ;;

@@ -80,7 +80,10 @@ for p in "${todo[@]}"; do
     echo "==> $name: pulling ${image%@*} by digest"
     podman pull --quiet "$image" >/dev/null
     # The binary is the image's entrypoint: its first element, one absolute path.
-    entry="$(podman image inspect --format '{{range .Config.Entrypoint}}{{println .}}{{end}}' "$image" | head -1)"
+    # The first element, cut here: `| head -1` closed the pipe early under pipefail (SIGPIPE: the
+    # script stopped silently whenever podman was still writing a later element).
+    entry="$(podman image inspect --format '{{range .Config.Entrypoint}}{{println .}}{{end}}' "$image")"
+    entry=${entry%%$'\n'*}
     [[ "$entry" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$entry" != *..* ]] || die "$name: unexpected entrypoint in the image: '$entry'"
     cid="$(podman create "$image")"
     rm -f "$work/bin"
