@@ -1084,6 +1084,11 @@ transforms:
       # stays in the agent's cgroup: the owner uid below keeps it. Nobody else's sudo is read.)
       svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit)
       names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
+      # logind's own structured field (the unit proves the sender): its lines about an agent's
+      # sessions, the logout lines that don't name the user in their text included.
+      logind_user = ""
+      if unit == "systemd-logind.service" { logind_user = to_string(.USER_ID) ?? "" }
+      logind_agent = logind_user != "" && match(logind_user, r'^($alt)$')
       own = includes($(vrl_strings "${uids[@]}"), uid)
       sub = $(IFS=' '; r=""; for s in "${subs[@]}"; do r="$r${r:+ || }$s"; done; echo "$r")
       by_agent = (own || sub) && !box_output
@@ -1091,14 +1096,15 @@ transforms:
       envoy_unit = starts_with(unit, "airlock-envoy")
       store_unit = starts_with(unit, "airlock-audit")
       manager = match(unit, r'^user(@|-)($ualt)[.]') || match(about, r'(^|\s)user(@|-)($ualt)[.]')
-      named = svc && names
+      named = (svc && names) || logind_agent
       suppressed = unit == "systemd-journald.service" && contains(msg, "Suppressed") &&
         match(msg, r'airlock-envoy|airlock-audit|user@($ualt)[.]')
       dropped = transport == "kernel" && ($nft)
       if !(by_agent || by_owner || envoy_unit || store_unit || manager || named || suppressed || dropped) { abort }
       # Why it was kept, most specific first.
-      priv = includes(["/usr/bin/sudo", "/usr/sbin/sudo", "/usr/bin/su", "/bin/su", "/usr/bin/pkexec", "/usr/bin/run0",
-        "/usr/bin/systemd-run", "/usr/bin/doas"], exe)
+      # The setuid ones, by the binary journald resolved (an agent can't copy them and keep the
+      # path). run0 is systemd-run under another name and not setuid: its polkit line is the signal.
+      priv = includes(["/usr/bin/sudo", "/usr/sbin/sudo", "/usr/bin/su", "/bin/su", "/usr/bin/pkexec", "/usr/bin/doas"], exe)
       kind = "agent-process"
       if dropped { kind = "nft-drop"
       } else if suppressed { kind = "journald-suppressed"
@@ -1121,12 +1127,13 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
         key = if is_string(m.u) { string!(m.u) } else { "" }
         agent = to_string(get!(who, [key])) ?? ""
       }
-      # A logind or polkit line names its subject at a fixed place at the end; anything before it
-      # (polkit prints the subject's command line) is the subject's own text, so it never decides.
-      # Lines without that tail (machined's, logind's other lines) name no agent.
-      if agent == "" && named {
-        m = parse_regex(msg, r'\(owned by unix-user:(?P<a>$alt|$ualt)\)\s*$') ??
-          parse_regex(msg, r'\bof user (?P<a>$alt)\.?\s*$') ?? {}
+      # logind: its USER_ID field. polkit: only its "Operator of ..." lines, by their fixed tail
+      # "(owned by unix-user:X)": the subject's own text comes before it, and other polkit lines
+      # end in text the subject chooses (an agent registration's locale). machined's and other
+      # polkit lines name no agent.
+      if agent == "" && logind_agent { agent = logind_user }
+      if agent == "" && named && unit == "polkit.service" && starts_with(msg, "Operator of ") {
+        m = parse_regex(msg, r'\(owned by unix-user:(?P<a>$alt|$ualt)\)\s*$') ?? {}
         a = if is_string(m.a) { string!(m.a) } else { "" }
         agent = to_string(get!(who, [a])) ?? ""
         if agent == "" && match(a, r'^($alt)$') { agent = a }
@@ -1191,7 +1198,7 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       sev = "info"
       if k == "nft-drop" { sev = "high"
       } else if k == "privilege" && (to_string(._SYSTEMD_UNIT) ?? "") != "polkit.service" { sev = "high"
-      } else if k == "privilege" && (contains(msgl, "failed") || contains(msgl, "not authorized")) { sev = "high"
+      } else if k == "privilege" && contains(msgl, "failed") { sev = "high"
       } else if k == "privilege" { sev = "low"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"

@@ -294,7 +294,7 @@ machine (nothing leaves it):
   `log-journal on`: Envoy then writes each line to the journal too, where journald names the
   unit), and only the agents' other lines: their users, their boxes' subordinate ids and their
   managers (minus box output; an agent's own `sudo` or `su` counts, as it runs in the agent's
-  cgroup), airlock-envoy's units, logind, machined and polkit lines that name an agent (nobody
+  cgroup), airlock-envoy's units, logind, machined and polkit lines that name an agent (logind's also by its own `USER_ID` field, so its logout lines too) (nobody
   else's `sudo` is even read), the kernel's drops starting with the agents' nft log prefixes, journald's
   notices when it suppressed any of these, and the store's own units. Who wrote a line is decided
   only by the fields journald itself sets (uid, process, unit), never by what the sender says. The rest of the journal stays where it is.
@@ -303,14 +303,16 @@ machine (nothing leaves it):
   names, and Envoy's own JSON sits under `envoy.*`):
   - `audit.kind`: which rule kept the line: `envoy-refused`, `envoy-allowed`, `envoy-web-refused`,
     `envoy-web-allowed` (the same refusal rules as `audit denies`), `privilege` (an agent's own
-    sudo, su, pkexec, run0, systemd-run or doas, by its binary; polkit naming an agent), `login` (logind or machined
+    sudo, su, pkexec or doas, by its setuid binary; polkit naming an agent, which is also where
+    run0 shows), `login` (logind or machined
     naming an agent), `session` (the agents' managers and their units), `nft-drop`,
     `journald-suppressed`, `envoy-service` (Envoy's units' other lines), `store` (the store's
     own units), `agent-process` (anything else an agent or its boxes logged);
   - `audit.agent`: the agent the line is about (by uid, a box's subordinate id, the session's
-    owner, the manager's uid, or the subject at the fixed end of a logind or polkit line: polkit
-    prints the subject's own command line before it, so nothing earlier in the line counts; for
-    Envoy, the listener's user when it is an agent);
+    owner, the manager's uid, logind's own `USER_ID` field, or the `(owned by unix-user:X)` tail
+    of polkit's "Operator of ..." lines: the subject's own text comes before it, and polkit's
+    other lines end in text the subject chooses, so they name no agent; for Envoy, the
+    listener's user when it is an agent);
   - `audit.session`: the session (`<project>.<name>`) from the session unit's name, where the
     line comes from one of that agent's own sessions. The unit name can be set by the line's own
     sender, so it labels, it never decides what is kept;
