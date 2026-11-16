@@ -57,8 +57,9 @@ _airlock_agents() {
                     esac
                 fi ;;
             audit)
-                if [ "$COMP_CWORD" = 2 ]; then words=(denies)
-                elif [ "${COMP_WORDS[2]}" = denies ]; then words=(--since --limit); fi ;;
+                if [ "$COMP_CWORD" = 2 ]; then words=(denies ui)
+                elif [ "${COMP_WORDS[2]}" = denies ]; then words=(--since --limit)
+                elif [ "${COMP_WORDS[2]}" = ui ]; then words=(--port); fi ;;
         esac
     fi
     for w in "${words[@]}"; do [[ $w == "$cur"* ]] && COMPREPLY+=("$w"); done

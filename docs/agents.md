@@ -343,6 +343,13 @@ machine (nothing leaves it):
   own errors (a 403 from the server itself) and failed connections are not refusals and stay out.
   One fixed query, no model; what it prints is the agents' text (hosts, paths, names), cleaned of
   control characters, never acted on. It works while the agents are halted.
+- **Browsing it:** `claude-agent audit ui` serves the store's web UI (VictoriaLogs' vmui) at
+  `http://127.0.0.1:9429/select/vmui/` until Ctrl-C (`--port <n>` for another), and closes by
+  itself after 30 minutes without a request or 4 hours in all, so it isn't left open. A loopback port
+  is open to every process on the host, so each connection's owner is looked up in the kernel's
+  socket table and only yours is served (it names any other uid it refused, once each); and only
+  a `Host` of `127.0.0.1:<port>` or `localhost:<port>`, so a web page in your own browser can't
+  read it through a name it points at 127.0.0.1. The store's door still allows only queries.
 - **Day to day:** `sudo airlock-audit status` (units, what the store holds, seccomp kills),
   `restart`, `check` (the guarantees above, live: exit 1 on any failure), and `reset` (empties the
   store and reads the retention window back in from the journal; asks first).

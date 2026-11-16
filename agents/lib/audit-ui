@@ -1,0 +1,165 @@
+#!/usr/bin/python3 -I
+# audit-ui <store socket> <port> <uid>: the audit store's web UI (VictoriaLogs' vmui) on
+# 127.0.0.1:<port> for one user, until Ctrl-C (the operator's `audit ui`, docs/agents.md).
+# It closes by itself after 30 minutes without a request, and after 4 hours whatever happens, so
+# a forgotten terminal doesn't keep the store open. (Two more arguments, idle and most seconds,
+# are for the tests; the operator command never passes them.)
+#
+# A port on loopback is open to every process on the host, so each connection's owner is looked
+# up in the kernel's socket table (/proc/net/tcp: the uid that made the client socket) and only
+# <uid> is served. That uid's browser can still be steered by a web page (DNS rebinding: a name
+# that resolves to 127.0.0.1, so the page reads the answers), so only a Host of
+# 127.0.0.1:<port> or localhost:<port> is served. Each request goes to the store's socket with
+# a short list of headers (nothing that names the client), one request per connection. The
+# store's door (vmauth) still decides what is a query; this adds no path rules of its own.
+import http.client
+import http.server
+import socket
+import sys
+import threading
+import time
+
+SOCK, PORT, UID = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+IDLE = int(sys.argv[4]) if len(sys.argv) > 4 else 30 * 60
+MOST = int(sys.argv[5]) if len(sys.argv) > 5 else 4 * 3600
+STARTED = LAST = time.monotonic()
+HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+PASS = ("Accept", "Accept-Encoding", "Accept-Language", "Content-Type", "If-None-Match", "If-Modified-Since")
+MAX_BODY = 1 << 20
+
+
+def hexaddr(ip, port):  # /proc/net/tcp's form of an IPv4 address and port
+    a = socket.inet_aton(ip)
+    return f"{int.from_bytes(a, 'little'):08X}:{port:04X}"
+
+
+def owner(peer, me):  # the uid of the client socket peer -> me, or None
+    want_local, want_rem = hexaddr(*peer), hexaddr(*me)
+    try:
+        with open("/proc/net/tcp") as f:
+            next(f)
+            for line in f:
+                c = line.split()
+                if len(c) > 7 and c[1] == want_local and c[2] == want_rem:
+                    return int(c[7])
+    except (OSError, ValueError, StopIteration):
+        return None
+    return None
+
+
+class Store(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(120)
+        self.sock.connect(SOCK)
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"   # one request per connection: each is checked from the start
+    server_version = "audit-ui"
+    sys_version = ""
+
+    def log_message(self, fmt, *args):  # no request lines on the operator's terminal
+        pass
+
+    def refuse(self, code, why):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(why) + 1))
+        self.end_headers()
+        self.wfile.write(why.encode() + b"\n")
+
+    def relay(self):
+        global LAST
+        LAST = time.monotonic()
+        if self.headers.get("Host", "") not in HOSTS:
+            return self.refuse(421, "audit-ui: only http://127.0.0.1:%d/ (or localhost)" % PORT)
+        if "Transfer-Encoding" in self.headers:
+            return self.refuse(411, "audit-ui: a body needs a Content-Length")
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self.refuse(400, "audit-ui: a bad Content-Length")
+        if n < 0 or n > MAX_BODY:
+            return self.refuse(413, "audit-ui: a body over 1 MiB")
+        body = self.rfile.read(n) if n else None
+        hdrs = {h: self.headers[h] for h in PASS if h in self.headers}
+        if body is not None:
+            hdrs["Content-Length"] = str(n)
+        store = Store("x")
+        try:
+            store.request(self.command, self.path, body=body, headers=hdrs)
+            r = store.getresponse()
+        except OSError:
+            return self.refuse(502, "audit-ui: no answer from the audit store")
+        try:
+            self.send_response(r.status, r.reason)
+            for k, v in r.getheaders():
+                if k.lower() not in ("connection", "keep-alive", "transfer-encoding", "server", "date"):
+                    self.send_header(k, v)
+            self.end_headers()
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except OSError:
+            pass
+        finally:
+            store.close()
+
+    do_GET = do_POST = do_HEAD = relay
+
+
+class Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    refused = set()
+
+    def verify_request(self, request, client_address):
+        uid = owner(client_address, request.getsockname())
+        if uid == UID:
+            return True
+        if uid not in self.refused:  # once per uid: a flood of refusals doesn't bury the terminal
+            self.refused.add(uid)
+            print(f"audit-ui: refused a connection from uid {uid if uid is not None else '(unknown)'}", file=sys.stderr, flush=True)
+        return False
+
+
+def main():
+    try:
+        srv = Server(("127.0.0.1", PORT), Handler)
+    except OSError as e:
+        print(f"audit-ui: can't listen on 127.0.0.1:{PORT}: {e.strerror} (another port: --port <n>)", file=sys.stderr)
+        return 1
+    why = ["closed (Ctrl-C)"]
+
+    def expire():  # the two limits, checked every second
+        while True:
+            time.sleep(1)
+            now = time.monotonic()
+            if now - STARTED >= MOST:
+                why[0] = f"closed: open {MOST // 60} minutes, the most it stays (run it again for more)"
+            elif now - LAST >= IDLE:
+                why[0] = f"closed: no request for {IDLE // 60} minutes"
+            else:
+                continue
+            srv.shutdown()
+            return
+
+    print(f"the audit store's UI: http://127.0.0.1:{PORT}/select/vmui/ (yours alone; Ctrl-C to close; "
+          f"closes after {IDLE // 60} min idle, {MOST // 60} min at most)", flush=True)
+    threading.Thread(target=expire, daemon=True).start()
+    try:
+        srv.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    print(why[0], flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

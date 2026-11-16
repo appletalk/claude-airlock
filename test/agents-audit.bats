@@ -138,3 +138,77 @@ denies() { run "$OP" audit denies "$@"; }
     HOME="$T/home" run "$OP" ls
     [ "$status" -ne 0 ]; [[ "$output" == *"halted"* ]]
 }
+
+# ---- audit ui ----------------------------------------------------------------------------------
+# A fake store on a Unix socket (echoes what reached it), the relay on a free port.
+ui_setup() {
+    rm -f "$AGENTS_AUDIT_SOCK"
+    cat > "$T/store.py" <<'PY'
+import http.server, json, os, socket, socketserver, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        b = json.dumps({"path": self.path, "headers": dict(self.headers)}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    do_POST = do_GET
+class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    def get_request(self):
+        r, _ = super().get_request(); return r, ("local", 0)
+S(sys.argv[1], H).serve_forever()
+PY
+    python3 "$T/store.py" "$AGENTS_AUDIT_SOCK" & STORE=$!
+    PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+    for _ in $(seq 50); do [ -S "$AGENTS_AUDIT_SOCK" ] && break; sleep 0.1; done
+}
+ui_start() {  # ui_start <uid> [idle most]
+    python3 -I "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" "$PORT" "$@" > "$T/ui.out" 2>&1 & UI=$!
+    for _ in $(seq 50); do grep -q 'audit store' "$T/ui.out" 2>/dev/null && return 0; sleep 0.1; done
+    cat "$T/ui.out"; return 1
+}
+ui_teardown() { kill "$UI" "$STORE" 2>/dev/null || true; wait 2>/dev/null || true; }
+
+@test "audit ui: serves its own uid under its own Host, forwards only the listed headers" {
+    ui_setup; ui_start "$(id -u)"
+    r="$(/usr/bin/curl --noproxy "*" -s -H 'Cookie: s=1' -H 'X-Forwarded-For: 1.2.3.4' "http://127.0.0.1:$PORT/select/vmui/?q=1")"
+    ui_teardown
+    [[ "$r" == *'"path": "/select/vmui/?q=1"'* ]] || { echo "$r"; return 1; }
+    [[ "$r" != *Cookie* && "$r" != *X-Forwarded* && "$r" == *'"Host": "x"'* ]]
+}
+
+@test "audit ui: another Host (a rebound name) gets 421, nothing reaches the store" {
+    ui_setup; ui_start "$(id -u)"
+    c="$(/usr/bin/curl --noproxy "*" -s -o "$T/body" -w '%{http_code}' -H 'Host: evil.example.org' "http://127.0.0.1:$PORT/select/vmui/")"
+    c2="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/select/vmui/")"
+    ui_teardown
+    [ "$c" = 421 ] && [ "$c2" = 200 ] || { echo "$c $c2"; return 1; }
+    ! grep -q path "$T/body"
+}
+
+@test "audit ui: a connection from another uid is refused and named once" {
+    ui_setup; ui_start "$(( $(id -u) + 1 ))"
+    c="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/" || true)"
+    /usr/bin/curl --noproxy "*" -s -o /dev/null "http://127.0.0.1:$PORT/" || true
+    ui_teardown
+    [ "$c" = 000 ] || { echo "got $c"; return 1; }
+    [ "$(grep -c "refused a connection from uid $(id -u)" "$T/ui.out")" = 1 ]
+}
+
+@test "audit ui: closes by itself when idle, and at its limit even while used" {
+    ui_setup; ui_start "$(id -u)" 2 600
+    for _ in $(seq 50); do kill -0 "$UI" 2>/dev/null || break; sleep 0.1; done
+    ! kill -0 "$UI" 2>/dev/null || { ui_teardown; echo "still open"; return 1; }
+    grep -q 'closed: no request for 0 minutes' "$T/ui.out" || { cat "$T/ui.out"; ui_teardown; return 1; }
+    ui_start "$(id -u)" 600 3
+    for _ in $(seq 60); do /usr/bin/curl --noproxy "*" -s -o /dev/null "http://127.0.0.1:$PORT/" || true; kill -0 "$UI" 2>/dev/null || break; sleep 0.1; done
+    ! kill -0 "$UI" 2>/dev/null || { ui_teardown; echo "still open"; return 1; }
+    ui_teardown
+    grep -q 'the most it stays' "$T/ui.out"
+}
+
+@test "audit ui: bad ports refused; the operator command passes only socket, port and uid" {
+    for p in 80 0 65536 x; do run "$OP" audit ui --port "$p"; [ "$status" -ne 0 ] || { echo "took $p"; return 1; }; done
+    printf '#!/bin/sh\necho "$@"\n' > "$T/fake-ui"; chmod +x "$T/fake-ui"
+    printf '#!/bin/sh\nshift; exec "$@"\n' > "$T/bin/python3"; chmod +x "$T/bin/python3"
+    AGENTS_AUDIT_UI="$T/fake-ui" run "$OP" audit ui --port 9500
+    [ "$output" = "$AGENTS_AUDIT_SOCK 9500 $(id -u)" ] || { echo "$output"; return 1; }
+}

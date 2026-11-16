@@ -54,6 +54,8 @@
 #   <command> audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]
 #                                       Envoy's refusals (last 24 h, newest 50): who, what, the
 #                                       route, and which site file line would change it
+#   <command> audit ui [--port <n>]     the store's web UI on http://127.0.0.1:9429/select/vmui/,
+#                                       for you alone, until Ctrl-C (or 30 min idle, 4 h at most)
 set -euo pipefail
 # Internal to this script (set per call below), never taken from the caller's environment.
 unset OCTL_RAW STAGE_WEB STAGE_GUARD STATE
@@ -1004,11 +1006,25 @@ else:
     print(f"({total} refusal{'s' if total != 1 else ''} since {start_local}; the site file: /etc/airlock-envoy/site.conf)")
 PY
 }
+# audit ui: the store's web UI (vmui) on a loopback port, served to the operator's uid alone and
+# only under its own Host (lib/audit-ui), until Ctrl-C.
+audit_ui() {
+    local port=9429
+    case "${1:-}" in
+        '') ;;
+        --port) [ $# = 2 ] && [[ "$2" =~ ^[1-9][0-9]{3,4}$ ]] && [ "$2" -ge 1024 ] && [ "$2" -le 65535 ] \
+                    || die "--port needs a number from 1024 to 65535"; port=$2 ;;
+        *) die "usage: $CMD audit ui [--port <n>]" ;;
+    esac
+    audit_ready
+    exec python3 -I "${AGENTS_AUDIT_UI:-$AGENTS_LIB/audit-ui}" "$AUDIT_SOCK" "$port" "$(id -u)"
+}
 audit() {
     local sub="${1:-}"; shift || true
     case "$sub" in
         denies) audit_denies "$@" ;;
-        *) die "usage: $CMD audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]" ;;
+        ui) audit_ui "$@" ;;
+        *) die "usage: $CMD audit denies [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] | ui [--port <n>]" ;;
     esac
 }
 
