@@ -18,12 +18,14 @@ setup() { setup_airlock_env; _stub_upstream_installer "$BATS_TEST_DIRNAME/../ima
 # The trailing doctor fails against the stub, so the exit status is not
 # asserted - only what the build was asked to do.
 _install() {
-  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
+  env -i TZ=UTC PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" \
     AIRLOCK_ENGINE="$ENGINE" CLAUDE_CODE_VERSION=1.2.3 ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" \
     ${AIRLOCK_APT_REFRESH:+AIRLOCK_APT_REFRESH="$AIRLOCK_APT_REFRESH"} \
     bash "$BATS_TEST_DIRNAME/../bin/install.sh" </dev/null 2>"$BATS_TEST_TMPDIR/install.err" >/dev/null || true
 }
-week() { date +%G-W%V; }
+# The ISO week as install.sh sees it: both in UTC, so a run near the week's turn (a Sunday evening
+# west of UTC, a Monday morning east of it; CI runners are UTC) doesn't compare two weeks.
+week() { TZ=UTC date +%G-W%V; }
 stamp_file() { printf '%s' "$AIRLOCK_HOME/.config/claude-airlock/apt-refresh"; }
 
 @test "the base tag is pulled as its own step and the apt layer is keyed on the ISO week" {
