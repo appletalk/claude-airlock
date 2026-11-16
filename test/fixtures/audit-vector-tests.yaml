@@ -57,24 +57,21 @@ tests:
   - name: keep polkit naming an agent by uid
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", _COMM: "polkitd", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1100)"}}]
     outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "unix-user:1100"))'}]}]
-  - name: keep su to an agent
-    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "su", message: "(to agent) alice on pts/2"}}]
-    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "(to agent)"))'}]}]
   - name: drop logind for the operator, and a name merely containing an agent's
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "systemd-logind", _SYSTEMD_UNIT: "systemd-logind.service", message: "New session 6 of user alice."}}
       - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "systemd-logind", _SYSTEMD_UNIT: "systemd-logind.service", message: "New session 7 of user agentx."}}
     no_outputs_from: [agents]
-  - name: keep sudo run by an agent, and as one
+  - name: keep an agent's own sudo and su (root processes in the agent's cgroup)
     inputs:
-      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", message: "agent : user NOT in sudoers ; TTY=pts/1 ; PWD=/ ; USER=root ; COMMAND=/bin/sh"}}
-      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", message: "alice : TTY=pts/1 ; PWD=/ ; USER=agent-web ; COMMAND=/bin/true"}}
-      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", message: "pam_unix(sudo:session): session opened for user root(uid=0) by agent(uid=1100)"}}
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", _SYSTEMD_OWNER_UID: "1100", message: "agent : user NOT in sudoers ; TTY=pts/1 ; PWD=/ ; USER=root ; COMMAND=/bin/sh"}}
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "su", _SYSTEMD_OWNER_UID: "1101", message: "FAILED SU (to root) agent-web on pts/3"}}
     outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "agent"))'}]}]
-  - name: drop the operator's own sudo, even one naming an agent's path
+  - name: drop everyone else's sudo and su, even naming an agent
     inputs:
-      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", message: "alice : TTY=pts/1 ; COMMAND=/usr/bin/ls"}}
-      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", message: "alice : TTY=pts/1 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/cat /home/agent/notes"}}
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", _SYSTEMD_OWNER_UID: "1000", message: "alice : TTY=pts/1 ; COMMAND=/usr/bin/ls"}}
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "sudo", _SYSTEMD_OWNER_UID: "1000", message: "alice : TTY=pts/1 ; PWD=/ ; USER=agent ; COMMAND=/usr/bin/cat /home/agent/notes"}}
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", _COMM: "su", _SYSTEMD_OWNER_UID: "1000", message: "(to agent) alice on pts/2"}}
     no_outputs_from: [agents]
   - name: drop forged sudo, logind and polkit lines (a sender-set identifier, a renamed binary, another unit)
     inputs:

@@ -885,7 +885,7 @@ render_audit_journal_unit() {
     m="$m _SYSTEMD_UNIT=airlock-envoy-logrotate.service _SYSTEMD_UNIT=airlock-envoy-cred-expire.service"
     for u in "${AUDIT_UNITS[@]}"; do [[ "$u" == *.service ]] && m="$m _SYSTEMD_UNIT=$u"; done
     m="$m _SYSTEMD_UNIT=systemd-logind.service _SYSTEMD_UNIT=systemd-machined.service _SYSTEMD_UNIT=polkit.service _SYSTEMD_UNIT=systemd-journald.service"
-    m="$m + _UID=0 _COMM=sudo _COMM=su _COMM=runuser +"
+    m="$m +"
     for r in "${ROLES[@]}"; do m="$m UNIT=user@${UID_OF[$r]}.service"; done
     m="$m _UID=0 +"
     for r in "${ROLES[@]}"; do m="$m USER_UNIT=user@${UID_OF[$r]}.service"; done
@@ -985,7 +985,7 @@ render_audit_vector() {
 # - the agent users' lines and their subordinate ids' (their boxes), minus box output (conmon
 #   with a container's fields);
 # - lines about the agents' managers and sessions (from PID 1 or root: UNIT, _SYSTEMD_UNIT,
-#   _SYSTEMD_OWNER_UID); logins, polkit, su and sudo lines naming an agent or its uid;
+#   _SYSTEMD_OWNER_UID, which also keeps an agent's own sudo or su); logind, machined and polkit lines naming an agent or its uid;
 # - the kernel's drops with the agents' nft log prefixes; journald's own suppression notices for
 #   any of these units; the store's own units.
 # Then standard credential shapes blanked and each field cut at 8 KiB. Nothing is dropped for
@@ -1042,19 +1042,17 @@ transforms:
         # Only fields journald sets decide who wrote a line (SYSLOG_IDENTIFIER and the like are the
         # sender's to choose). Box output: podman's conmon (its binary) with a container's fields.
         box_output = ends_with(exe, "/conmon") && exists(.CONTAINER_ID)
-        # logind, machined and polkit by their units; su, runuser and sudo as root processes.
+        # logind, machined and polkit by their units. (An agent's own sudo or su runs as root but
+        # stays in the agent's cgroup: the owner uid below keeps it. Nobody else's sudo is read.)
         svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit)
-        rootcmd = uid == "0" && includes(["su", "runuser", "sudo"], comm)
         names = match(msg, r'(^|[^A-Za-z0-9_-])($alt)([^A-Za-z0-9_-]|$)|unix-user:($ualt)\b|\buid=($ualt)\b')
-        # sudo: only what an agent ran, or what ran as one (not every command naming an agent's path)
-        sudo_agent = match(msg, r'^\s*($alt) :|\bUSER=($alt) ;|\bby ($alt)\(uid=|for user ($alt)\(uid=')
         agent = includes($(vrl_strings "${uids[@]}"), uid) || $(IFS=' '; r=""; for s in "${subs[@]}"; do r="$r${r:+ || }$s"; done; echo "$r")
         (agent && !box_output) ||
           includes($(vrl_strings "${uids[@]}"), owner) ||
           starts_with(unit, "airlock-envoy") || starts_with(unit, "airlock-audit") ||
           match(unit, r'^user(@|-)($ualt)[.]') ||
           match(about, r'(^|\s)user(@|-)($ualt)[.]') ||
-          ((svc || (rootcmd && comm != "sudo")) && names) || (rootcmd && comm == "sudo" && sudo_agent) ||
+          (svc && names) ||
           (unit == "systemd-journald.service" && contains(msg, "Suppressed") &&
             match(msg, r'airlock-envoy|airlock-audit|user@($ualt)[.]')) ||
           (transport == "kernel" && ($nft))

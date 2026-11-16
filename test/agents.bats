@@ -3376,7 +3376,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     grep -qx 'CapabilityBoundingSet=' "$j" && grep -qx 'NoNewPrivileges=yes' "$j" && grep -qx 'RestrictAddressFamilies=AF_UNIX' "$j"
     grep -qx 'StandardOutput=file:/run/airlock-audit-collect/journal.sock' "$j"
     grep -q 'journalctl --follow --output=json --no-pager --cursor-file=' "$j"
-    grep -q ' + _UID=0 _COMM=sudo _COMM=su _COMM=runuser + ' "$j" && grep -q ' + _TRANSPORT=kernel' "$j"
+    ! grep -q '_COMM=sudo' "$j" && grep -q ' + _TRANSPORT=kernel' "$j"
     ! grep -q 'systemd-journal' "$u/airlock-audit-vector.service"
     grep -qx 'RuntimeDirectory=airlock-audit-collect' "$u/airlock-audit-vector.service"
     grep -qx '    type: socket' "$T/ar/etc/airlock-audit/vector.yaml" && grep -qx '    socket_file_mode: 0o600' "$T/ar/etc/airlock-audit/vector.yaml"
@@ -3445,7 +3445,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     run vector test "$T/v.yaml" "$REPO/test/fixtures/audit-vector-tests.yaml"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *failed* ]]
-    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 44 ]
+    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 43 ]
 }
 
 @test "apply with audit on: the account, the data dirs, then waits for VictoriaLogs; with it, enables the store" {

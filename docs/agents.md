@@ -290,9 +290,9 @@ machine (nothing leaves it):
 - **What goes in, all from the journal:** airlock-envoy's access log lines (turn on its
   `log-journal on`: Envoy then writes each line to the journal too, where journald names the
   unit), and only the agents' other lines: their users, their boxes' subordinate ids and their
-  managers (minus box output), airlock-envoy's units, logind, machined, polkit and `su` lines
-  that name an agent, `sudo` lines run by or as an agent (not yours that merely mention an
-  agent's file), the kernel's drops starting with the agents' nft log prefixes, journald's
+  managers (minus box output; an agent's own `sudo` or `su` counts, as it runs in the agent's
+  cgroup), airlock-envoy's units, logind, machined and polkit lines that name an agent (nobody
+  else's `sudo` is even read), the kernel's drops starting with the agents' nft log prefixes, journald's
   notices when it suppressed any of these, and the store's own units. Who wrote a line is decided
   only by the fields journald itself sets (uid, process, unit), never by what the sender says. The rest of the journal stays where it is.
   Envoy's files are never read: Envoy's own account can write that directory.
