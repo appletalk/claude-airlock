@@ -57,7 +57,8 @@ if [ "$mode" = record ]; then
     t="$(mktemp)"; trap 'rm -f "$t"' EXIT
     { find "$ROOT$LIBDIR" -maxdepth 1 -type f; find "$ROOT$SHARE" -type f ! -name 'TOOLKIT.sha256*'; echo "$ROOT/usr/local/sbin/airlock-agents-apply"
         [ ! -f "$ROOT/usr/local/sbin/update-runsc" ] || echo "$ROOT/usr/local/sbin/update-runsc"
-        [ ! -f "$ROOT/usr/local/sbin/update-victorialogs" ] || echo "$ROOT/usr/local/sbin/update-victorialogs"; } \
+        [ ! -f "$ROOT/usr/local/sbin/update-victorialogs" ] || echo "$ROOT/usr/local/sbin/update-victorialogs"
+        [ ! -f "$ROOT/usr/local/sbin/airlock-audit" ] || echo "$ROOT/usr/local/sbin/airlock-audit"; } \
         | LC_ALL=C sort | sed "s#^$ROOT##" | while IFS= read -r f; do printf '%s  %s\n' "$(sha256sum < "$ROOT$f" | cut -d' ' -f1)" "$f"; done > "$t"
     install -m 0644 "$t" "$ROOT$SHARE/TOOLKIT.sha256.new" && mv -f "$ROOT$SHARE/TOOLKIT.sha256.new" "$ROOT$SHARE/TOOLKIT.sha256"
     echo "recorded $(wc -l < "$ROOT$SHARE/TOOLKIT.sha256") toolkit files"
@@ -862,7 +863,10 @@ render_audit_vector_unit() {
 # store's network namespace; no capabilities.
 [Unit]
 Description=airlock audit collector (Vector)
-Requires=airlock-audit-vl.service
+# Wants, not Requires: a Requires would restart Vector with every VictoriaLogs restart, dropping
+# the lines it holds while the reader's cursor has already passed them. Without it Vector keeps
+# them and retries, and its full buffer stops the reader (the pipe), so the cursor waits too.
+Wants=airlock-audit-vl.service
 After=airlock-audit-vl.service
 JoinsNamespaceOf=airlock-audit-vl.service
 
@@ -902,8 +906,9 @@ render_audit_journal_unit() {
 # journalctl's matches pick the candidate lines; Vector's filter decides what is kept. Its output
 # is the pipe $AUDIT_IN (made at boot; only root and airlock-audit can open it, so nothing else
 # can put lines there): opening it waits until Vector reads. When Vector stops the pipe breaks,
-# journalctl exits, and this starts again from its cursor, waiting for Vector. What was still in
-# the pipe at that moment (64 KiB at most) is lost: the store is a copy.
+# journalctl exits, and this starts again from its cursor, waiting for Vector. Lines the reader
+# had already handed over and Vector hadn't stored by then (the pipe, Vector's buffer and batch)
+# are lost: the store is a copy. A VictoriaLogs restart alone loses nothing (Vector waits).
 [Unit]
 Description=airlock audit journal reader
 Wants=airlock-audit-vector.service
@@ -919,7 +924,7 @@ StateDirectory=airlock-audit-journal
 # the journal's tail and keeps its own cursor from there.
 # --boot=all: on systemd 258, --follow from a cursor in an earlier boot started at the last
 # reboot (the backfill stopped there); with --boot=all it starts at the cursor.
-ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; if [ ! -s "\$\$c" ]; then l=\$\$(/usr/bin/journalctl --since=-$AUDIT_RETENTION --no-pager --output=export | head -n 1); case "\$\$l" in __CURSOR=?*) printf %%s "\$\${l#__CURSOR=}" > "\$\$c" ;; esac; fi; exec /usr/bin/journalctl --follow --boot=all --all --output=json --no-pager --cursor-file="\$\$c"$m'
+ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; if [ ! -s "\$\$c" ]; then l=\$\$(/usr/bin/journalctl --since=-$AUDIT_RETENTION --no-pager --output=export | head -n 1); case "\$\$l" in __CURSOR=?*) printf %%s "\$\${l#__CURSOR=}" > "\$\$c" ;; *) echo "audit reader: no cursor seeded (no journal entry in the last $AUDIT_RETENTION?): starting at the tail" >&2 ;; esac; fi; exec /usr/bin/journalctl --follow --boot=all --all --output=json --no-pager --cursor-file="\$\$c"$m'
 # --all: without it journalctl blanks any field of 4 KiB or more (a padded request would arrive
 # empty). Its own errors go to the journal, never down the pipe.
 StandardOutput=file:$AUDIT_IN

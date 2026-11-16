@@ -3548,3 +3548,41 @@ S
     run "$P"
     [[ "$output" != *"needs Vector"* ]]
 }
+
+@test "audit: the reader's start command, run as systemd would, seeds only from a real cursor and never follows with --since" {
+    audit_site; audit_render
+    line="$(sed -n 's/^ExecStart=//p' "$T/ar/etc/systemd/system/airlock-audit-journal.service")"
+    # systemd's own escapes: $$ -> $, %% -> %, %S -> the state root; then sh -c's single quotes
+    js="$T/js"; mkdir -p "$js/airlock-audit-journal" "$T/jbin"
+    cmd="$(printf '%s' "$line" | sed -e 's/\$\$/$/g' -e 's/%%/%/g' -e "s#%S#$js#g" -e "s#/usr/bin/journalctl#$T/jbin/journalctl#g")"
+    cmd="${cmd#/bin/sh -c \'}"; cmd="${cmd%\'}"
+    # the stub refuses --since beside --cursor-file, as journalctl does; SEED is its export output
+    cat > "$T/jbin/journalctl" <<'S'
+#!/bin/sh
+s=0; c=0; for a; do case $a in --since=*) s=1 ;; --cursor-file=*) c=1 ;; esac; done
+[ $((s + c)) -lt 2 ] || { echo "Please specify only one of --since=, --cursor-file=" >&2; exit 1; }
+if [ $s = 1 ]; then printf '%b' "$SEED"; exit 0; fi
+echo "FOLLOW $*"
+S
+    chmod +x "$T/jbin/journalctl"
+    cur="$js/airlock-audit-journal/cursor"
+    SEED='__CURSOR=s=1;i=2\n__REALTIME_TIMESTAMP=1\n' run sh -c "$cmd"
+    [ "$status" -eq 0 ] && [[ "$output" == "FOLLOW --follow --boot=all --all --output=json --no-pager --cursor-file=$cur "* ]] || { echo "$output"; return 1; }
+    [ "$(cat "$cur")" = 's=1;i=2' ]
+    # a cursor already there: no seed (a seed would read the window again)
+    SEED='__CURSOR=s=other\n' run sh -c "$cmd"
+    [ "$(cat "$cur")" = 's=1;i=2' ]
+    # an empty window or a stray line: nothing seeded, said on stderr, the follow still runs
+    for seed in '' '-- No entries --\n' '__CURSOR=\n'; do
+        rm -f "$cur"
+        SEED="$seed" run sh -c "$cmd"
+        [ ! -e "$cur" ] && [[ "$output" == *"no cursor seeded"* ]] && [[ "$output" == *"FOLLOW --follow"* ]] || { echo "seed [$seed]: $output"; return 1; }
+    done
+}
+
+@test "audit: Vector only wants the store (a store restart doesn't restart Vector and drop what it holds)" {
+    audit_site; audit_render
+    v="$T/ar/etc/systemd/system/airlock-audit-vector.service"
+    grep -qx 'Wants=airlock-audit-vl.service' "$v" && grep -qx 'After=airlock-audit-vl.service' "$v"
+    ! grep -q '^Requires=' "$v" && ! grep -q '^BindsTo=' "$v"
+}

@@ -315,7 +315,8 @@ machine (nothing leaves it):
   files stay the record.
 - **Not covered:** an Envoy line over journald's line limit (48 KiB, a request with a huge path)
   arrives split, as plain journal lines without Envoy's fields; lines from airlock-envoy's socket
-  relays (`airlock-envoy-proxy@`); and up to 64 KiB of lines in flight when Vector restarts.
+  relays (`airlock-envoy-proxy@`); and, when Vector itself restarts, the lines it held but hadn't
+  stored yet (a VictoriaLogs restart loses nothing: Vector waits and retries).
 - **Where:** a VictoriaLogs under its own account `airlock-audit`, data in `/var/lib/airlock-audit`,
   kept 90 days up to 5 GB (`audit on retention 180d max-disk 10G` to change). Vector 0.57 or later (your distribution's package) feeds it without
   reading the journal itself: a small reader unit (a dynamic user, the only one in
@@ -331,6 +332,9 @@ machine (nothing leaves it):
 - **With external nftables**, name your drop rules' log prefixes, 16 characters or more before
   any colon (a process name is at most 15, and the kernel starts some lines with it):
   `audit-nft-prefix myhost-agent-drop: myhost-agentweb-drop:`.
+- **Day to day:** `sudo airlock-audit status` (units, what the store holds, seccomp kills),
+  `restart`, `check` (the guarantees above, live: exit 1 on any failure), and `reset` (empties the
+  store and reads the retention window back in from the journal; asks first).
 - `audit off` stops and disables the units; the data in `/var/lib/airlock-audit` stays until you
   remove it.
 
