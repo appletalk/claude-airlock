@@ -1308,7 +1308,7 @@ audit_events() {
             --since) [ $# -ge 2 ] || die "--since needs <n>d, <n>h or YYYY-MM-DD"; since=$2; shift ;;
             --limit) [ $# -ge 2 ] && [[ "$2" =~ ^([1-9][0-9]{0,2}|1000)$ ]] || die "--limit needs a number from 1 to 1000"; limit=$2; shift ;;
             --severity) [ $# -ge 2 ] && [[ "$2" =~ ^(high|medium|low|info)$ ]] || die "--severity needs high, medium, low or info"; sev=$2; shift ;;
-            --kind) [ $# -ge 2 ] && [[ "$2" =~ ^[a-z][a-z-]{0,31}$ ]] || die "--kind needs a kind (envoy-refused, privilege, login, session, nft-drop, ...)"; kind=$2; shift ;;
+            --kind) [ $# -ge 2 ] && [[ "$2" =~ ^[a-z][a-z-]{0,31}$ ]] || die "--kind needs a kind (envoy-refused, privilege, login, session, nft-drop, box-drop, ...)"; kind=$2; shift ;;
             --agent) [ $# -ge 2 ] && [[ "$2" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "--agent needs an agent user's name"; agent=$2; shift ;;
             --full) full=1 ;;
             *) die "usage: $CMD audit events [--severity high|medium|low|info] [--kind <kind>] [--agent <name>] [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] [--full]" ;;

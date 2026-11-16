@@ -95,7 +95,7 @@ _airlock_agents() {
             elif [[ ${words[3]} == events ]]; then
                 case ${words[CURRENT-1]} in
                     --severity) _values 'severity' high medium low info ;;
-                    --kind) _values 'kind' envoy-refused envoy-web-refused privilege login session nft-drop journald-suppressed envoy-service store agent-process envoy-allowed envoy-web-allowed ;;
+                    --kind) _values 'kind' envoy-refused envoy-web-refused privilege login session nft-drop box-drop journald-suppressed envoy-service store agent-process envoy-allowed envoy-web-allowed ;;
                     --agent|--since|--limit) _message 'value' ;;
                     *) _values 'option' '--severity[high, medium, low or info: that and above]' '--kind[one audit.kind]' '--agent[an agent user]' '--since[<n>d, <n>h or YYYY-MM-DD]' '--limit[1 to 1000]' '--full[each event'"'"'s whole text under its row]' ;;
                 esac

@@ -56,7 +56,10 @@ its own; `hits` is an endpoint, not a pipe), `field_names`,
   `envoy-web-allowed`, `envoy-web-refused`, `privilege` (sudo, su, pkexec, doas, run0 by an
   agent; polkit naming one), `login` (logind, machined, polkit, sshd naming an agent), `session`
   (the agents' user managers and units), `nft-drop` (the kernel dropped an agent's packet in the
-  host's network namespace: there should be none), `journald-suppressed` (journald dropped some
+  host's network namespace: there should be none), `box-drop` (the box's network stack, passt or
+  pasta, dropped a datagram a box sent outside the proxy, such as DNS straight to a public
+  resolver: there should be none; a burst of them, seconds apart, is one finding, so report it
+  once with its count, first and last time, and unit), `journald-suppressed` (journald dropped some
   of these lines for rate), `envoy-service` (the proxy's own units), `store` (the store's own
   units), `agent-process` (anything else an agent or its boxes logged).
 - `audit.agent` (which agent it is about), `audit.session` (`<project>.<name>`, from the session

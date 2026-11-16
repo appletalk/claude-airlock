@@ -1009,7 +1009,12 @@ render_audit_redact() {
           s = replace(s, r'(?i)([?&;](?:access_token|refresh_token|id_token|private_token|token|api_key|apikey|api-key|key|secret|client_secret|password|passwd|pwd|auth|sig|signature|code|session|sessionid|jwt|x-amz-security-token|x-amz-signature|x-amz-credential|x-goog-signature|x-goog-credential)=)[^&;\s"#\\]*', "${1}REDACTED")
           s = replace(s, r'(?i)("(?:access_?token|refresh_?token|id_?token|session_?token|auth_?token|token|api_?key|apikey|secret|client_?secret|password|passwd|private_?key|cookie)"\s*:\s*")(?:[^"\\]|\\.)*', "${1}REDACTED")
           s = replace(s, r'(?i)((?:^|\s)--?(?:password|passwd|token|secret|api-key|apikey|auth-token|access-token)(?:=|\s+))(?:"[^"]*"|\x27[^\x27]*\x27|[^\s"\x27]+)', "${1}REDACTED")
+          # The launcher's own gh placeholder (bin/claude-airlock: GH_TOKEN=airlock-proxy-adds-the-credential
+          # on a box's podman command line, the proxy adds the real one) is no secret: set aside, exactly
+          # that value and nothing longer, then put back, so audit.redacted keeps meaning a box sent one.
+          s = replace(s, r'\bGH_TOKEN=airlock-proxy-adds-the-credential(?P<e>$|[\s"\x27&])', "GH_TOKEN\u{1f}airlock-proxy-adds-the-credential${e}")
           s = replace(s, r'\b((?:[A-Z][A-Z0-9_]*_)?(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)(?:_[A-Z0-9_]*)?=)(?:"[^"]*"|\x27[^\x27]*\x27|[^\s"\x27&]+)', "${1}REDACTED")
+          s = replace(s, "GH_TOKEN\u{1f}airlock-proxy-adds-the-credential", "GH_TOKEN=airlock-proxy-adds-the-credential")
           s = replace(s, r'\b([Bb]earer|[Bb]asic|BEARER|BASIC)(\s+)[A-Za-z0-9+/=._~-]*[0-9+/=_~][A-Za-z0-9+/=._~-]*', "${1}${2}REDACTED")
           s = replace(s, r'(?i)((?:\b|_)(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|private-token)["\x27]?\s*[:=]\s*["\x27]?)([A-Za-z]+\s+)?[A-Za-z0-9+/=._~-]{8,}', "${1}${2}REDACTED")
           s = replace(s, r'(?i)(\b(?:set-)?cookie["\x27]?\s*:\s*)[^\r\n"]+', "${1}REDACTED")
@@ -1132,6 +1137,10 @@ transforms:
       suppressed = unit == "systemd-journald.service" && contains(msg, "Suppressed") &&
         match(msg, r'airlock-envoy|airlock-audit|user@($ualt)[.]')
       dropped = transport == "kernel" && ($nft)
+      # passt/pasta (a box's network, by its binary as journald resolves it) dropping a datagram it
+      # has no flow for: something in a box sending outside the proxy (direct DNS, say).
+      box_drop = (by_agent || by_owner) && includes(["/usr/bin/passt", "/usr/bin/passt.avx2", "/usr/bin/pasta", "/usr/bin/pasta.avx2"], exe) &&
+        starts_with(msg, "Dropping datagram")
       if !(by_agent || by_owner || envoy_unit || store_unit || manager || named || suppressed || dropped) { abort }
       # Why it was kept, most specific first.
       # The setuid ones, by the binary journald resolved (an agent can't copy them and keep the
@@ -1142,6 +1151,7 @@ transforms:
         (exe == "/usr/bin/systemd-run" && comm == "run0")
       kind = "agent-process"
       if dropped { kind = "nft-drop"
+      } else if box_drop { kind = "box-drop"
       } else if suppressed { kind = "journald-suppressed"
       } else if store_unit { kind = "store"
       } else if envoy_unit { kind = "envoy-service"
@@ -1244,6 +1254,7 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
+      } else if k == "box-drop" { sev = "medium"
       } else if k == "privilege" && match(to_string(.message) ?? "", r'^pam_systemd_home\([a-z0-9_-]+:[a-z]+\): Failed to connect to system bus') {
         # Known noise: the agents have no system bus, so this module complains on every attempt;
         # the attempt's own lines (sudo's, pam_unix's, faillock's) still rate high. Medium, not
@@ -1257,7 +1268,10 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       } else if k == "login" && unit == "systemd-logind.service" &&
           match(to_string(.message) ?? "", r'^(Session \S+ logged out\. |Removed session \S+\.$|New session \S+ of user \S+ with class .manager. )') { sev = "info"
       } else if k == "login" && unit == "systemd-logind.service" &&
-          match(to_string(.message) ?? "", r'^New session \S+ of user \S+ with class .user. and type .tty.\.$') { sev = "low"
+          match(to_string(.message) ?? "", r'^New session \S+ of user \S+ with class .user. and type .tty.\.$') {
+        # the operator command's shell as the agent (machinectl shell). An SSH login with a terminal
+        # looks the same here and is rated high by sshd's own Accepted line, so this one adds nothing.
+        sev = "info"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"
       } else if k == "session" && match(unit, r'^user@($ualt)[.]service$') && (to_string(._EXE) ?? "") == "/usr/lib/systemd/systemd" &&

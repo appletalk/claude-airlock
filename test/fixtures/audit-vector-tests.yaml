@@ -121,6 +121,15 @@ tests:
   - name: redact query token values in any case, the name kept, in nested fields too
     inputs: [{insert_at: redact, type: log, log_fields: {envoy.path: "/api/v1/repos/a/b?a=1&TOKEN=canary-123&access_token=xyz&page=2"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.envoy.path, "/api/v1/repos/a/b?a=1&TOKEN=REDACTED&access_token=REDACTED&page=2")'}]}]
+  - name: "redact: the launcher's gh placeholder on a box's podman command line is kept, audit.redacted not set"
+    inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "podman run -e GH_TELEMETRY=0 -e GH_TOKEN=airlock-proxy-adds-the-credential -e AIRLOCK_HOST_USER=agent --name airlock-agent.main claude-airlock:dev claude", message: "container create 4fcf66101d5905ea1f938a28bdb3c453dbb73b5e006976c5a23c32746b12c3ab (image=localhost/claude-airlock:dev, name=airlock-agent.main)"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(contains(string!(._CMDLINE), "-e GH_TOKEN=airlock-proxy-adds-the-credential -e")); assert!(!exists(.audit.redacted)); assert!(contains(string!(.message), "4fcf66101d5905ea1f938a28bdb3c453dbb73b5e006976c5a23c32746b12c3ab"))'}]}]
+  - name: "redact: any other GH_TOKEN value is still blanked, the placeholder with more after it too"
+    inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "podman run -e GH_TOKEN=gho_notaplaceholder123 -e X_GH_TOKEN=airlock-proxy-adds-the-credentialXYZ -e GH_TOKEN=airlock-proxy-adds-the-credential", message: "x"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(._CMDLINE, "podman run -e GH_TOKEN=REDACTED -e X_GH_TOKEN=REDACTED -e GH_TOKEN=airlock-proxy-adds-the-credential"); assert_eq!(.audit.redacted, true)'}]}]
+  - name: "redact: a planted set-aside marker gains nothing (comes back as the placeholder, a real value after it still blanked)"
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "GH_TOKEN\u001fairlock-proxy-adds-the-credential GH_TOKEN=realsecret"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "GH_TOKEN=airlock-proxy-adds-the-credential GH_TOKEN=REDACTED")'}]}]
   - name: redact cloud signature parameters, private_token and a ;-separated token
     inputs: [{insert_at: redact, type: log, log_fields: {message: "/o?X-Amz-Signature=abc123&X-Amz-Security-Token=zz&private_token=pt1&x=1;token=t2"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "/o?X-Amz-Signature=REDACTED&X-Amz-Security-Token=REDACTED&private_token=REDACTED&x=1;token=REDACTED")'}]}]
@@ -180,9 +189,21 @@ tests:
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1101)"}}
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.agent, "agent-web"); assert_eq!(.audit.severity, "high")'}]}]
-  - name: "enrich: logind's new tty session for an agent (the operator command's shape) is login, low"
+  - name: "enrich: logind's new tty session for an agent (the operator command's shape) is login, info"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent-guard", SESSION_ID: "5", message: "New session '5' of user 'agent-guard' with class 'user' and type 'tty'."}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "low"); assert_eq!(.level, "info")'}]}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "info"); assert_eq!(.level, "info")'}]}]
+  - name: "enrich: pasta dropping a box's datagram (direct DNS around the proxy) is box-drop, medium"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "passt.avx2", _EXE: "/usr/bin/passt.avx2", _SYSTEMD_UNIT: "user@1100.service", _SYSTEMD_USER_UNIT: "run-p1-i2.service", PRIORITY: "4", message: "Dropping datagram with no flow TAP 169.254.2.1:51234 -> 8.8.8.8:53"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "box-drop"); assert_eq!(.audit.severity, "medium"); assert_eq!(.audit.agent, "agent")'}]}]
+  - name: "enrich: the same text from another binary is not a box-drop"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "passt.avx2", _EXE: "/home/agent/passt.avx2", PRIORITY: "4", message: "Dropping datagram with no flow TAP 169.254.2.1:51234 -> 8.8.8.8:53"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "agent-process")'}]}]
+  - name: "enrich: passt's other lines keep their kind"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _EXE: "/usr/bin/passt.avx2", PRIORITY: "6", message: "Outbound interface: eth0"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "agent-process")'}]}]
+  - name: "enrich: an SSH login for an agent stays high by sshd's line though logind's tty line is info"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "sshd.service", message: "Accepted publickey for agent from 10.99.0.5 port 52100 ssh2: ED25519 SHA256:abc"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "high")'}]}]
   - name: "enrich: the agent's manager reporting a session's crash is session, low, with its session"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _SYSTEMD_UNIT: "user@1100.service", USER_UNIT: "agent-session@proj.review.service", PRIORITY: "4", message: "agent-session@proj.review.service: Main process exited, code=dumped, status=11/SEGV"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.agent, "agent"); assert_eq!(.audit.session, "proj.review"); assert_eq!(.audit.severity, "low"); assert_eq!(.level, "warning")'}]}]

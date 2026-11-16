@@ -306,8 +306,9 @@ machine (nothing leaves it):
     sudo, su, pkexec or doas, by its setuid binary, and run0 by the system's binary under that
     name; polkit naming an agent. A refused attempt shows only if it logs: polkit writes no line
     when no authentication agent could be asked), `login` (logind or machined
-    naming an agent), `session` (the agents' managers and their units), `nft-drop`,
-    `journald-suppressed`, `envoy-service` (Envoy's units' other lines), `store` (the store's
+    naming an agent), `session` (the agents' managers and their units), `nft-drop`, `box-drop`
+    (passt or pasta, by its binary, dropping a datagram a box sent outside the proxy: direct DNS,
+    say), `journald-suppressed`, `envoy-service` (Envoy's units' other lines), `store` (the store's
     own units), `agent-process` (anything else an agent or its boxes logged);
   - `audit.agent`: the agent the line is about (by uid, a box's subordinate id, the session's
     owner, the manager's uid, logind's own `USER_ID` field, or the `(owned by unix-user:X)` tail
@@ -322,15 +323,17 @@ machine (nothing leaves it):
   - `audit.severity`, a security rating apart from syslog's: `high` for an agent's privilege
     attempt (polkit only when it refused; `pam_systemd_home`'s "no system bus" line within it
     medium, a known complaint the agents' sandbox causes, kept visible because a sudo killed at
-    its prompt leaves only that line) or a dropped packet; `medium` for a refusal, an
+    its prompt leaves only that line) or a dropped packet; `medium` for a refusal, a box-drop, an
     unusual login, journald suppressing the agents' lines or the store's own errors; `low` for a
-    failing session, Envoy service or agent process, and for logind's new `user`/`tty` sessions
-    (the shape of the operator command's `machinectl shell`; an SSH login with a terminal looks
-    the same in logind's line, and is flagged by sshd's own: `high` when sshd accepts an agent,
-    `medium` for its other lines naming one);
-    `info` for the rest, a user manager's session and every session's end included;
+    failing session, Envoy service or agent process; `info` for the rest: a user manager's
+    session, every session's end, a user manager saying it has no system bus, and logind's new
+    `user`/`tty` sessions (the shape of the operator command's `machinectl shell`; an SSH login
+    with a terminal looks the same in logind's line and is flagged by sshd's own: `high` when
+    sshd accepts an agent, `medium` for its other lines naming one);
   - `audit.redacted: true` when redaction changed the line (a box sent something
-    credential-shaped: flagged, not only hidden).
+    credential-shaped: flagged, not only hidden). The launcher's own gh placeholder
+    (`GH_TOKEN=airlock-proxy-adds-the-credential` on a box's podman command line) is no secret
+    and is kept as it is.
 
   Lines stored before an update that adds fields don't have them: `sudo airlock-audit reset`
   reads the journal back in with them (only what the journal still holds: compare its oldest
