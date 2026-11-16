@@ -1121,7 +1121,7 @@ audit_run() {  # audit_run review <days> | ask <question>
     AS=$AUDITOR orun "$AGENTS_LIB/audit-run" "$@" > "$out" || rc=$?
     end="$(date -u +%s)"
     # 64 with audit-run's own line: it refused before any run (its reason is all it printed): no report
-    if [ "$rc" = 64 ] && head -c 10 "$out" | grep -q '^audit-run:'; then head -c 4096 "$out" >&2; die "no run, no report"; fi
+    if [ "$rc" = 64 ] && head -c 4096 "$out" | grep -q '^audit-run: '; then head -c 4096 "$out" >&2; die "no run, no report"; fi
     { python3 -I - "$AUDIT_SOCK" "$AUDITOR" "$start" "$end" "$rc" "$out" "$reports" "$CMD" "$1" "${2:-}" <<"PY"
 import datetime, json, os, re, subprocess, sys, time, urllib.parse
 sock, auditor, start, end, rc, out, reports, cmd, mode, arg = sys.argv[1:11]

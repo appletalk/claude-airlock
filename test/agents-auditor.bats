@@ -62,6 +62,9 @@ case "$q" in
 esac
 printf '\n200'
 S
+    # podman: the auditor's running containers (RUNNING)
+    printf '#!/bin/bash\n[ "$1" = ps ] && printf "%%s" "${RUNNING:-}"\nexit 0\n' > "$T/bin/podman"
+    export AIRLOCK_TMP_BASE="$T/airlock-tmp" AGENTS_AUDIT_PODMAN="$T/bin/podman"
     chmod +x "$T/bin/"*
     export PATH="$T/bin:$PATH"
     : > "$T/rows"; : > "$CALLS"
@@ -293,4 +296,37 @@ report_file() { find "$T/reports" -name '*.md' | head -1; }
     rm "$st/dot-claude/.credentials.json"; ln -s /etc/passwd "$st/dot-claude/.credentials.json"
     run "$REPO/agents/lib/audit-run" review 7
     [ "$status" -eq 0 ]; [ -z "$(ls -A "$st/dot-claude")" ]
+}
+
+@test "audit-run: the launcher's scratch dir and artifact stores for the workspace are emptied too; the template keeps none" {
+    slug="$(printf '%s' "$T/home/audit" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+    st="$T/home/.config/claude-airlock/state/$slug"
+    mkdir -p "$st/artifacts/node_modules" "$st/artifacts-x" "$AIRLOCK_TMP_BASE/$slug/sub"
+    echo note > "$st/artifacts/node_modules/note"; echo t > "$AIRLOCK_TMP_BASE/$slug/sub/t"; echo h > "$AIRLOCK_TMP_BASE/$slug/.h"
+    run "$REPO/agents/lib/audit-run" review 7
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$st/artifacts" ] && [ ! -e "$st/artifacts-x" ]
+    [ -d "$AIRLOCK_TMP_BASE/$slug" ] && [ -z "$(ls -A "$AIRLOCK_TMP_BASE/$slug")" ]
+    grep -qx 'AIRLOCK_ARTIFACT_DIRS=' "$REPO/agents/templates/auditor.conf"
+    grep -qx 'AIRLOCK_SHARE_HISTORY=0' "$REPO/agents/templates/auditor.conf"
+}
+
+@test "audit-run: refused while a box of the auditor's still runs, or when its state is a link" {
+    RUNNING=abc123 run "$REPO/agents/lib/audit-run" review 7
+    [ "$status" -eq 64 ]; [[ "$output" == *"is still running"* ]]
+    [ ! -e "$CALLS.airlock" ]
+    st="$T/home/.config/claude-airlock/state/$(printf '%s' "$T/home/audit" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+    mkdir -p "$T/elsewhere" "$st"; echo '{}' > "$T/elsewhere/settings.json"; ln -s "$T/elsewhere" "$st/dot-claude"
+    run "$REPO/agents/lib/audit-run" review 7
+    [ "$status" -eq 64 ]; [[ "$output" == *"is a link"* ]]
+    [ -f "$T/elsewhere/settings.json" ]
+}
+
+@test "audit: audit-run's refusal after other tools' errors still writes no report" {
+    mkdir -p "$T/lib"
+    printf '#!/bin/sh\necho "rm: cannot remove x: Permission denied"\necho "audit-run: could not empty y; nothing runs until it is"\nexit 64\n' > "$T/lib/audit-run"; chmod +x "$T/lib/audit-run"
+    sed -i "s#^AGENTS_LIB=.*#AGENTS_LIB=$T/lib#" "$AIRLOCK_AGENTS_ENV"
+    run "$OP" audit
+    [ "$status" -ne 0 ]; [[ "$output" == *"no run, no report"* ]]
+    [ -z "$(report_file)" ]
 }

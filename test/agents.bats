@@ -3518,6 +3518,15 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     [ "$status" -ne 0 ]; [[ "$output" == *"/srv/agent-audit/reports is not a plain directory"* ]]
 }
 
+@test "with an auditor, the inbox ACL tmpfiles writes is the one provision checks: a provisioned host is ok" {
+    audit_site "auditor  agent-audit  uid 1103 subuid 1400000 home 1G"
+    "$P" --user-conf agent-audit > "$E/agent-audit.conf"
+    RENDER="$T/ar2"; "$P" --render "$RENDER" >/dev/null
+    fake_queue_state
+    run "$P" --check
+    [[ "$output" == *"ok   /srv/agent-inbox root 0755, pastes/ and airlock/ alice:agent 2750, airlock/ readable by agent-web and agent-guard and agent-audit"* ]] || { echo "$output" | grep inbox; return 1; }
+}
+
 @test "an auditor's Envoy listeners: Anthropic and the store's socket only; anything else pauses" {
     audit_site "auditor  agent-audit  uid 1103 subuid 1400000 home 1G"
     "$P" --user-conf agent-audit > "$E/agent-audit.conf"

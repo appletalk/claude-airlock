@@ -431,8 +431,10 @@ machine (nothing leaves it):
     settings, which alone decide its permissions; no Write, Edit or web tools. curl can still
     write files in the box (`-o`), so before each run everything a run could have written is
     removed: the workspace, the box's `~/.claude` in the launcher's state (settings, transcripts,
-    earlier reports) except the login, `claude.json` except the account fields, the history. You
-    wait for it; the report prints when it ends.
+    earlier reports) except the login, `claude.json` except the account fields, the history, the
+    launcher's scratch dir and artifact stores for the workspace (the auditor's config keeps no
+    artifact dirs). A run doesn't start while a box of the auditor's still runs (an earlier one,
+    or `audit login`'s). You wait for it; the report prints when it ends.
   - **The report** goes to `/srv/<auditor>/reports/<time>.md` (yours alone, 0700: the auditor
     never reads or writes it; this command writes it after the run). It starts with **the queries
     actually run**: Envoy's lines for the auditor's user over the run, as the store holds them,
