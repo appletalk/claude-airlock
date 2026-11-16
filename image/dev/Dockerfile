@@ -180,12 +180,12 @@ RUN set -eux; \
 # the release); it used to float to "newest v24.x at build time" on TLS alone, the one
 # download in the image a re-tag or a bad mirror could change silently. Bump with the
 # other pins.
-ARG NODE_VERSION=24.22.2
+ARG NODE_VERSION=24.22.3
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) narch=x64;   sha=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75 ;; \
-      arm64) narch=arm64; sha=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8 ;; \
+      amd64) narch=x64;   sha=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb ;; \
+      arm64) narch=arm64; sha=6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${narch}.tar.xz" -o /tmp/node.tar.xz; \
@@ -278,14 +278,14 @@ RUN set -eux; \
 
 # terraform: `fmt` only (see scope note above). tflint carries its terraform
 # ruleset inside the binary, so it lints with no plugin download.
-ARG TERRAFORM_VERSION=1.17.1
+ARG TERRAFORM_VERSION=1.17.2
 ARG TFLINT_VERSION=0.66.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) tfsha=4638628058e71a55212b1c563712eac03b902128f40740f3dc8174df12135061; \
+      amd64) tfsha=e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b; \
              tlsha=22be11cadc25cd02401e94c0ccc91aa63467debb8485c2a755d98f4c0a9d1e2e ;; \
-      arm64) tfsha=988e950a1c23058093b0e66ab2d5fb53fc18345ecfbd5871acf51dbac9325edd; \
+      arm64) tfsha=858e08c181a76b6b223e8c767a8e983922eebe2d062db949a2de66ce040c368c; \
              tlsha=1105a0a5ddee7cdac7957a3475571a946b839192ea1bc0c722c6c4686001067e ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
@@ -329,12 +329,12 @@ RUN set -eux; \
 # Note the size: this is a ~450MB binary (every component plus the embedded UI are
 # linked in, and Go binaries don't strip usefully). It is the single largest tool
 # in the image -- roughly promtool + terraform + vector combined.
-ARG ALLOY_VERSION=1.21.3
+ARG ALLOY_VERSION=1.22.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) sha=50d23af2d0f98c00beac6ce9a365693e60f87fb76b6cad6fe1d161e80588af6d ;; \
-      arm64) sha=ca2f383cc60491877b21aef50c54af6a198f6c861c2c4b80f41ec49ad73b1b93 ;; \
+      amd64) sha=62d177feb18c9b6ffd636c8273aa82a6afc75a507d096ff951749df23c3176f9 ;; \
+      arm64) sha=cc2c4d7bc25d3ef7df8c95395759879ba4eb0d016db068c07dcb7aa88f436ad3 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/grafana/alloy/releases/download/v${ALLOY_VERSION}/alloy-linux-${arch}.zip" -o /tmp/alloy.zip; \
@@ -358,13 +358,13 @@ RUN envoy --version
 # AllUsers module path: the box's $HOME is a fresh mount every session, so a
 # CurrentUser install would vanish. Baking it here is also what makes the linter
 # work with zero egress.
-ARG POWERSHELL_VERSION=7.6.9
+ARG POWERSHELL_VERSION=7.6.10
 ARG PSSCRIPTANALYZER_VERSION=1.25.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) parch=x64;   sha=1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b ;; \
-      arm64) parch=arm64; sha=02eb9991af447c7e7fe881acde195961afd397c40b8eb1c2b3856b84ec2d85f2 ;; \
+      amd64) parch=x64;   sha=e261cabc91c78a9afe8d1e5f24731ab0d38204735ab2ec94b0af55102652e10d ;; \
+      arm64) parch=arm64; sha=439432cdecf4418413b9a8f547e3ab4d9b40e8e4258913ec3d15fc92c67a9235 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-${parch}.tar.gz" -o /tmp/pwsh.tgz; \
@@ -459,18 +459,18 @@ RUN set -eux; \
 # Pinned by version + sha256 per arch, same as the validators. drill comes from the apt
 # layer at the top.
 ARG KUBECTL_VERSION=1.37.2
-ARG HELM_VERSION=4.3.1
+ARG HELM_VERSION=4.3.2
 ARG SOPS_VERSION=3.13.3
 ARG TEA_VERSION=0.16.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       amd64) kcsha=c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4; \
-             hmsha=0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b; \
+             hmsha=d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983; \
              spsha=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b; \
              tesha=9c142c8a0b31485eea2387031c1c404f12b7141075eb4ffbd7ced49441590636 ;; \
       arm64) kcsha=fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509; \
-             hmsha=8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88; \
+             hmsha=df31cb61680ef728f82c770e5280dd565617bee6b039d37e85c677288be4bbb0; \
              spsha=53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77; \
              tesha=0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
