@@ -917,7 +917,10 @@ StateDirectory=airlock-audit-journal
 # file is seeded with the oldest entry of the last $AUDIT_RETENTION (export format: its first
 # line is __CURSOR=...); anything else (an empty window) seeds nothing, and journalctl starts at
 # the journal's tail and keeps its own cursor from there.
-ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; if [ ! -s "\$\$c" ]; then l=\$\$(/usr/bin/journalctl --since=-$AUDIT_RETENTION --no-pager --output=export | head -n 1); case "\$\$l" in __CURSOR=?*) printf %%s "\$\${l#__CURSOR=}" > "\$\$c" ;; esac; fi; exec /usr/bin/journalctl --follow --all --output=json --no-pager --cursor-file="\$\$c"$m'
+# --boot=all: with --follow, journalctl reads only the current boot unless told otherwise, even
+# from a cursor in an earlier one (seen on the first host run: the backfill stopped at the last
+# reboot).
+ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; if [ ! -s "\$\$c" ]; then l=\$\$(/usr/bin/journalctl --since=-$AUDIT_RETENTION --no-pager --output=export | head -n 1); case "\$\$l" in __CURSOR=?*) printf %%s "\$\${l#__CURSOR=}" > "\$\$c" ;; esac; fi; exec /usr/bin/journalctl --follow --boot=all --all --output=json --no-pager --cursor-file="\$\$c"$m'
 # --all: without it journalctl blanks any field of 4 KiB or more (a padded request would arrive
 # empty). Its own errors go to the journal, never down the pipe.
 StandardOutput=file:$AUDIT_IN

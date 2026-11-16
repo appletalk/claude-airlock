@@ -3378,7 +3378,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     grep -qx 'DynamicUser=yes' "$j" && grep -qx 'SupplementaryGroups=systemd-journal' "$j" && grep -qx 'PrivateNetwork=yes' "$j"
     grep -qx 'CapabilityBoundingSet=' "$j" && grep -qx 'NoNewPrivileges=yes' "$j" && grep -qx 'RestrictAddressFamilies=AF_UNIX' "$j"
     grep -qx 'StandardOutput=file:/run/airlock-audit-in/journal' "$j" && grep -qx 'StandardError=journal' "$j"
-    grep -q 'journalctl --follow --all --output=json --no-pager --cursor-file=' "$j"
+    grep -q 'journalctl --follow --boot=all --all --output=json --no-pager --cursor-file=' "$j"
     ! grep -q '^BindsTo=' "$j"
     # the pipe: made at boot (tmpfiles), so the reader's output never lands in a regular file
     grep -qx 'p /run/airlock-audit-in/journal 0600 airlock-audit airlock-audit -' "$T/ar/etc/tmpfiles.d/airlock-audit.conf"
