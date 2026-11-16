@@ -79,6 +79,7 @@ claude-agent attach myproject
 | `claude-agent web ...` | web research (below) |
 | `claude-agent halt` / `resume` | emergency stop of everything (below) / back to normal |
 | `claude-agent audit denies` | Envoy's recent refusals, with who and which site file line (with `audit on`, below) |
+| `claude-agent audit ui` | the audit store's web UI in your browser, for you alone, until Ctrl-C |
 
 Tab completion (sessions, web commands, the queue's ids by state): add to your `~/.zshrc`, after
 `compinit`, or to `~/.bashrc` with `completion.bash`:
@@ -337,19 +338,26 @@ machine (nothing leaves it):
   Envoy's own refusals, newest first (the last 24 hours, 50 by default), each with its time, user
   and listener, status, what was asked (method and host, or the TLS name in a tunnel), Envoy's
   route, and which site file line would change it (a listener's destinations, a host's `http`
-  line, an internal name, a locked credential). A refused TLS name has no user in Envoy's line: it
-  is taken from the CONNECT that opened that tunnel (the latest one before it with the same
-  connection id, as ids restart with Envoy), and shown as `?` when none is in the store. Upstream's
-  own errors (a 403 from the server itself) and failed connections are not refusals and stay out.
+  line, an internal name, a locked credential, a protected branch). It also lists web failing
+  to reach a name (its kernel filter refuses internal addresses that way). A refused TLS name has
+  no user in Envoy's line: it is taken from the CONNECT that opened that tunnel (the one with the
+  same connection id from 20 seconds before it to a second after, as ids restart with Envoy and
+  a TLS name comes within 15 seconds), and shown as `?` when there is none, never a guess.
+  Upstream's own errors (a 403 from the server itself), failed connections and timeouts are not
+  refusals and stay out.
   One fixed query, no model; what it prints is the agents' text (hosts, paths, names), cleaned of
   control characters, never acted on. It works while the agents are halted.
 - **Browsing it:** `claude-agent audit ui` serves the store's web UI (VictoriaLogs' vmui) at
   `http://127.0.0.1:9429/select/vmui/` until Ctrl-C (`--port <n>` for another), and closes by
   itself after 30 minutes without a request or 4 hours in all, so it isn't left open. A loopback port
   is open to every process on the host, so each connection's owner is looked up in the kernel's
-  socket table and only yours is served (it names any other uid it refused, once each); and only
-  a `Host` of `127.0.0.1:<port>` or `localhost:<port>`, so a web page in your own browser can't
-  read it through a name it points at 127.0.0.1. The store's door still allows only queries.
+  socket table and only yours is served (it names any other uid it refused, once each). A web
+  page in your own browser runs as you, so the UI serves only itself: a `Host` of
+  `127.0.0.1:<port>` or `localhost:<port>` (no name pointed at 127.0.0.1), no request another
+  site started (an `Origin` or `Sec-Fetch-Site` that isn't this one's is refused before anything
+  reaches the store), and no CORS (VictoriaLogs allows any origin; those headers are dropped).
+  A browser too old to send either header can still send a blind query, but can't read the
+  answer. Refused requests don't count as use. The store's door still allows only queries.
 - **Day to day:** `sudo airlock-audit status` (units, what the store holds, seccomp kills),
   `restart`, `check` (the guarantees above, live: exit 1 on any failure), and `reset` (empties the
   store and reads the retention window back in from the journal; asks first).

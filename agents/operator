@@ -886,12 +886,17 @@ import datetime, json, re, subprocess, sys
 sock, start, limit, cmd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 
 # Envoy's own refusals: a deny- route (CONNECT or plain HTTP outside the listener, an internal
-# name asked of web), a TLS name no destination takes (NR) or an address entry refuses (RBAC),
-# and any 4xx/5xx Envoy answered itself (a preset's rules, a locked credential, a body too large,
-# a request the parser rejected): not one passed on from upstream, not an upstream failure.
-REFUSED = ('log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.details:~"^rbac_access_denied" '
-           'or envoy.route:~"^deny-" or (envoy.status:>=400 -envoy.details:via_upstream '
-           '-envoy.details:~"^(upstream_|no_healthy_upstream)"))')
+# name asked of web), a TLS name no destination takes (NR) or an address entry refuses (RBAC), a
+# push to a protected branch (the push check, UAEX: Envoy answers git with a 200 and a refusal in
+# the pack status), web failing to reach a name (UF, DF: its kernel filter refuses an internal
+# address that way), and any 4xx/5xx Envoy answered itself (a preset's rules, a locked
+# credential, a body too large, a request the parser rejected): not one passed on from upstream,
+# not an upstream failure, not a timeout (a slow client or a long stream is no refusal).
+REFUSED = ('log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX '
+           'or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" '
+           'or (log_type:envoy-web envoy.flags:~"UF|DF") '
+           'or (envoy.status:>=400 -envoy.details:via_upstream '
+           '-envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))')
 FIELDS = ('_time, log_type, envoy.listener, envoy.user, envoy.connection, envoy.method, envoy.authority, '
           'envoy.path, envoy.sni, envoy.route, envoy.status, envoy.flags, envoy.details')
 
@@ -931,26 +936,42 @@ rows = query(f"{since}{REFUSED} | sort by (_time desc) | limit {limit} | fields 
 total = query(f"{since}{REFUSED} | stats count() n")
 total = int(total[0].get("n", "0")) if total and total[0].get("n", "").isdigit() else len(rows)
 
-# The SNI lines' users: the CONNECT lines with their connection ids, from a day before the window
-# (a tunnel can be open long before its TLS name is refused).
-ids = sorted({r["envoy.connection"] for r in rows if r.get("log_type") == "envoy-access" and not r.get("envoy.method")
-              and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))})
+# An SNI line (the TLS listener's, after a CONNECT) has no user or status of its own; an HTTP
+# line always has both, a method or not (a request the parser rejected has none).
+def is_sni(r):
+    return r.get("log_type") == "envoy-access" and not r.get("envoy.user") and not r.get("envoy.status")
+
+# Their users: the CONNECT that opened the tunnel, by Envoy's connection id. A TLS name is read
+# within 15 s of the tunnel opening (the inspector's timeout), so only a CONNECT from 20 s before
+# the SNI line to 1 s after counts: ids restart with Envoy, and a CONNECT line the journal
+# dropped in a flood must not pin the refusal on an older tunnel with the same id (shown as ?).
+JOIN_BEFORE, JOIN_AFTER = 20, 1
+sni_rows = [r for r in rows if is_sni(r) and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))]
+ids = sorted({r["envoy.connection"] for r in sni_rows})
 opened = {}
 if ids:
-    s = datetime.datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ") - datetime.timedelta(days=1)
-    for c in query(f'_time:>={s:%Y-%m-%dT%H:%M:%SZ} log_type:envoy-access envoy.method:CONNECT '
-                   f'envoy.connection:in({",".join(ids)}) | limit 10000 '
+    keys = [when(r.get("_time"))[0][0] for r in sni_rows]
+    lo = datetime.datetime.fromtimestamp(min(keys) - JOIN_BEFORE, datetime.timezone.utc)
+    hi = datetime.datetime.fromtimestamp(max(keys) + JOIN_AFTER + 1, datetime.timezone.utc)
+    for c in query(f'_time:[{lo:%Y-%m-%dT%H:%M:%SZ}, {hi:%Y-%m-%dT%H:%M:%SZ}] log_type:envoy-access envoy.method:CONNECT '
+                   f'envoy.connection:in({",".join(ids)}) | sort by (_time desc) | limit 10000 '
                    f'| fields _time, envoy.connection, envoy.user, envoy.listener, envoy.authority'):
         opened.setdefault(c.get("envoy.connection", ""), []).append((when(c.get("_time"))[0], c))
 
-def hint(r):
+def hint(r, sni_line):
     route, st, fl, det = r.get("envoy.route", ""), r.get("envoy.status", ""), r.get("envoy.flags", ""), r.get("envoy.details", "")
-    l, a, sni = r.get("envoy.listener", "") or "?", r.get("envoy.authority", "") or "?", r.get("envoy.sni", "") or "(none)"
+    l, a, sni = r.get("envoy.listener", "") or "?", r.get("envoy.authority", "") or "?", r.get("envoy.sni", "")
     host = re.sub(r":[0-9]+$", "", a)
+    if route in ("", "-"):
+        route = ""
     if r.get("log_type") == "envoy-web":
         if route.startswith("deny-"):
-            return f"{sni} is an internal name: web never reaches one; a destination of its own on the {l} lines"
-        return f"web refused the TLS name {sni}"
+            return f"{sni or '?'} is an internal name: web never reaches one; a destination of its own on the {l} lines"
+        if "DF" in fl:
+            return f"web could not resolve {sni or '?'}"
+        if "UF" in fl:
+            return f"web could not connect to {sni or '?'} (down, or an internal address its kernel filter refuses)"
+        return f"web refused the TLS name {sni or '(none)'}"
     if route == "deny-connect":
         return f"{a} is not a destination of {l}: add it to the {l} lines"
     if route == "deny-http":
@@ -959,24 +980,32 @@ def hint(r):
         return f"{a} is a plain-HTTP host here: the client should use http://{host}, not a tunnel"
     if route.startswith("deny-web-internal"):
         return f"{a} is an internal name, never web: a destination of its own on the {l} lines"
-    if not r.get("envoy.method"):  # an SNI line
+    if sni_line:
         if det.startswith("rbac_access_denied"):
-            return f"{a} is an address entry, which passes only TLS without a name; the client sent {sni}"
+            return f"{a} is an address entry, which passes only TLS without a name; the client sent {sni or '?'}"
+        if not sni:
+            return f"the tunnel to {a} sent no TLS name (not TLS, or none sent): only TLS naming {host} passes"
         return f"the tunnel to {a} sent the TLS name {sni}: only {host} passes"
-    if st == "423":
+    if "UAEX" in fl or det == "ext_authz_denied":
+        return f"a push to a protected branch of {a}: protect on its http line"
+    if det == "ext_authz_error":
+        return f"the push check for {a} could not decide, so the push was refused (it fails closed)"
+    if det == "lua_response" and st == "423":
         return f"the credential for {a} is locked: airlock-envoy-cred unlock"
-    if st == "503":
+    if det == "lua_response" and st == "503":
         return f"the credential for {a} has no token (airlock-envoy-cred)"
-    if st == "413":
+    if det == "direct_response" and st == "413":
         return f"a body over the limit of the rules of {a} (its http line)"
-    if not route:
-        return f"Envoy refused the request itself ({det or 'no details'})"
-    return f"refused by the rules of {a}: its http line (what each preset allows: airlock-envoy docs/presets.md)"
+    if route and (det == "direct_response" or (det == "lua_response" and st == "403")):
+        return f"refused by the rules of {a}: its http line (what each preset allows: airlock-envoy docs/presets.md)"
+    return f"Envoy refused the request itself ({det or 'no details'})"
 
 for r in rows:
     key, t = when(r.get("_time"))
-    if r.get("log_type") == "envoy-access" and not r.get("envoy.method"):
-        c = [x for x in opened.get(r.get("envoy.connection", ""), []) if x[0] <= (key[0] + 1, key[1])]
+    sni_line = is_sni(r)
+    if sni_line:
+        c = [x for x in opened.get(r.get("envoy.connection", ""), [])
+             if (key[0] - JOIN_BEFORE, key[1]) <= x[0] <= (key[0] + JOIN_AFTER, key[1])]
         if c:
             o = max(c, key=lambda x: x[0])[1]
             r = dict(r, **{"envoy.user": o.get("envoy.user", ""), "envoy.listener": o.get("envoy.listener", ""),
@@ -987,6 +1016,8 @@ for r in rows:
         st = "-"
     elif r.get("log_type") == "envoy-web":
         what, st = f"web TLS {r.get('envoy.sni') or '(no name)'}", "-"
+    elif not r.get("envoy.method"):
+        what, st = f"(a request Envoy could not read) {r.get('envoy.authority', '')}", r.get("envoy.status", "") or "-"
     else:
         what = f"{r.get('envoy.method', '')} {r.get('envoy.authority', '')}{r.get('envoy.path', '') if r.get('envoy.method') != 'CONNECT' else ''}"
         st = r.get("envoy.status", "") or "-"
@@ -995,7 +1026,7 @@ for r in rows:
         tag += " " + r["envoy.flags"]
     print(f"{t}  {printable(r.get('envoy.user') or '?', 16):<16} {printable(r.get('envoy.listener') or '?', 24):<24} "
           f"{printable(st, 3):>3}  {printable(what, 120)}  [{printable(tag, 60)}]")
-    print(f"    {printable(hint(r), 200)}")
+    print(f"    {printable(hint(r, sni_line), 200)}")
 
 shown, start_local = len(rows), when(start)[1]
 if total == 0:
@@ -1011,7 +1042,7 @@ PY
 audit_ui() {
     local port=9429
     case "${1:-}" in
-        '') ;;
+        '') [ $# = 0 ] || die "usage: $CMD audit ui [--port <n>]" ;;
         --port) [ $# = 2 ] && [[ "$2" =~ ^[1-9][0-9]{3,4}$ ]] && [ "$2" -ge 1024 ] && [ "$2" -le 65535 ] \
                     || die "--port needs a number from 1024 to 65535"; port=$2 ;;
         *) die "usage: $CMD audit ui [--port <n>]" ;;

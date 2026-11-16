@@ -38,9 +38,8 @@ denies() { run "$OP" audit denies "$@"; }
     denies --since 2h --limit 7
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     q="$(sed -n 1p "$CALLS")"
-    [[ "$q" == '_time:>='????-??-??T??:??:??Z' log_type:in("envoy-access","envoy-web") (envoy.flags:NR or '* ]]
-    [[ "$q" == *'envoy.route:~"^deny-"'* && "$q" == *'-envoy.details:via_upstream'* ]]
-    [[ "$q" == *'| sort by (_time desc) | limit 7 | fields '* ]]
+    pred='log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))'
+    [[ "$q" == '_time:>='????-??-??T??:??:??Z" $pred | sort by (_time desc) | limit 7 | fields "* ]] || { echo "$q"; return 1; }
     [[ "$(sed -n 2p "$CALLS")" == *'| stats count() n' ]]
     [[ "$output" == *"(no refusals since "* ]]
 }
@@ -74,6 +73,43 @@ denies() { run "$OP" audit denies "$@"; }
     [[ "$q" == *'envoy.connection:in(40) '* ]]
 }
 
+@test "the join takes only a CONNECT from 20 s before to 1 s after: an older tunnel with the same id is not a guess" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"40","envoy.sni":"other.example.org","envoy.flags":"NR"}'
+    printf '%s\n' '{"_time":"2026-11-15T14:04:30Z","envoy.connection":"40","envoy.user":"agent2","envoy.listener":"agent2-l","envoy.authority":"x.example.org:443"}' > "$T/connects"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == *"  ?                ?                          -  TLS other.example.org in a tunnel to ?  "* ]] || { echo "$output"; return 1; }
+    q="$(grep CONNECT "$CALLS")"
+    [[ "$q" == '_time:[2026-11-15T14:04:40Z, 2026-11-15T14:05:02Z] '*'| sort by (_time desc) | limit 10000 '* ]] || { echo "$q"; return 1; }
+}
+
+@test "an HTTP line without a method (the parser refused it) is not taken for a TLS refusal or joined" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.connection":"7","envoy.status":"400","envoy.details":"http1.codec_error"}'
+    printf '%s\n' '{"_time":"2026-11-15T14:04:59Z","envoy.connection":"7","envoy.user":"other","envoy.listener":"other-l","envoy.authority":"old.example.org:443"}' > "$T/connects"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == *"agent            agent-infra              400  (a request Envoy could not read) "* ]] || { echo "$output"; return 1; }
+    [ "${lines[1]}" = "    Envoy refused the request itself (http1.codec_error)" ]
+    ! grep -q CONNECT "$CALLS" || return 1
+}
+
+@test "hints by what Envoy did: no token, a body too large, a protected branch, the push check failing, web unreachable" {
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/","envoy.route":"a.example.org-read","envoy.status":"503","envoy.details":"lua_response"}'
+    row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"m.example.org","envoy.path":"/mcp","envoy.route":"m.example.org-ep0-post-too-large","envoy.status":"413","envoy.details":"direct_response"}'
+    row '{"_time":"2026-11-15T14:03:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"200","envoy.flags":"UAEX","envoy.details":"ext_authz_denied"}'
+    row '{"_time":"2026-11-15T14:02:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"503","envoy.details":"ext_authz_error"}'
+    row '{"_time":"2026-11-15T14:01:00Z","log_type":"envoy-web","envoy.listener":"w","envoy.user":"agent","envoy.sni":"n.example.org","envoy.route":"web","envoy.flags":"UF"}'
+    row '{"_time":"2026-11-15T14:00:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/x_y","envoy.route":"a.example.org-read","envoy.status":"400","envoy.details":"http1.unexpected_underscore"}'
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "${lines[1]}" = "    the credential for a.example.org has no token (airlock-envoy-cred)" ] || { echo "$output"; return 1; }
+    [ "${lines[3]}" = "    a body over the limit of the rules of m.example.org (its http line)" ]
+    [ "${lines[5]}" = "    a push to a protected branch of g.example.org: protect on its http line" ]
+    [ "${lines[7]}" = "    the push check for g.example.org could not decide, so the push was refused (it fails closed)" ]
+    [ "${lines[9]}" = "    web could not connect to n.example.org (down, or an internal address its kernel filter refuses)" ]
+    [ "${lines[11]}" = "    Envoy refused the request itself (http1.unexpected_underscore)" ]
+}
+
 @test "an SNI line with no CONNECT to join shows no user rather than a guess; a bad id is never queried" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"41","envoy.sni":"x.example.org","envoy.flags":"NR"}'
     row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.connection":"1) or (x","envoy.sni":"y.example.org","envoy.flags":"NR"}'
@@ -87,7 +123,7 @@ denies() { run "$OP" audit denies "$@"; }
 @test "web's internal-name refusal, an address entry's RBAC refusal" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-web","envoy.listener":"agent-web","envoy.user":"agent","envoy.sni":"metrics.example.org","envoy.route":"deny-internal-name"}'
     row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.connection":"5","envoy.sni":"one.example.org","envoy.route":"tls-no-sni","envoy.details":"rbac_access_denied_matched_policy[server-name-sent]"}'
-    printf '%s\n' '{"_time":"2026-11-15T14:03:00Z","envoy.connection":"5","envoy.user":"agent","envoy.listener":"agent-infra","envoy.authority":"10.99.0.1:6443"}' > "$T/connects"
+    printf '%s\n' '{"_time":"2026-11-15T14:03:55Z","envoy.connection":"5","envoy.user":"agent","envoy.listener":"agent-infra","envoy.authority":"10.99.0.1:6443"}' > "$T/connects"
     denies
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == *"web TLS metrics.example.org  [deny-internal-name]" ]]
@@ -99,7 +135,7 @@ denies() { run "$OP" audit denies "$@"; }
     row "$(printf '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/\\u001b]52;c;aGk=\\u0007x\\u009b31m","envoy.route":"deny-http","envoy.status":"403"}')"
     denies
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    ! printf '%s' "$output" | LC_ALL=C grep -qP '[\x00-\x08\x0b-\x1f\x7f]|\xc2[\x80-\x9f]'
+    ! printf '%s' "$output" | LC_ALL=C grep -qP '[\x00-\x08\x0b-\x1f\x7f]|\xc2[\x80-\x9f]' || return 1
     [[ "${lines[0]}" == *"GET a.example.org/?]52;c;aGk=?x?31m  [deny-http]" ]]
 }
 
@@ -149,7 +185,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         b = json.dumps({"path": self.path, "headers": dict(self.headers)}).encode()
-        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        self.send_response(200); self.send_header("Content-Length", str(len(b)))
+        self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers(); self.wfile.write(b)
     do_POST = do_GET
 class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     def get_request(self):
@@ -181,7 +219,42 @@ ui_teardown() { kill "$UI" "$STORE" 2>/dev/null || true; wait 2>/dev/null || tru
     c2="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/select/vmui/")"
     ui_teardown
     [ "$c" = 421 ] && [ "$c2" = 200 ] || { echo "$c $c2"; return 1; }
-    ! grep -q path "$T/body"
+    ! grep -q path "$T/body" || return 1
+}
+
+@test "audit ui: no other site: a foreign Origin or a cross-site fetch is 403, no CORS header ever goes out, no preflight" {
+    ui_setup; ui_start "$(id -u)"
+    u="http://127.0.0.1:$PORT/select/logsql/query?query=*"
+    o="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H 'Origin: https://evil.example.org' "$u")"
+    f="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: cross-site' "$u")"
+    n="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H 'Origin: null' "$u")"
+    s="$(/usr/bin/curl --noproxy "*" -s -D - -o /dev/null -H "Origin: http://127.0.0.1:$PORT" -H 'Sec-Fetch-Site: same-origin' "$u")"
+    p="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -X OPTIONS -H "Origin: https://evil.example.org" "$u")"
+    ui_teardown
+    [ "$o" = 403 ] && [ "$f" = 403 ] && [ "$n" = 403 ] || { echo "$o $f $n"; return 1; }
+    [[ "$s" == "HTTP/1.0 200 "* ]] || { echo "$s"; return 1; }
+    ! grep -qi '^access-control-' <<< "$s" || return 1
+    grep -q $'^Server: audit-ui\r$' <<< "$s"
+    [[ "$p" == 4* || "$p" == 5* ]] && [ "$p" != 200 ]
+}
+
+@test "audit ui: a request it serves counts as use: idle 2 s, a request every 0.5 s for 4 s keeps it open" {
+    ui_setup; ui_start "$(id -u)" 2 600
+    for _ in 1 2 3 4 5 6 7 8; do /usr/bin/curl --noproxy "*" -s -o /dev/null "http://127.0.0.1:$PORT/select/vmui/" || true; sleep 0.5; done
+    open=0; kill -0 "$UI" 2>/dev/null && open=1
+    ui_teardown
+    [ "$open" = 1 ] || { cat "$T/ui.out"; return 1; }
+}
+
+@test "audit ui: refused requests don't hold off the idle limit; a control byte is a 400, no traceback" {
+    ui_setup; ui_start "$(id -u)" 2 600
+    c="$(printf 'GET /select/a\001b HTTP/1.0\r\nHost: 127.0.0.1:%s\r\n\r\n' "$PORT" | python3 -c 'import socket,sys; s=socket.create_connection(("127.0.0.1",int(sys.argv[1]))); s.sendall(sys.stdin.buffer.read()); print(s.recv(100).split(b"\r\n")[0].decode())' "$PORT")"
+    for _ in 1 2 3 4 5 6; do /usr/bin/curl --noproxy "*" -s -o /dev/null -H 'Host: evil.example.org' "http://127.0.0.1:$PORT/" || true; sleep 0.5; done
+    gone=1; kill -0 "$UI" 2>/dev/null && gone=0
+    ui_teardown
+    [[ "$c" == "HTTP/1.0 400 "* ]] || { echo "$c"; return 1; }
+    [ "$gone" = 1 ] || { echo "still open after 3 s of refused requests with idle 2 s"; return 1; }
+    ! grep -q Traceback "$T/ui.out" || { cat "$T/ui.out"; return 1; }
 }
 
 @test "audit ui: a connection from another uid is refused and named once" {
