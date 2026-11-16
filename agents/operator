@@ -60,7 +60,8 @@
 #                          [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>]
 #                                       what the store rated, at that severity and above (default
 #                                       medium, the last 24 h, newest 50 rows): severity, kind, agent,
-#                                       session and what happened (repeats in a row as one, counted),
+#                                       session and what happened (repeats in a row as one, counted;
+#                                       the newest 10000 lines read),
 #                                       then a count by severity
 set -euo pipefail
 # Internal to this script (set per call below), never taken from the caller's environment.
@@ -1153,9 +1154,11 @@ if kind:
     f += f' audit.kind:="{kind}"'
 if agent:
     f += f' audit.agent:="{agent}"'
-# Repeats collapse: consecutive lines alike in severity, kind, agent, session and what happened are
-# one row with their count and when the run began, so one repeating failure can't push the rest
-# out of view. Up to FETCH lines are read for that; --limit counts rows.
+# Repeats collapse: consecutive lines alike in severity, kind, agent, session, redaction and their
+# whole raw text (every line of a journal message; every Envoy field) are one row with their count
+# and when the run began, so one repeating failure can't push the rest out of view, and lines that
+# only look alike on screen (the same first line, a cut, a replaced character) stay apart. Up to
+# FETCH lines are read for that; --limit counts rows.
 FETCH = 10000
 rows = query(f"{f} | sort by (_time desc) | limit {FETCH} | fields _time, audit.severity, audit.kind, audit.agent, "
              "audit.session, audit.redacted, log_type, _msg, envoy.method, envoy.authority, envoy.path, envoy.route, "
@@ -1174,7 +1177,9 @@ for r in rows:
     if r.get("audit.session"):
         who += "/" + r["audit.session"]
     flag = " (redacted)" if r.get("audit.redacted") == "true" else ""
-    key = (r.get("audit.severity"), r.get("audit.kind"), who, what, flag)
+    raw = (r.get("_msg"),) if r.get("log_type") not in ("envoy-access", "envoy-web") else tuple(
+        r.get(f) for f in ("envoy.method", "envoy.authority", "envoy.path", "envoy.route", "envoy.status", "envoy.sni"))
+    key = (r.get("audit.severity"), r.get("audit.kind"), who, flag) + raw
     if groups and groups[-1][3] == key:
         groups[-1][1] = r.get("_time")
         groups[-1][2] += 1
@@ -1190,7 +1195,12 @@ for r, oldest, n, _, what, who, flag in groups:
           f"{printable(who, 28):<28}  {printable(what, 160)}{flag}{run}")
 by = ", ".join(f"{s} {counts[s]}" for s in levels if s in counts) or "none"
 total = sum(int(v) for v in counts.values() if v.isdigit())
-more = f"; newest {len(groups)} rows ({lines} lines) shown, --limit <n> for more" if total > lines else ""
+if len(rows) == FETCH and len(groups) < limit and total > lines:
+    more = f"; only the newest {FETCH} lines were read: narrow --since, --kind or --agent for the rest"
+elif total > lines:
+    more = f"; newest {len(groups)} rows ({lines} lines) shown, --limit <n> for more"
+else:
+    more = ""
 print(f"({by} since {when(start)}, {sev} and above{more}; lines from before the store rated them are not counted)")
 PY
 }

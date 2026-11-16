@@ -388,9 +388,10 @@ machine (nothing leaves it):
   [--agent <name>] [--since 7d] [--limit 200]` lists the lines the store rated at that severity and
   above (medium and the last 24 hours by default), newest first: time, severity, kind, agent and
   session, what happened (a redacted line says so), then a count by severity. Repeats in a row
-  (the same severity, kind, agent and message) are one row with their count and when the run
-  began, so one repeating failure doesn't push everything else out of view; `--limit` counts
-  rows. Kind and agent are
+  (the same severity, kind, agent, session and whole text: every line of a journal message,
+  every field of an Envoy line) are one row with their count and when the run began, so one
+  repeating failure doesn't push everything else out of view; `--limit` counts rows, from the
+  newest 10,000 lines (the closing line says when that cap was reached). Kind and agent are
   checked against their shape before they go into the fixed query, and matched exactly (`--agent
   agent` is not also `agent-web`). Lines stored before the store
   rated them don't show (a reset reads them in again).

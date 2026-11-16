@@ -453,3 +453,12 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     [ "${#lines[@]}" = 3 ] || { echo "$output"; return 1; }
     [[ "${lines[2]}" == *"newest 2 rows (4 lines) shown, --limit <n> for more"* ]] || { echo "$output"; return 1; }
 }
+
+@test "events: lines alike only in their first line (or on screen) are not collapsed" {
+    row '{"_time":"2026-11-15T19:13:07Z","audit.severity":"medium","audit.kind":"agent-process","audit.agent":"agent","log_type":"journal","_msg":"ok\nfirst hidden thing"}'
+    row '{"_time":"2026-11-15T19:13:06Z","audit.severity":"medium","audit.kind":"agent-process","audit.agent":"agent","log_type":"journal","_msg":"ok\nsecond hidden thing"}'
+    COUNT=2 run "$OP" audit events
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "${#lines[@]}" = 3 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" != *"(x2"* && "${lines[1]}" != *"(x2"* ]] || { echo "$output"; return 1; }
+}
