@@ -1,76 +1,119 @@
-# Unit tests for the audit store's Vector filter (vector test), against the config apply renders
-# for the test site (agents agent, agent-web, agent-guard; uids 1100-1102): test/agents.bats.
+# Unit tests for the audit store's Vector pipeline (vector test), against the config apply renders
+# for the test site (agents agent, agent-web, agent-guard; uids 1100-1102, subuids 1100000+,
+# 1200000+, 1300000+; the toolkit's nft prefixes): test/agents.bats.
 tests:
-  - name: keep agent user line
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "1100", _COMM: "claude", _SYSTEMD_USER_UNIT: "agent-session@x.service", message: "hello"}}]
-    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(.message == "hello")'}]}]
-  - name: drop conmon box output
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "1100", _COMM: "conmon", message: "screen"}}]
-    no_outputs_from: [journal_agents]
-  - name: keep envoy unit
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "airlock-envoy-mint.service", message: "minted"}}]
-    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(.message == "minted")'}]}]
-  - name: keep system manager line about user@1101
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "init.scope", UNIT: "user@1101.service", message: "Started User Manager"}}]
-    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(.message == "Started User Manager")'}]}]
-  - name: drop system manager line about another user
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "init.scope", UNIT: "user@1000.service", message: "Started User Manager"}}]
-    no_outputs_from: [journal_agents]
-  - name: keep logind line naming agent-web
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 5 of user agent-web."}}]
-    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "agent-web"))'}]}]
-  - name: drop logind line for operator
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 6 of user alice."}}]
-    no_outputs_from: [journal_agents]
-  - name: drop logind line naming agentx (no boundary)
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 7 of user agentx."}}]
-    no_outputs_from: [journal_agents]
-  - name: keep sudo line naming agent
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "sudo", message: "agent : user NOT in sudoers ; TTY=pts/1"}}]
-    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(starts_with(string!(.message), "agent :"))'}]}]
+  # ---- agents: what the journal filter keeps -------------------------------------------------
+  - name: keep an agent user's line
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "claude", _SYSTEMD_USER_UNIT: "agent-session@x.service", message: "hello"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert_eq!(.message, "hello")'}]}]
+  - name: keep a box process's line (a subordinate id)
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1200005", message: "from a box"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert_eq!(.message, "from a box")'}]}]
+  - name: drop a uid just past an agent's subordinate range
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1365536", message: "x"}}]
+    no_outputs_from: [agents]
+  - name: drop box output (conmon with a container's fields)
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "conmon", CONTAINER_ID: "abc", message: "screen"}}]
+    no_outputs_from: [agents]
+  - name: keep an agent process calling itself conmon without a container's fields
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "conmon", message: "hiding?"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert_eq!(.message, "hiding?")'}]}]
+  - name: keep airlock-envoy's units
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "airlock-envoy-mint.service", message: "minted"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert_eq!(.message, "minted")'}]}]
+  - name: keep PID 1's line about an agent's manager (UNIT)
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "init.scope", UNIT: "user@1101.service", message: "Started User Manager"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert_eq!(.message, "Started User Manager")'}]}]
+  - name: keep a root line naming an agent's manager in USER_UNIT only
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "init.scope", USER_UNIT: "user@1100.service", message: "user unit"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert_eq!(.message, "user unit")'}]}]
+  - name: drop another user's UNIT line from a non-root sender (UNIT is the sender's to set)
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1000", UNIT: "user@1100.service", message: "spoof"}}]
+    no_outputs_from: [agents]
+  - name: drop PID 1's line about another user's manager
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "init.scope", UNIT: "user@1000.service", message: "Started User Manager"}}]
+    no_outputs_from: [agents]
+  - name: keep the pam lines of an agent's manager (its own unit)
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "user@1100.service", message: "pam_unix(systemd-user:session): session opened"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "pam_unix"))'}]}]
+  - name: keep a session scope's line owned by an agent
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "session-7.scope", _SYSTEMD_OWNER_UID: "1102", message: "session line"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert_eq!(.message, "session line")'}]}]
+  - name: keep logind naming agent-web
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 5 of user agent-web."}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "agent-web"))'}]}]
+  - name: keep polkit naming an agent by uid
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", SYSLOG_IDENTIFIER: "polkitd", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1100)"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "unix-user:1100"))'}]}]
+  - name: keep su to an agent
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "su", message: "(to agent) alice on pts/2"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "(to agent)"))'}]}]
+  - name: drop logind for the operator, and a name merely containing an agent's
+    inputs:
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 6 of user alice."}}
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "systemd-logind", message: "New session 7 of user agentx."}}
+    no_outputs_from: [agents]
+  - name: keep sudo naming an agent, drop the operator's own
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "sudo", message: "agent : user NOT in sudoers ; TTY=pts/1"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(starts_with(string!(.message), "agent :"))'}]}]
   - name: drop unrelated sudo
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "sudo", message: "alice : TTY=pts/1 ; COMMAND=/usr/bin/ls"}}]
-    no_outputs_from: [journal_agents]
-  - name: keep kernel agent drop
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_TRANSPORT: "kernel", message: "airlock-agents-agent-web-drop: IN= OUT=eth0 SRC=10.0.0.5"}}]
-    outputs: [{extract_from: journal_agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "-drop:"))'}]}]
-  - name: drop other kernel drop
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_TRANSPORT: "kernel", message: "host-input-drop: IN=eth0 SRC=1.2.3.4"}}]
-    no_outputs_from: [journal_agents]
-  - name: drop unrelated service
-    inputs: [{insert_at: journal_agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "sshd.service", message: "Accepted publickey for alice"}}]
-    no_outputs_from: [journal_agents]
-  - name: envoy access line parsed
-    inputs: [{insert_at: envoy_fields, type: log, log_fields: {file: "/var/log/airlock-envoy/access.jsonl", message: '{"status":"403","route":"deny-connect","user":"agent"}'}}]
-    outputs: [{extract_from: envoy_fields, conditions: [{type: vrl, source: 'assert!(.log_type == "envoy-access" && .route == "deny-connect" && .user == "agent")'}]}]
-  - name: envoy web line typed
-    inputs: [{insert_at: envoy_fields, type: log, log_fields: {file: "/var/log/airlock-envoy/web.jsonl-20261115T000000Z", message: 'not json'}}]
-    outputs: [{extract_from: envoy_fields, conditions: [{type: vrl, source: 'assert!(.log_type == "envoy-web" && .message == "not json")'}]}]
-  # redact: standard credential shapes blanked, everything else kept as it was
-  - name: redact query token values, any case, name kept
-    inputs: [{insert_at: redact, type: log, log_fields: {path: "/api/v1/repos/a/b?a=1&TOKEN=canary-123&access_token=xyz&page=2", message: "x"}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.path, "/api/v1/repos/a/b?a=1&TOKEN=REDACTED&access_token=REDACTED&page=2")'}]}]
-  - name: redact query values in the raw envoy line too
-    inputs: [{insert_at: redact, type: log, log_fields: {message: '{"path":"/x?api_key=abc123def&q=hello"}'}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "{\"path\":\"/x?api_key=REDACTED&q=hello\"}")'}]}]
-  - name: keep ordinary query parameters
-    inputs: [{insert_at: redact, type: log, log_fields: {path: "/api/v1/repos/search?q=keyboard&limit=10&sort=updated"}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.path, "/api/v1/repos/search?q=keyboard&limit=10&sort=updated")'}]}]
-  - name: redact bearer and basic values
-    inputs: [{insert_at: redact, type: log, log_fields: {message: "sent Authorization: Bearer abcdefghijklmnop and basic dXNlcjpwYXNzd29yZA=="}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!contains(string!(.message), "abcdefghijklmnop") && !contains(string!(.message), "dXNlcjpwYXNzd29yZA") && contains(string!(.message), "REDACTED"))'}]}]
-  - name: redact url userinfo
-    inputs: [{insert_at: redact, type: log, log_fields: {message: "fetch https://alice:s3cretpass@git.example.org/x.git failed"}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "fetch https://alice:REDACTED@git.example.org/x.git failed")'}]}]
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", SYSLOG_IDENTIFIER: "sudo", message: "alice : TTY=pts/1 ; COMMAND=/usr/bin/ls"}}]
+    no_outputs_from: [agents]
+  - name: keep the kernel's agent drop, drop other kernel drops
+    inputs: [{insert_at: agents, type: log, log_fields: {_TRANSPORT: "kernel", message: "airlock-agents-agent-web-drop: IN= OUT=eth0 SRC=10.0.0.5"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "-drop:"))'}]}]
+  - name: drop another kernel drop
+    inputs: [{insert_at: agents, type: log, log_fields: {_TRANSPORT: "kernel", message: "host-input-drop: IN=eth0 SRC=1.2.3.4"}}]
+    no_outputs_from: [agents]
+  - name: keep journald's suppression notice for airlock-envoy
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-journald.service", message: "Suppressed 5000 messages from airlock-envoy.service"}}]
+    outputs: [{extract_from: agents, conditions: [{type: vrl, source: 'assert!(contains(string!(.message), "Suppressed"))'}]}]
+  - name: drop journald's notice for another unit, and unrelated services
+    inputs:
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-journald.service", message: "Suppressed 10 messages from sshd.service"}}
+      - {insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "sshd.service", message: "Accepted publickey for alice"}}
+    no_outputs_from: [agents]
+  # ---- typed: Envoy's lines parsed, nested, typed after ----------------------------------------
+  - name: an Envoy access line is parsed under .envoy and typed envoy-access
+    inputs: [{insert_at: typed, type: log, log_fields: {_SYSTEMD_UNIT: "airlock-envoy.service", message: '{"status":"403","route":"deny-connect","user":"agent","log_type":"DownstreamEnd"}'}}]
+    outputs: [{extract_from: typed, conditions: [{type: vrl, source: 'assert_eq!(.log_type, "envoy-access"); assert_eq!(.envoy.route, "deny-connect"); assert_eq!(.envoy.log_type, "DownstreamEnd")'}]}]
+  - name: an Envoy line can't set the store's fields (log_type, host, _UID)
+    inputs: [{insert_at: typed, type: log, log_fields: {_SYSTEMD_UNIT: "airlock-envoy.service", _UID: "975", host: "h", message: '{"log_type":"journal","host":"other","_UID":"0"}'}}]
+    outputs: [{extract_from: typed, conditions: [{type: vrl, source: 'assert_eq!(.log_type, "envoy-access"); assert_eq!(.host, "h"); assert_eq!(._UID, "975")'}]}]
+  - name: the web Envoy's line is envoy-web; Envoy's own non-JSON line is journal
+    inputs: [{insert_at: typed, type: log, log_fields: {_SYSTEMD_UNIT: "airlock-envoy-web.service", message: '{"sni":"example.org"}'}}]
+    outputs: [{extract_from: typed, conditions: [{type: vrl, source: 'assert_eq!(.log_type, "envoy-web")'}]}]
+  - name: Envoy's own warning line is a journal line
+    inputs: [{insert_at: typed, type: log, log_fields: {_SYSTEMD_UNIT: "airlock-envoy.service", message: "[warning] something"}}]
+    outputs: [{extract_from: typed, conditions: [{type: vrl, source: 'assert_eq!(.log_type, "journal"); assert!(!exists(.envoy))'}]}]
+  - name: a JSON line from any other unit is not taken for Envoy's
+    inputs: [{insert_at: typed, type: log, log_fields: {_SYSTEMD_UNIT: "user@1100.service", message: '{"route":"allow-x"}'}}]
+    outputs: [{extract_from: typed, conditions: [{type: vrl, source: 'assert_eq!(.log_type, "journal"); assert!(!exists(.envoy))'}]}]
+  # ---- redact: standard credential shapes, in every string field ------------------------------
+  - name: redact query token values in any case, the name kept, in nested fields too
+    inputs: [{insert_at: redact, type: log, log_fields: {envoy.path: "/api/v1/repos/a/b?a=1&TOKEN=canary-123&access_token=xyz&page=2"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.envoy.path, "/api/v1/repos/a/b?a=1&TOKEN=REDACTED&access_token=REDACTED&page=2")'}]}]
+  - name: redact cloud signature parameters, private_token and a ;-separated token
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "/o?X-Amz-Signature=abc123&X-Amz-Security-Token=zz&private_token=pt1&x=1;token=t2"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "/o?X-Amz-Signature=REDACTED&X-Amz-Security-Token=REDACTED&private_token=REDACTED&x=1;token=REDACTED")'}]}]
+  - name: redact in _CMDLINE and other journal fields
+    inputs: [{insert_at: redact, type: log, log_fields: {_CMDLINE: "curl -H Authorization: Bearer abc123def456ghi https://u:p4ss@h.example/x?token=t", message: "ok"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 's = string!(._CMDLINE); assert!(!contains(s, "abc123def456ghi") && !contains(s, "p4ss") && !contains(s, "token=t") && contains(s, "curl"))'}]}]
+  - name: redact url userinfo, user and password
+    inputs: [{insert_at: redact, type: log, log_fields: {envoy.authority: "alice:SECRET@git.example.org", message: "fetch https://alice:s3cretpass@git.example.org/x.git and https://tok3n@h.example.org/"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "fetch https://REDACTED@git.example.org/x.git and https://REDACTED@h.example.org/")'}]}]
+  - name: redact bearer, basic and api-key header values
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "Bearer abc123def456 basic dXNlcjpwYXNzd29yZA== x-api-key: k3y-value-123456"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 's = string!(.message); assert!(!contains(s, "abc123def456") && !contains(s, "dXNlcjpwYXNzd29yZA") && !contains(s, "k3y-value-123456"))'}]}]
+  - name: keep the words basic and bearer in prose
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "falling back to basic authentication; bearer tokens disabled"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "falling back to basic authentication; bearer tokens disabled")'}]}]
   - name: redact vendor token shapes
-    inputs: [{insert_at: redact, type: log, log_fields: {message: "ghp_abcdefghijklmnopqrstuvwxyz0123456789 AKIAABCDEFGHIJKLMNOP sk-ant-api03-abcdefghijklmnopqrstuv"}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "REDACTED REDACTED REDACTED")'}]}]
-  - name: redact a jwt and a private key header
-    inputs: [{insert_at: redact, type: log, log_fields: {message: "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N and -----BEGIN OPENSSH PRIVATE KEY-----"}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "jwt REDACTED-JWT and REDACTED-PRIVATE-KEY")'}]}]
-  - name: keep ordinary journal text
-    inputs: [{insert_at: redact, type: log, log_fields: {message: "agent : user NOT in sudoers ; TTY=pts/1 ; COMMAND=/usr/bin/cat /etc/shadow"}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "agent : user NOT in sudoers ; TTY=pts/1 ; COMMAND=/usr/bin/cat /etc/shadow")'}]}]
-  - name: a line without message or path passes untouched
-    inputs: [{insert_at: redact, type: log, log_fields: {status: "200"}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.status, "200")'}]}]
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "ghp_abcdefghijklmnopqrstuvwxyz0123456789 AKIAABCDEFGHIJKLMNOP sk-ant-api03-abcdefghijklmnopqrstuv sk-proj-abcdefghijklmnopqrstuv"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "REDACTED REDACTED REDACTED REDACTED")'}]}]
+  - name: redact a jwt and a whole private key block
+    inputs: [{insert_at: redact, type: log, log_fields: {message: "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N key -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\n-----END OPENSSH PRIVATE KEY----- after"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.message, "jwt REDACTED-JWT key REDACTED-PRIVATE-KEY after")'}]}]
+  - name: keep ordinary queries and journal text as they were
+    inputs: [{insert_at: redact, type: log, log_fields: {envoy.path: "/api/v1/repos/search?q=keyboard&limit=10&sort=updated", message: "agent : user NOT in sudoers ; TTY=pts/1 ; COMMAND=/usr/bin/cat /etc/shadow", status: 200}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.envoy.path, "/api/v1/repos/search?q=keyboard&limit=10&sort=updated"); assert_eq!(.message, "agent : user NOT in sudoers ; TTY=pts/1 ; COMMAND=/usr/bin/cat /etc/shadow"); assert_eq!(.status, 200)'}]}]

@@ -3343,7 +3343,8 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
 @test "audit on renders the account, data dirs, units and the collector's config" {
     audit_site; audit_render
     for f in etc/sysusers.d/airlock-audit.conf etc/tmpfiles.d/airlock-audit.conf etc/airlock-audit/vector.yaml \
-             etc/systemd/system/airlock-audit-vl.service etc/systemd/system/airlock-audit-vl-proxy.socket \
+             etc/airlock-audit/vmauth.yaml etc/systemd/system/airlock-audit-vl.service \
+             etc/systemd/system/airlock-audit-vmauth.service etc/systemd/system/airlock-audit-vl-proxy.socket \
              etc/systemd/system/airlock-audit-vl-proxy.service etc/systemd/system/airlock-audit-vector.service; do
         [ -f "$T/ar/$f" ] || { echo "missing $f"; return 1; }
     done
@@ -3356,17 +3357,26 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     grep -qx 'ListenStream=/run/airlock-audit/vl.sock' "$u/airlock-audit-vl-proxy.socket"
     grep -qx 'SocketMode=0600' "$u/airlock-audit-vl-proxy.socket"
     grep -qx 'ExecStartPost=/usr/bin/setfacl -m u:airlock-envoy:rw,u:alice:rw /run/airlock-audit/vl.sock' "$u/airlock-audit-vl-proxy.socket"
-    # the relay and the collector join the store's namespace
-    grep -qx 'JoinsNamespaceOf=airlock-audit-vl.service' "$u/airlock-audit-vl-proxy.service"
-    grep -qx 'JoinsNamespaceOf=airlock-audit-vector.service' "$u/airlock-audit-vector.service" && return 1
-    grep -qx 'JoinsNamespaceOf=airlock-audit-vl.service' "$u/airlock-audit-vector.service"
-    # the collector reads 0600 files, but sees only Envoy's logs and the journal under /var/log
-    grep -qx 'CapabilityBoundingSet=CAP_DAC_READ_SEARCH' "$u/airlock-audit-vector.service"
-    grep -qx 'TemporaryFileSystem=/var/log' "$u/airlock-audit-vector.service"
-    grep -qx 'BindReadOnlyPaths=-/var/log/airlock-envoy -/var/log/journal' "$u/airlock-audit-vector.service"
-    # every sandboxed unit has NoNewPrivileges once (the collector's capability is ambient, kept)
-    for f in airlock-audit-vl.service airlock-audit-vl-proxy.service airlock-audit-vector.service; do
-        [ "$(grep -cx 'NoNewPrivileges=yes' "$u/$f")" = 1 ] || { echo "$f"; return 1; }
+    # the door, the relay and the collector join the store's namespace; the relay leads to the
+    # door (vmauth), never to the store itself
+    for f in airlock-audit-vmauth.service airlock-audit-vl-proxy.service airlock-audit-vector.service; do
+        grep -qx 'JoinsNamespaceOf=airlock-audit-vl.service' "$u/$f" || { echo "$f"; return 1; }
+    done
+    grep -qx 'ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8427' "$u/airlock-audit-vl-proxy.service"
+    grep -q -- '-auth.config=/etc/airlock-audit/vmauth.yaml -httpListenAddr=127.0.0.1:8427' "$u/airlock-audit-vmauth.service"
+    # the door passes queries only: one route, /select/, to the store
+    [ "$(grep -c 'src_paths' "$T/ar/etc/airlock-audit/vmauth.yaml")" = 1 ]
+    grep -qx '  - src_paths: \["/select/\.\*"\]' "$T/ar/etc/airlock-audit/vmauth.yaml"
+    grep -qx '    url_prefix: "http://127.0.0.1:9428"' "$T/ar/etc/airlock-audit/vmauth.yaml"
+    # the collector reads the journal as a member of systemd-journal: no capabilities, no files
+    grep -qx 'SupplementaryGroups=systemd-journal' "$u/airlock-audit-vector.service"
+    grep -qx 'm airlock-audit systemd-journal' "$T/ar/etc/sysusers.d/airlock-audit.conf"
+    ! grep -q 'type: file' "$T/ar/etc/airlock-audit/vector.yaml"
+    ! grep -q 'airlock-envoy/' "$T/ar/etc/airlock-audit/vector.yaml"
+    # every audit unit: no capabilities, no new privileges, its own network namespace
+    for f in airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.service airlock-audit-vector.service; do
+        [ "$(grep -cx 'NoNewPrivileges=yes' "$u/$f")" = 1 ] && [ "$(grep -cx 'CapabilityBoundingSet=' "$u/$f")" = 1 ] \
+            && grep -qx 'PrivateNetwork=yes' "$u/$f" && ! grep -q '^AmbientCapabilities' "$u/$f" || { echo "$f"; return 1; }
     done
     grep -q '^AGENTS_AUDIT=on' <("$P" --env)
 }
@@ -3408,7 +3418,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     run vector test "$T/v.yaml" "$REPO/test/fixtures/audit-vector-tests.yaml"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *failed* ]]
-    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 24 ]
+    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 36 ]
 }
 
 @test "apply with audit on: the account, the data dirs, then waits for VictoriaLogs; with it, enables the store" {
@@ -3418,33 +3428,76 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     [[ "$output" == *"would: install /etc/systemd/system/airlock-audit-vl.service"* ]]
     [[ "$output" == *"would: create the account airlock-audit (systemd-sysusers)"* ]]
     [[ "$output" == *"would: /var/lib/airlock-audit: airlock-audit's, 0700"* ]]
-    [[ "$output" == *"note: the audit store waits for VictoriaLogs: sudo update-victorialogs"* ]]
+    [[ "$output" == *"note: the audit store waits for VictoriaLogs and vmauth: sudo update-victorialogs"* ]]
     mkdir -p "$R/usr/local/bin"; printf '\x7fELF' > "$R/usr/local/bin/victoria-logs"; chmod 0755 "$R/usr/local/bin/victoria-logs"
+    run "$P"
+    [[ "$output" == *"note: the audit store waits for VictoriaLogs and vmauth"* ]]
+    printf '\x7fELF' > "$R/usr/local/bin/vmauth"; chmod 0755 "$R/usr/local/bin/vmauth"
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     grep -qx 'systemd-sysusers /etc/sysusers.d/airlock-audit.conf' "$LOG"
     grep -qx 'systemd-tmpfiles --create /etc/tmpfiles.d/airlock-audit.conf' "$LOG"
-    grep -qx 'systemctl enable airlock-audit-vl.service airlock-audit-vl-proxy.socket airlock-audit-vector.service' "$LOG"
-    grep -qx 'systemctl restart airlock-audit-vl.service' "$LOG"
+    # enabled; the relay and its socket stopped before the store restarts, the socket started last
+    grep -qx 'systemctl enable airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.socket airlock-audit-vector.service' "$LOG"
+    [ "$(grep -n -x 'systemctl stop airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service' "$LOG" | cut -d: -f1)" -lt "$(grep -n -x 'systemctl restart airlock-audit-vl.service' "$LOG" | cut -d: -f1)" ]
+    [ "$(grep -n -x 'systemctl restart airlock-audit-vl.service' "$LOG" | cut -d: -f1)" -lt "$(grep -n -x 'systemctl start airlock-audit-vl-proxy.socket' "$LOG" | cut -d: -f1)" ]
+    [ ! -e "$E/.pending" ] || ! grep -qx audit "$E/.pending"
     # a VictoriaLogs others can write pauses the apply
-    chmod 0777 "$R/usr/local/bin/victoria-logs"
+    chmod 0777 "$R/usr/local/bin/vmauth"
     run "$P"
-    [[ "$output" == *"/usr/local/bin/victoria-logs must be a regular file owned by root and writable by root alone"* ]]
+    [[ "$output" == *"/usr/local/bin/vmauth must be a regular file owned by root and writable by root alone"* ]]
 }
 
 @test "audit off after on: the units stop before their files go; the data stays" {
     audit_site
-    mkdir -p "$R/usr/local/bin" "$R/var/lib/airlock-audit/vl"; printf '\x7fELF' > "$R/usr/local/bin/victoria-logs"; chmod 0755 "$R/usr/local/bin/victoria-logs"
+    mkdir -p "$R/usr/local/bin" "$R/var/lib/airlock-audit/vl"
+    for b in victoria-logs vmauth; do printf '\x7fELF' > "$R/usr/local/bin/$b"; chmod 0755 "$R/usr/local/bin/$b"; done
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     site_file 1G 1G 1G
     : > "$LOG"
     run "$P" --confirm
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    grep -qx 'systemctl disable --now airlock-audit-vector.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vl.service' "$LOG"
+    grep -qx 'systemctl disable --now airlock-audit-vector.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vmauth.service airlock-audit-vl.service' "$LOG"
     [ ! -e "$R/etc/systemd/system/airlock-audit-vl.service" ]
     [ ! -e "$R/etc/airlock-audit/vector.yaml" ]
     [ -d "$R/var/lib/airlock-audit/vl" ]
     # the disable comes first: its log line precedes the reload that follows the removal
     [ "$(grep -n 'disable --now airlock-audit' "$LOG" | cut -d: -f1)" -lt "$(grep -n 'daemon-reload' "$LOG" | tail -1 | cut -d: -f1)" ]
+}
+
+@test "audit: a restart cut short stays pending, and the next run does it even with every unit up" {
+    audit_site
+    mkdir -p "$R/usr/local/bin"; for b in victoria-logs vmauth; do printf '\x7fELF' > "$R/usr/local/bin/$b"; chmod 0755 "$R/usr/local/bin/$b"; done
+    # systemctl fails the store's restart once
+    cat > "$T/bin/systemctl" <<'S'
+#!/bin/bash
+case "$1" in is-enabled|is-active) [ -n "${NFT_LOADED:-}" ]; exit ;; esac
+echo "systemctl $*" >> "$LOG"
+[ "$*" != "restart airlock-audit-vl.service" ] || [ -z "${FAIL_RESTART:-}" ]
+S
+    chmod +x "$T/bin/systemctl"
+    FAIL_RESTART=1 run "$P" --confirm
+    [ "$status" -ne 0 ]
+    grep -qx audit "$E/.pending"
+    : > "$LOG"
+    # every unit reports enabled and active now, and no file changes: only the pending mark says
+    NFT_LOADED=1 run "$P" --confirm
+    grep -qx 'systemctl restart airlock-audit-vl.service' "$LOG" || { echo "$output"; return 1; }
+    ! grep -qx audit "$E/.pending" 2>/dev/null
+    : > "$LOG"
+    NFT_LOADED=1 run "$P" --confirm
+    ! grep -q 'restart airlock-audit' "$LOG"
+    [[ "$output" == *"ok   the audit store, its door and its collector enabled and running"* ]]
+}
+
+@test "audit: a Vector older than 0.57 pauses the apply (it would read \${1} as a variable)" {
+    audit_site
+    mkdir -p "$R/usr/bin"
+    printf '#!/bin/sh\necho "vector 0.56.0 (x86_64-unknown-linux-gnu abc 2025-01-01)"\n' > "$R/usr/bin/vector"; chmod +x "$R/usr/bin/vector"
+    run "$P"
+    [[ "$output" == *"audit on needs Vector 0.57 or later (this is 0.56.0)"* ]]
+    printf '#!/bin/sh\necho "vector 0.57.0 (x86_64-unknown-linux-gnu abc 2025-01-01)"\n' > "$R/usr/bin/vector"
+    run "$P"
+    [[ "$output" != *"needs Vector"* ]]
 }

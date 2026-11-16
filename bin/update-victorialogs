@@ -1,29 +1,35 @@
 #!/usr/bin/env bash
-# update-victorialogs: install VictoriaLogs for the agents' audit store (docs/agents.md, Audit)
-# into /usr/local/bin/victoria-logs. Root; `make install-agents` runs it with --first when the
-# site has `audit on`, or run it by hand.
+# update-victorialogs: install the agents' audit store binaries (docs/agents.md, Audit):
+# VictoriaLogs (/usr/local/bin/victoria-logs) and vmauth (/usr/local/bin/vmauth, the store's
+# queries-only door). Root; `make install-agents` runs it with --first when the site has
+# `audit on`, or run it by hand.
 #
-#   sudo update-victorialogs            install the pinned release, or repair a copy that no
+#   sudo update-victorialogs            install the pinned releases, or repair a copy that no
 #                                       longer matches what was installed
-#   sudo update-victorialogs --check    say whether the installed copy differs from the pin;
+#   sudo update-victorialogs --check    say whether an installed copy differs from its pin;
 #                                       exit 10 if so
-#   sudo update-victorialogs --first    install when nothing is installed, else only --check
+#   sudo update-victorialogs --first    install what is missing, else only --check
 #
-# The release is pinned here by image digest: upstream's container image, pulled by digest (so
-# the bytes are the ones the pin names), the binary copied out of it, the image removed again.
-# Most distributions don't package VictoriaLogs (Arch: only a third-party AUR package), and a
-# digest pin names exact bytes, where a download plus the release's own checksum file proves
-# only that the download is intact. Changing the pin is a reviewed change to this file.
+# Each release is pinned here by image digest: upstream's container image, pulled by digest (so
+# the bytes are the ones the pin names), the binary copied out of its entrypoint, the image
+# removed again. Most distributions don't package them (Arch: only a third-party AUR package),
+# and a digest pin names exact bytes, where a download plus the release's own checksum file
+# proves only that the download is intact. Changing a pin is a reviewed change to this file.
 #
-# The binary is never run as root here: it runs as airlock-audit. After an update:
-# sudo systemctl restart airlock-audit-vl.
+# The binaries are never run as root here: they run as airlock-audit. After an update:
+# sudo systemctl restart airlock-audit-vl airlock-audit-vmauth.
 set -euo pipefail
 umask 022
 
-IMAGE="docker.io/victoriametrics/victoria-logs:v1.53.0@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d"
+# <installed name> <image by digest>
+PINS=(
+    "victoria-logs docker.io/victoriametrics/victoria-logs:v1.53.0@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d"
+    "vmauth docker.io/victoriametrics/vmauth:v1.155.0@sha256:VMAUTH_DIGEST_PENDING"
+)
 ROOT="${AIRLOCK_VL_ROOT:-}"   # test hook: file paths go under it (commands are stubbed); never set in use
-DEST="$ROOT/usr/local/bin/victoria-logs"
-STATE="$ROOT/var/lib/claude-airlock/update-victorialogs.state"
+[ -z "$ROOT" ] || [ -z "${AIRLOCK_VL_PINS:-}" ] || mapfile -t PINS <<< "$AIRLOCK_VL_PINS"   # test hook
+BIN="$ROOT/usr/local/bin"
+STATE_DIR="$ROOT/var/lib/claude-airlock"
 die() { echo "update-victorialogs: $*" >&2; exit 1; }
 
 mode=update
@@ -36,36 +42,58 @@ for a in "$@"; do
     esac
 done
 [ -n "$ROOT" ] || [ "$EUID" -eq 0 ] || die "run as root: sudo ${0##*/}"
+for p in "${PINS[@]}"; do
+    read -r name image <<< "$p"
+    [[ "$name" =~ ^[a-z][a-z-]*$ ]] && [[ "$image" =~ ^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ]] \
+        || die "pin for ${name:-?} is not an image by digest: '${image:-}'"
+done
 
-# Installed as the pin names it: the state records the image and the binary's sha256, and the
+# Installed as its pin names it: the state records the image and the binary's sha256, and the
 # file is a regular file root alone can write that still has that sha256.
-current() {
-    [ -f "$STATE" ] && [ -f "$DEST" ] && [ ! -L "$DEST" ] || return 1
-    { [ -n "$ROOT" ] || [ "$(stat -c %u "$DEST")" = 0 ]; } && [ $(( 8#$(stat -c %a "$DEST") & 8#022 )) = 0 ] || return 1
-    local img sum; read -r img sum < "$STATE"
-    [ "$img" = "$IMAGE" ] && [ "$(sha256sum < "$DEST" | cut -d' ' -f1)" = "$sum" ]
+current() {  # current <name> <image>
+    local dest="$BIN/$1" state="$STATE_DIR/update-victorialogs.$1.state" img sum
+    [ -f "$state" ] && [ -f "$dest" ] && [ ! -L "$dest" ] || return 1
+    { [ -n "$ROOT" ] || [ "$(stat -c %u "$dest")" = 0 ]; } && [ $(( 8#$(stat -c %a "$dest") & 8#022 )) = 0 ] || return 1
+    read -r img sum < "$state"
+    [ "$img" = "$2" ] && [ "$(sha256sum < "$dest" | cut -d' ' -f1)" = "$sum" ]
 }
-if current; then echo "VictoriaLogs: as pinned (${IMAGE%@*})"; exit 0; fi
-if [ "$mode" = check ] || { [ "$mode" = first ] && [ -e "$DEST" ]; }; then
-    echo "VictoriaLogs: $DEST is not the pinned ${IMAGE%@*}: sudo ${0##*/}"; exit 10
-fi
 
-command -v podman >/dev/null || die "needs podman (to pull the pinned image)"
-work="$(mktemp -d)"; cid=""
-cleanup() { [ -z "$cid" ] || podman rm -f "$cid" >/dev/null 2>&1 || true; podman rmi -f "$IMAGE" >/dev/null 2>&1 || true; rm -rf "$work"; }
+todo=() stale=0
+for p in "${PINS[@]}"; do
+    read -r name image <<< "$p"
+    if current "$name" "$image"; then echo "$name: as pinned (${image%@*})"; continue; fi
+    if [ "$mode" = check ] || { [ "$mode" = first ] && { [ -e "$BIN/$name" ] || [ -L "$BIN/$name" ]; }; }; then
+        echo "$name: $BIN/$name is not the pinned ${image%@*}: sudo ${0##*/}"; stale=1; continue
+    fi
+    todo+=("$p")
+done
+[ "${#todo[@]}" -gt 0 ] || exit $(( stale ? 10 : 0 ))
+
+command -v podman >/dev/null || die "needs podman (to pull the pinned images)"
+work="$(mktemp -d)" cid="" image=""
+# shellcheck disable=SC2329  # run by the trap
+cleanup() { [ -z "$cid" ] || podman rm -f "$cid" >/dev/null 2>&1 || true; [ -z "$image" ] || podman rmi -f "$image" >/dev/null 2>&1 || true; rm -rf "$work"; }
 trap cleanup EXIT
-echo "==> pulling ${IMAGE%@*} by digest"
-podman pull --quiet "$IMAGE" >/dev/null
-# The binary is the image's entrypoint (one absolute path, nothing else).
-entry="$(podman image inspect --format '{{range .Config.Entrypoint}}{{println .}}{{end}}' "$IMAGE" | head -1)"
-[[ "$entry" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$entry" != *..* ]] || die "unexpected entrypoint in the image: '$entry'"
-cid="$(podman create "$IMAGE")"
-podman cp "$cid:$entry" "$work/victoria-logs"
-[ -f "$work/victoria-logs" ] && [ ! -L "$work/victoria-logs" ] || die "$entry in the image is not a regular file"
-[ "$(head -c4 "$work/victoria-logs" | od -An -tx1 | tr -d ' ')" = 7f454c46 ] || die "$entry in the image is not an ELF binary"
-sum="$(sha256sum < "$work/victoria-logs" | cut -d' ' -f1)"
-install -d -m 0755 "$(dirname "$DEST")" "$(dirname "$STATE")"
-install -m 0755 -o root -g root "$work/victoria-logs" "$DEST.new" && mv -f "$DEST.new" "$DEST"
-printf '%s %s\n' "$IMAGE" "$sum" > "$STATE.new" && mv -f "$STATE.new" "$STATE"
-echo "==> installed $DEST (${IMAGE%@*}, sha256 $sum)"
-if systemctl is-active --quiet airlock-audit-vl.service 2>/dev/null; then echo "next: sudo systemctl restart airlock-audit-vl"; fi
+install -d -m 0755 "$BIN" "$STATE_DIR"
+for p in "${todo[@]}"; do
+    read -r name image <<< "$p"
+    echo "==> $name: pulling ${image%@*} by digest"
+    podman pull --quiet "$image" >/dev/null
+    # The binary is the image's entrypoint: its first element, one absolute path.
+    entry="$(podman image inspect --format '{{range .Config.Entrypoint}}{{println .}}{{end}}' "$image" | head -1)"
+    [[ "$entry" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$entry" != *..* ]] || die "$name: unexpected entrypoint in the image: '$entry'"
+    cid="$(podman create "$image")"
+    rm -f "$work/bin"
+    podman cp "$cid:$entry" "$work/bin"
+    [ -f "$work/bin" ] && [ ! -L "$work/bin" ] || die "$name: $entry in the image is not a regular file"
+    [ "$(head -c4 "$work/bin" | od -An -tx1 | tr -d ' ')" = 7f454c46 ] || die "$name: $entry in the image is not an ELF binary"
+    sum="$(sha256sum < "$work/bin" | cut -d' ' -f1)"
+    install -m 0755 -o root -g root "$work/bin" "$BIN/$name.new" && mv -f "$BIN/$name.new" "$BIN/$name"
+    printf '%s %s\n' "$image" "$sum" > "$STATE_DIR/update-victorialogs.$name.state.new"
+    mv -f "$STATE_DIR/update-victorialogs.$name.state.new" "$STATE_DIR/update-victorialogs.$name.state"
+    echo "==> installed $BIN/$name (${image%@*}, sha256 $sum)"
+    podman rm -f "$cid" >/dev/null 2>&1 || true; cid=""
+    podman rmi -f "$image" >/dev/null 2>&1 || true; image=""
+done
+if systemctl is-active --quiet airlock-audit-vl.service 2>/dev/null; then echo "next: sudo systemctl restart airlock-audit-vl airlock-audit-vmauth"; fi
+exit $(( stale ? 10 : 0 ))

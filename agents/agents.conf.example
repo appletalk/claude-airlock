@@ -20,9 +20,10 @@
 #                            run under it yet (docs/gvisor.md)
 #   audit on|off [retention <n>d] [max-disk <n>G]
 #                            the audit store (default off; docs/agents.md, Audit): a local
-#                            VictoriaLogs behind a Unix socket, fed Envoy's logs and the agents'
-#                            journal lines by Vector (needs Vector installed; install-agents
-#                            installs VictoriaLogs). Defaults: retention 90d, max-disk 2G
+#                            VictoriaLogs behind a queries-only Unix socket, fed the agents' and
+#                            Envoy's journal lines by Vector (needs Vector 0.57+ and airlock-envoy's
+#                            log-journal on; install-agents installs VictoriaLogs and vmauth).
+#                            Defaults: retention 90d, max-disk 2G
 #   audit-nft-prefix <p>...  the log prefixes of your own nftables drop rules for the agents
 #                            (with external nftables); the toolkit's table's otherwise
 #   external <part>...       parts your own config repo manages: nftables, polkit, profile, runsc.

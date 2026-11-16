@@ -166,15 +166,16 @@ if [ "${AGENTS_RUNSC:-on}" = on ]; then
     esac
 fi
 
-# The audit store's VictoriaLogs (agents.conf: audit on): installed when there is none, otherwise
-# only checked against the pin (an update restarts the store, so it stays a step of its own).
+# The audit store's binaries (agents.conf: audit on): VictoriaLogs and vmauth, installed when
+# missing, otherwise only checked against their pins (an update restarts the store, so it stays
+# a step of its own).
 if [ "${AGENTS_AUDIT:-off}" = on ]; then
-    echo "==> VictoriaLogs (the audit store)"
+    echo "==> VictoriaLogs and vmauth (the audit store)"
     rc=0; /usr/local/sbin/update-victorialogs --first || rc=$?
     case "$rc" in
         0) ;;
-        10) echo "==> VictoriaLogs differs from the pin: sudo update-victorialogs, then sudo systemctl restart airlock-audit-vl" ;;
-        *) echo "install-agents: WARNING: VictoriaLogs not installed (above); the audit store waits for it. Retry: sudo update-victorialogs" >&2 ;;
+        10) echo "==> the audit store's binaries differ from their pins: sudo update-victorialogs, then sudo systemctl restart airlock-audit-vl airlock-audit-vmauth" ;;
+        *) echo "install-agents: WARNING: the audit store's binaries are not installed (above); the store waits for them. Retry: sudo update-victorialogs" >&2 ;;
     esac
 fi
 
