@@ -180,9 +180,9 @@ tests:
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1101)"}}
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.agent, "agent-web"); assert_eq!(.audit.severity, "high")'}]}]
-  - name: "enrich: logind naming an agent is login, medium"
+  - name: "enrich: logind's new tty session for an agent (the operator command's shape) is login, low"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", PRIORITY: "6", USER_ID: "agent-guard", SESSION_ID: "5", message: "New session '5' of user 'agent-guard' with class 'user' and type 'tty'."}}]
-    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "medium"); assert_eq!(.level, "info")'}]}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.agent, "agent-guard"); assert_eq!(.audit.severity, "low"); assert_eq!(.level, "info")'}]}]
   - name: "enrich: the agent's manager reporting a session's crash is session, low, with its session"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _SYSTEMD_UNIT: "user@1100.service", USER_UNIT: "agent-session@proj.review.service", PRIORITY: "4", message: "agent-session@proj.review.service: Main process exited, code=dumped, status=11/SEGV"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.agent, "agent"); assert_eq!(.audit.session, "proj.review"); assert_eq!(.audit.severity, "low"); assert_eq!(.level, "warning")'}]}]
@@ -309,3 +309,18 @@ tests:
   - name: "enrich: a polkit Operator line from its stdout stream names no agent (a split line could end in a planted tail)"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", _TRANSPORT: "stdout", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4:5 [sh (owned by unix-user:agent-web)"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!exists(.audit.agent)); assert_eq!(.audit.kind, "privilege")'}]}]
+  - name: "enrich: logind's session end is info"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", USER_ID: "agent", message: "Removed session 6280."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "info")'}]}]
+  - name: "enrich: logind's logout line is info"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", USER_ID: "agent", message: "Session 6280 logged out. Waiting for processes to exit."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "info")'}]}]
+  - name: "enrich: an agent's user manager session (at boot) is info"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", USER_ID: "agent-web", message: "New session '3' of user 'agent-web' with class 'manager' and type 'unspecified'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "info")'}]}]
+  - name: "enrich: any other new session of an agent's stays medium"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", USER_ID: "agent", message: "New session '9' of user 'agent' with class 'user' and type 'x11'."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "medium")'}]}]
+  - name: "enrich: a non-logind line shaped like logind's routine ones is not rated down"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-machined.service", message: "Removed session 5. agent"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "login"); assert_eq!(.audit.severity, "medium")'}]}]

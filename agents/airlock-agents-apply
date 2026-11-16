@@ -1197,14 +1197,21 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
         .level = if envoy_made_error && status >= 500 { "error" } else if ends_with(k, "-refused") { "warning" } else { "info" }
       }
       # audit.severity: a security rating for triage, apart from syslog's (high, medium, low,
-      # info). An agent's privilege attempt or a dropped packet is high; a refusal, a login, a
-      # suppression of the agents' lines medium; a failing session or service low.
+      # info). An agent's privilege attempt or a dropped packet is high; a refusal, an unusual
+      # login, a suppression of the agents' lines medium; a failing session or service low.
+      # logind's routine lines (by its own message, its unit proven): a session of class user
+      # and type tty (the operator command's machinectl shell, the agents' only way in) low;
+      # a user manager's session and every session's end info.
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
       } else if k == "privilege" && (to_string(._SYSTEMD_UNIT) ?? "") != "polkit.service" { sev = "high"
       } else if k == "privilege" && contains(msgl, "failed") { sev = "high"
       } else if k == "privilege" { sev = "low"
+      } else if k == "login" && unit == "systemd-logind.service" &&
+          match(to_string(.message) ?? "", r'^(Session \S+ logged out\. |Removed session \S+\.$|New session \S+ of user \S+ with class .manager. )') { sev = "info"
+      } else if k == "login" && unit == "systemd-logind.service" &&
+          match(to_string(.message) ?? "", r'^New session \S+ of user \S+ with class .user. and type .tty.\.$') { sev = "low"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"
       } else if k == "store" && prio <= 3 { sev = "medium"
       } else if includes(["session", "envoy-service", "agent-process"], k) && prio <= 3 { sev = "low"
