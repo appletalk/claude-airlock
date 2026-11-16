@@ -23,7 +23,7 @@ umask 022
 
 # <installed name> <image by digest>
 PINS=(
-    "victoria-logs docker.io/victoriametrics/victoria-logs:v1.53.0@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d"
+    "victoria-logs docker.io/victoriametrics/victoria-logs:v1.54.0@sha256:ee4e820cac3721f5f5d91641b950c22439593adc4224f9655e5333d5a84c1dfe"
     "vmauth docker.io/victoriametrics/vmauth:v1.155.0@sha256:902d65af16829a61bcb838474fc30ff57437ac1674066909660fb0d6622b8225"
 )
 ROOT="${AIRLOCK_VL_ROOT:-}"   # test hook: file paths go under it (commands are stubbed); never set in use
