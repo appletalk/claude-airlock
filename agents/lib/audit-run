@@ -65,10 +65,16 @@ flock -n 9 || die "another audit run is going (one at a time)"
 # history. Only the login stays (a regular file; anything else by that name goes too).
 # A box of an earlier run (or of audit login) still running could write after the wipe.
 command -v "${AGENTS_AUDIT_PODMAN:-podman}" >/dev/null || die "no podman: can't tell whether an earlier box still runs"
-[ -z "$("${AGENTS_AUDIT_PODMAN:-podman}" ps -q 2>/dev/null)" ] \
-    || die "a box of $AGENTS_AUDITOR's is still running (an earlier run, or audit login): end it first (as $AGENTS_AUDITOR: podman ps)"
-{ mkdir -p "$ws" && find "$ws" -mindepth 1 -delete 2>/dev/null && [ -z "$(find "$ws" -mindepth 1 -print -quit)" ]; } \
-    || die "the workspace $ws could not be emptied; nothing runs until it is"
+# (any state but exited: a paused or stopping one could still write; podman failing is a refusal)
+boxes="$("${AGENTS_AUDIT_PODMAN:-podman}" ps -a -q --filter status=created --filter status=running --filter status=paused --filter status=stopping 2>/dev/null)" \
+    || die "podman ps failed: can't tell whether an earlier box still runs (as $AGENTS_AUDITOR: podman ps -a)"
+[ -z "$boxes" ] || die "a box of $AGENTS_AUDITOR's is still running (an earlier run, or audit login): end it first (as $AGENTS_AUDITOR: podman ps)"
+# (a run may have taken its own write or search bit away from a dir: given back first, so one run
+# can't block every later one)
+{ mkdir -p "$ws" && chmod -R u+rwx "$ws" 2>/dev/null; find "$ws" -mindepth 1 -delete 2>/dev/null; [ -z "$(find "$ws" -mindepth 1 -print -quit)" ]; } \
+    || die "the workspace $ws could not be emptied; nothing runs until it is (as $AGENTS_AUDITOR: look at what is left there)"
+# the slug as the launcher makes it, from the directory as cd names it
+ws="$(cd "$ws" && pwd)" || die "no workspace $ws"
 slug="$(printf '%s' "$ws" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
 st="$HOME/.config/claude-airlock/state/$slug"
 [ ! -L "$st" ] && [ ! -L "$st/dot-claude" ] || die "$st or its dot-claude is a link: not the launcher's; nothing runs until it is removed"
@@ -77,21 +83,25 @@ rm -rf -- "$st/box-memory" "$HOME/.claude/projects" "$st"/artifacts* 2>/dev/null
 # the launcher's scratch dir for the workspace (mounted rw into every box of it): emptied, kept
 tmpd="${AIRLOCK_TMP_BASE:-/tmp/airlock-$(id -un)}/$slug"
 if [ -d "$tmpd" ] && [ ! -L "$tmpd" ]; then
-    { find "$tmpd" -mindepth 1 -delete 2>/dev/null && [ -z "$(find "$tmpd" -mindepth 1 -print -quit)" ]; } \
+    { chmod -R u+rwx "$tmpd" 2>/dev/null; find "$tmpd" -mindepth 1 -delete 2>/dev/null; [ -z "$(find "$tmpd" -mindepth 1 -print -quit)" ]; } \
         || die "the scratch dir $tmpd could not be emptied; nothing runs until it is"
 elif [ -e "$tmpd" ] || [ -L "$tmpd" ]; then rm -f -- "$tmpd" 2>/dev/null || die "$tmpd is not a folder; nothing runs until it is removed"; fi
 if [ -d "$st/dot-claude" ]; then
     for f in "$st/dot-claude"/* "$st/dot-claude"/.[!.]* "$st/dot-claude"/..?*; do
         [ -e "$f" ] || [ -L "$f" ] || continue
         [ "$f" = "$st/dot-claude/.credentials.json" ] && [ -f "$f" ] && [ ! -L "$f" ] && continue
-        rm -rf -- "$f" 2>/dev/null || die "could not empty $st/dot-claude; nothing runs until it is"
+        { [ -L "$f" ] || chmod -R u+rwx "$f" 2>/dev/null; rm -rf -- "$f" 2>/dev/null; } || die "could not empty $st/dot-claude; nothing runs until it is"
     done
 fi
 [ -z "$(find "$st/dot-claude" -mindepth 1 ! -path "$st/dot-claude/.credentials.json" -print -quit 2>/dev/null)" ] \
     || die "$st/dot-claude could not be emptied; nothing runs until it is"
 if [ -e "$st/claude.json" ] || [ -L "$st/claude.json" ]; then
     if [ -f "$st/claude.json" ] && [ ! -L "$st/claude.json" ] \
-        && jq '{oauthAccount, userID, hasCompletedOnboarding, lastOnboardingVersion} | with_entries(select(.value != null))' \
+        && jq '{oauthAccount: ((.oauthAccount // {}) | if type == "object" then with_entries(select((.value | type) == "string" and (.value | length) <= 200)) else {} end),
+                userID: (.userID | if type == "string" and length <= 200 then . else null end),
+                hasCompletedOnboarding: (.hasCompletedOnboarding | if type == "boolean" then . else null end),
+                lastOnboardingVersion: (.lastOnboardingVersion | if type == "string" and length <= 50 then . else null end)}
+            | with_entries(select(.value != null and .value != {}))' \
             "$st/claude.json" > "$st/claude.json.new" 2>/dev/null; then
         mv -f -- "$st/claude.json.new" "$st/claude.json"
     else rm -f -- "$st/claude.json" "$st/claude.json.new"; fi
@@ -108,3 +118,7 @@ timeout -k 30s "$TIMEOUT" "$AIRLOCK" -p "$task" \
     --restricted --strict-mcp-config --tools Bash --allowedTools "$TOOLS" \
     --permission-mode dontAsk --max-turns "$TURNS" \
     --append-system-prompt "$prompt" --output-format text </dev/null
+rc=$?
+# 64 is this script's refusal alone (the operator writes no report for it): a run's own 64 is 65
+[ "$rc" != 64 ] || rc=65
+exit "$rc"
