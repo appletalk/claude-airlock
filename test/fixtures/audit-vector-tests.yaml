@@ -176,7 +176,7 @@ tests:
   - name: "enrich: an agent process merely named sudo is not privilege (exe decides)"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _COMM: "sudo", _EXE: "/home/agent/bin/x", message: "fake"}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "agent-process"); assert_eq!(.audit.severity, "info")'}]}]
-  - name: "enrich: polkit refusing an agent is privilege, high; polkit otherwise low"
+  - name: "enrich: polkit refusing an agent is privilege, high"
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [sh] (owned by unix-user:1101)"}}
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.agent, "agent-web"); assert_eq!(.audit.severity, "high")'}]}]
@@ -198,7 +198,7 @@ tests:
   - name: "enrich: an Envoy refusal (deny route) is envoy-refused, warning, medium, its agent"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "980", _SYSTEMD_UNIT: "airlock-envoy.service", PRIORITY: "6", message: '{"listener":"agent-infra","user":"agent","method":"CONNECT","authority":"example.org:443","route":"deny-connect","status":403,"flags":"-","details":"direct_response"}'}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.log_type, "envoy-access"); assert_eq!(.audit.kind, "envoy-refused"); assert_eq!(.level, "warning"); assert_eq!(.audit.severity, "medium"); assert_eq!(.audit.agent, "agent")'}]}]
-  - name: "enrich: Envoy refusals by flag, Lua answer, RBAC and a protected branch (200) are refused"
+  - name: "enrich: a TLS name no destination takes (NR) is refused"
     inputs:
       - {insert_at: agents, type: log, log_fields: {_UID: "980", _SYSTEMD_UNIT: "airlock-envoy.service", message: '{"connection":"5","sni":"x.example.org","route":null,"flags":"NR"}'}}
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "envoy-refused")'}]}]
@@ -220,7 +220,7 @@ tests:
   - name: "enrich: a request header timeout (408) is not a refusal"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "980", _SYSTEMD_UNIT: "airlock-envoy.service", message: '{"user":"agent","status":408,"details":"request_header_timeout"}'}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "envoy-allowed")'}]}]
-  - name: "enrich: web refusing an internal name and failing to reach one are envoy-web-refused; a normal one allowed"
+  - name: "enrich: web failing to connect (UF) is envoy-web-refused"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "980", _SYSTEMD_UNIT: "airlock-envoy-web.service", message: '{"user":"agent-web","sni":"x.example.org","route":"web","flags":"UF"}'}}]
     outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.log_type, "envoy-web"); assert_eq!(.audit.kind, "envoy-web-refused"); assert_eq!(.audit.agent, "agent-web")'}]}]
   - name: "enrich: a normal web line is envoy-web-allowed"
@@ -251,3 +251,46 @@ tests:
   - name: "enrich: a session name from a sender-set field never decides keeping (another user's line stays out)"
     inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1000", _SYSTEMD_USER_UNIT: "agent-session@x.y.service", USER_UNIT: "agent-session@x.y.service", message: "operator line"}}]
     no_outputs_from: [agents]
+  # ---- enrichment, second round (review): polkit rating and attribution, sessions, more rules ----
+  - name: "enrich: polkit authenticating an agent successfully is privilege, low"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 successfully authenticated as unix-user:root to gain TEMPORARY authorization for action x for system-bus-name::1.9 [pkexec /bin/true] (owned by unix-user:agent)"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.severity, "low"); assert_eq!(.audit.agent, "agent")'}]}]
+  - name: "enrich: a polkit agent registration naming an agent is low"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Registered Authentication Agent for unix-process:4:5 (system bus name :1.7 [/usr/bin/pkttyagent --notify-fd 5], object path /org/freedesktop/PolicyKit1/AuthenticationAgent, locale C) for agent-web"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.severity, "low"); assert!(!exists(.audit.agent))'}]}]
+  - name: "enrich: polkit's subject command line can't pin the line on another agent (the owner tail decides)"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator of unix-session:3 FAILED to authenticate to gain authorization for action x for unix-process:4 [pkexec /bin/echo uid=1101 agent-guard] (owned by unix-user:agent)"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.agent, "agent"); assert_eq!(.audit.severity, "high")'}]}]
+  - name: "enrich: a polkit line with no owner tail names no agent"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "102", _SYSTEMD_UNIT: "polkit.service", message: "Operator FAILED [pkexec /bin/echo uid=1101] for agent-guard"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!exists(.audit.agent)); assert_eq!(.audit.kind, "privilege")'}]}]
+  - name: "enrich: logind's other lines naming an agent mid-text name no agent"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _SYSTEMD_UNIT: "systemd-logind.service", message: "Session 5 of agent-web logged out. Waiting for processes to exit."}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!exists(.audit.agent)); assert_eq!(.audit.kind, "login")'}]}]
+  - name: "enrich: run0, doas and systemd-run by an agent are privilege, high"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "0", _EXE: "/usr/bin/run0", _SYSTEMD_UNIT: "session-9.scope", _SYSTEMD_OWNER_UID: "1101", message: "run0 attempt"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege"); assert_eq!(.audit.severity, "high"); assert_eq!(.audit.agent, "agent-web")'}]}]
+  - name: "enrich: doas by an agent is privilege"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", _EXE: "/usr/bin/doas", message: "doas: not permitted"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "privilege")'}]}]
+  - name: "enrich: a session label naming another agent's session prefix is not taken"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100", USER_UNIT: "agent-web-session@other.proj.service", message: "x"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert!(!exists(.audit.session)); assert_eq!(.audit.agent, "agent")'}]}]
+  - name: "enrich: the web user's own session is labelled"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1101", _SYSTEMD_USER_UNIT: "agent-web-session@main.service", message: "x"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.session, "main"); assert_eq!(.audit.agent, "agent-web")'}]}]
+  - name: "enrich: an address entry's RBAC refusal is refused"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "980", _SYSTEMD_UNIT: "airlock-envoy.service", message: '{"connection":"5","sni":"one.example.org","route":"tls-no-sni","flags":"-","details":"rbac_access_denied_matched_policy[server-name-sent]"}'}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "envoy-refused")'}]}]
+  - name: "enrich: web failing to resolve (DF) is envoy-web-refused"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "980", _SYSTEMD_UNIT: "airlock-envoy-web.service", message: '{"user":"agent-web","sni":"nx.example.org","route":"web","flags":"DF"}'}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "envoy-web-refused")'}]}]
+  - name: "enrich: a flag among others (UAEX,URX) still counts"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "980", _SYSTEMD_UNIT: "airlock-envoy.service", message: '{"user":"agent","status":200,"flags":"UAEX,URX","route":"g-push-guard"}'}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.kind, "envoy-refused")'}]}]
+  - name: "enrich: the first id of agent's subordinate range is agent's"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1100000", message: "first"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.agent, "agent")'}]}]
+  - name: "enrich: the last id of agent's subordinate range is agent's"
+    inputs: [{insert_at: agents, type: log, log_fields: {_UID: "1165535", message: "last"}}]
+    outputs: [{extract_from: redact, conditions: [{type: vrl, source: 'assert_eq!(.audit.agent, "agent")'}]}]

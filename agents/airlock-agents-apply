@@ -1097,7 +1097,8 @@ transforms:
       dropped = transport == "kernel" && ($nft)
       if !(by_agent || by_owner || envoy_unit || store_unit || manager || named || suppressed || dropped) { abort }
       # Why it was kept, most specific first.
-      priv = includes(["/usr/bin/sudo", "/usr/bin/su", "/usr/bin/pkexec", "/usr/sbin/sudo", "/bin/su"], exe)
+      priv = includes(["/usr/bin/sudo", "/usr/sbin/sudo", "/usr/bin/su", "/bin/su", "/usr/bin/pkexec", "/usr/bin/run0",
+        "/usr/bin/systemd-run", "/usr/bin/doas"], exe)
       kind = "agent-process"
       if dropped { kind = "nft-drop"
       } else if suppressed { kind = "journald-suppressed"
@@ -1120,22 +1121,23 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
         key = if is_string(m.u) { string!(m.u) } else { "" }
         agent = to_string(get!(who, [key])) ?? ""
       }
+      # A logind or polkit line names its subject at a fixed place at the end; anything before it
+      # (polkit prints the subject's command line) is the subject's own text, so it never decides.
+      # Lines without that tail (machined's, logind's other lines) name no agent.
       if agent == "" && named {
-        m = parse_regex(msg, r'(unix-user:|\buid=)(?P<u>$ualt)\b') ?? {}
-        key = if is_string(m.u) { string!(m.u) } else { "" }
-        agent = to_string(get!(who, [key])) ?? ""
-        if agent == "" {
-          m = parse_regex(msg, r'(^|[^A-Za-z0-9_-])(?P<a>$alt)([^A-Za-z0-9_-]|$)') ?? {}
-          agent = if is_string(m.a) { string!(m.a) } else { "" }
-        }
+        m = parse_regex(msg, r'\(owned by unix-user:(?P<a>$alt|$ualt)\)\s*$') ??
+          parse_regex(msg, r'\bof user (?P<a>$alt)\.?\s*$') ?? {}
+        a = if is_string(m.a) { string!(m.a) } else { "" }
+        agent = to_string(get!(who, [a])) ?? ""
+        if agent == "" && match(a, r'^($alt)$') { agent = a }
       }
       .audit = {"kind": kind}
       if agent != "" { .audit.agent = agent }
       if by_agent || by_owner || manager {
         for_each(["_SYSTEMD_USER_UNIT", "USER_UNIT", "UNIT"]) -> |_i, f| {
           if !exists(.audit.session) {
-            m = parse_regex(to_string(get!(., [f])) ?? "", r'-session@(?P<s>[A-Za-z0-9][A-Za-z0-9_.-]{0,128})[.]service$') ?? {}
-            if exists(m.s) { .audit.session = m.s }
+            m = parse_regex(to_string(get!(., [f])) ?? "", r'^(?P<o>[a-z_][a-z0-9_-]*)-session@(?P<s>[A-Za-z0-9][A-Za-z0-9_.-]{0,128})[.]service$') ?? {}
+            if exists(m.s) && agent != "" && m.o == agent { .audit.session = m.s }
           }
         }
       }
@@ -1188,7 +1190,7 @@ $(for r in "${ROLES[@]}"; do printf '      if agent == "" && n >= %s && n < %s {
       msgl = downcase(to_string(.message) ?? "")
       sev = "info"
       if k == "nft-drop" { sev = "high"
-      } else if k == "privilege" && to_string(._SYSTEMD_UNIT) ?? "" != "polkit.service" { sev = "high"
+      } else if k == "privilege" && (to_string(._SYSTEMD_UNIT) ?? "") != "polkit.service" { sev = "high"
       } else if k == "privilege" && (contains(msgl, "failed") || contains(msgl, "not authorized")) { sev = "high"
       } else if k == "privilege" { sev = "low"
       } else if ends_with(k, "-refused") || k == "login" || k == "journald-suppressed" { sev = "medium"

@@ -39,7 +39,7 @@ denies() { run "$OP" audit denies "$@"; }
     denies --since 2h --limit 7
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     q="$(sed -n 1p "$CALLS")"
-    pred='(audit.kind:in("envoy-refused","envoy-web-refused") or (audit.kind:"" log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:lua_response or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))))'
+    pred='(audit.kind:in("envoy-refused","envoy-web-refused") or (audit.kind:"" log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:="lua_response" or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))))'
     [[ "$q" == '_time:>='????-??-??T??:??:??Z" $pred | sort by (_time desc) | limit 7 | fields "* ]] || { echo "$q"; return 1; }
     [[ "$(sed -n 2p "$CALLS")" == *'| stats count() n' ]]
     [[ "$output" == *"(no refusals since "* ]]
@@ -395,7 +395,7 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     run "$OP" audit events --severity medium --kind privilege --agent agent --since 2h
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     q="$(sed -n 1p "$CALLS")"
-    [[ "$q" == '_time:>='????-??-??T??:??:??Z' audit.severity:in(high,medium) audit.kind:privilege audit.agent:"agent" | sort by (_time desc) | limit 50 | fields '* ]] || { echo "$q"; return 1; }
+    [[ "$q" == '_time:>='????-??-??T??:??:??Z' audit.severity:in(high,medium) audit.kind:="privilege" audit.agent:="agent" | sort by (_time desc) | limit 50 | fields '* ]] || { echo "$q"; return 1; }
     [[ "$(sed -n 2p "$CALLS")" == *'| stats by (audit.severity) count() n' ]]
     [[ "${lines[0]}" == "2026-11-15 14:05:00  high    privilege            agent/proj.main               agent : user NOT in sudoers" ]] || { echo "$output"; return 1; }
     [[ "${lines[1]}" == *"medium  envoy-refused        agent                         CONNECT example.org:443  [deny-connect 403]" ]] || { echo "$output"; return 1; }

@@ -303,16 +303,17 @@ machine (nothing leaves it):
   names, and Envoy's own JSON sits under `envoy.*`):
   - `audit.kind`: which rule kept the line: `envoy-refused`, `envoy-allowed`, `envoy-web-refused`,
     `envoy-web-allowed` (the same refusal rules as `audit denies`), `privilege` (an agent's own
-    sudo, su or pkexec, by its binary; polkit naming an agent), `login` (logind or machined
+    sudo, su, pkexec, run0, systemd-run or doas, by its binary; polkit naming an agent), `login` (logind or machined
     naming an agent), `session` (the agents' managers and their units), `nft-drop`,
     `journald-suppressed`, `envoy-service` (Envoy's units' other lines), `store` (the store's
     own units), `agent-process` (anything else an agent or its boxes logged);
   - `audit.agent`: the agent the line is about (by uid, a box's subordinate id, the session's
-    owner, the manager's uid, or the name or uid a logind or polkit line gives; for Envoy, the
-    listener's user when it is an agent);
+    owner, the manager's uid, or the subject at the fixed end of a logind or polkit line: polkit
+    prints the subject's own command line before it, so nothing earlier in the line counts; for
+    Envoy, the listener's user when it is an agent);
   - `audit.session`: the session (`<project>.<name>`) from the session unit's name, where the
-    line comes from one. The unit name can be set by the line's own sender, so it labels, it
-    never decides what is kept;
+    line comes from one of that agent's own sessions. The unit name can be set by the line's own
+    sender, so it labels, it never decides what is kept;
   - `level` (vmui's colour): journald's priority; for Envoy's lines, what happened (a refusal a
     warning, an error Envoy answered itself an error);
   - `audit.severity`, a security rating apart from syslog's: `high` for an agent's privilege
@@ -378,7 +379,8 @@ machine (nothing leaves it):
   [--agent <name>] [--since 7d] [--limit 200]` lists the lines the store rated at that severity and
   above (medium and the last 24 hours by default), newest first: time, severity, kind, agent and
   session, what happened (a redacted line says so), then a count by severity. Kind and agent are
-  checked against their shape before they go into the fixed query. Lines stored before the store
+  checked against their shape before they go into the fixed query, and matched exactly (`--agent
+  agent` is not also `agent-web`). Lines stored before the store
   rated them don't show (a reset reads them in again).
 - **Browsing it:** `claude-agent audit ui` serves the store's web UI (VictoriaLogs' vmui) at
   `http://127.0.0.1:9429/select/vmui/` until Ctrl-C (`--port <n>` for another), and closes by

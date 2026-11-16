@@ -902,7 +902,7 @@ sock, start, limit, cmd = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4
 # kept for lines stored before that (until sudo airlock-audit reset reads them in again).
 REFUSED = ('(audit.kind:in("envoy-refused","envoy-web-refused") or (audit.kind:"" '
            'log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX '
-           'or envoy.details:lua_response or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" '
+           'or envoy.details:="lua_response" or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" '
            'or (log_type:envoy-web envoy.flags:~"UF|DF") '
            'or (envoy.status:>=400 -envoy.details:via_upstream '
            '-envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))))')
@@ -1149,9 +1149,9 @@ def when(t):
 
 f = f'_time:>={start} audit.severity:in({",".join(levels)})'
 if kind:
-    f += f" audit.kind:{kind}"
+    f += f' audit.kind:="{kind}"'
 if agent:
-    f += f' audit.agent:"{agent}"'
+    f += f' audit.agent:="{agent}"'
 rows = query(f"{f} | sort by (_time desc) | limit {limit} | fields _time, audit.severity, audit.kind, audit.agent, "
              "audit.session, audit.redacted, log_type, _msg, envoy.method, envoy.authority, envoy.path, envoy.route, "
              "envoy.status, envoy.sni")
