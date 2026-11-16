@@ -123,7 +123,7 @@ while IFS= read -r line || [ -n "$line" ]; do
             [ "${#w[@]}" -gt 1 ] || die "$where: audit-nft-prefix lists nothing"
             # 16 characters at least: a process name (15 at most) shows at the start of the kernel's
             # own lines about it (a crash, say), so a shorter prefix could be forged by naming one.
-            for v in "${w[@]:1}"; do [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{14,40}:?$ ]] || die "$where: bad nft log prefix '$v' (16 to 42 characters: letters, digits, _ . -, an optional trailing colon)"; AUDIT_PREFIXES+=("$v"); done ;;
+            for v in "${w[@]:1}"; do [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{15,41}:?$ ]] || die "$where: bad nft log prefix '$v' (16 to 42 characters: letters, digits, _ . -, an optional trailing colon)"; AUDIT_PREFIXES+=("$v"); done ;;
         operator|command|inbox|queue|daily-cap)
             [ "${#w[@]}" = 2 ] || die "$where: want: ${w[0]} <value>"
             v=${w[1]}
@@ -705,7 +705,7 @@ AUDIT_VL=/usr/local/bin/victoria-logs
 AUDIT_VMAUTH=/usr/local/bin/vmauth
 AUDIT_ETC=/etc/airlock-audit
 AUDIT_UNITS=(airlock-audit-vl.service airlock-audit-vmauth.service airlock-audit-vl-proxy.socket airlock-audit-vl-proxy.service airlock-audit-vector.service airlock-audit-journal.service)
-AUDIT_IN=/run/airlock-audit-collect/journal.sock
+AUDIT_IN=/run/airlock-audit-in/journal
 # Vector's oldest release that reads ${1} in a config literally (environment interpolation off by
 # default since 0.57; the redact rules use ${1}).
 AUDIT_VECTOR_MIN=0.57
@@ -722,6 +722,10 @@ render_audit_tmpfiles() {
 d $AUDIT_LIB 0700 $AUDIT_USER $AUDIT_USER -
 d $AUDIT_LIB/vl 0700 $AUDIT_USER $AUDIT_USER -
 d $AUDIT_LIB/vector 0700 $AUDIT_USER $AUDIT_USER -
+# The pipe from the journal reader to Vector: always there (made at boot), so the reader's
+# output can never land in a regular file; only root and $AUDIT_USER can open it.
+d ${AUDIT_IN%/*} 0700 $AUDIT_USER $AUDIT_USER -
+p $AUDIT_IN 0600 $AUDIT_USER $AUDIT_USER -
 EOF
 }
 render_audit_vmauth() {
@@ -799,7 +803,8 @@ JoinsNamespaceOf=airlock-audit-vl.service
 RuntimeDirectory=airlock-audit-vmauth
 RuntimeDirectoryMode=0700
 ExecStartPre=/bin/sh -c 'umask 077; k() { head -c 32 /dev/urandom | od -An -tx1 | tr -d " \\n"; }; printf "VM_metricsAuthKey=%%s\\nVM_flagsAuthKey=%%s\\nVM_pprofAuthKey=%%s\\nVM_reloadAuthKey=%%s\\n" "\$\$(k)" "\$\$(k)" "\$\$(k)" "\$\$(k)" > "\$\$RUNTIME_DIRECTORY/keys"'
-EnvironmentFile=$AUDIT_RUN-vmauth/keys
+# "-": systemd reads it for every command, the step that makes it included.
+EnvironmentFile=-$AUDIT_RUN-vmauth/keys
 ExecStart=$AUDIT_VMAUTH -envflag.enable -envflag.prefix=VM_ -auth.config=$AUDIT_ETC/vmauth.yaml -httpListenAddr=127.0.0.1:8427 -loggerLevel=WARN
 Restart=on-failure
 RestartSec=5
@@ -849,8 +854,8 @@ render_audit_vector_unit() {
     cat <<EOF
 # Rendered by airlock-agents-apply: Vector feeding the audit store the agents' journal lines. It
 # can't read the journal: airlock-audit-journal.service writes it the candidate lines through
-# $AUDIT_IN (its own runtime directory, 0600). It writes only its checkpoints and the store, in
-# the store's network namespace; no capabilities.
+# the pipe $AUDIT_IN (0600, made at boot). It writes only its checkpoints and the store, in the
+# store's network namespace; no capabilities.
 [Unit]
 Description=airlock audit collector (Vector)
 Requires=airlock-audit-vl.service
@@ -859,10 +864,9 @@ JoinsNamespaceOf=airlock-audit-vl.service
 
 [Service]
 ExecStart=/usr/bin/vector --config $AUDIT_ETC/vector.yaml
-Restart=on-failure
+# Always: Vector can exit 0 on a fatal source error.
+Restart=always
 RestartSec=5
-RuntimeDirectory=airlock-audit-collect
-RuntimeDirectoryMode=0700
 ReadWritePaths=$AUDIT_LIB/vector
 MemoryMax=512M
 $(audit_sandbox)
@@ -886,20 +890,19 @@ render_audit_journal_unit() {
     for u in "${AUDIT_UNITS[@]}"; do [[ "$u" == *.service ]] && m="$m _SYSTEMD_UNIT=$u"; done
     m="$m _SYSTEMD_UNIT=systemd-logind.service _SYSTEMD_UNIT=systemd-machined.service _SYSTEMD_UNIT=polkit.service _SYSTEMD_UNIT=systemd-journald.service"
     m="$m +"
-    for r in "${ROLES[@]}"; do m="$m UNIT=user@${UID_OF[$r]}.service"; done
-    m="$m _UID=0 +"
-    for r in "${ROLES[@]}"; do m="$m USER_UNIT=user@${UID_OF[$r]}.service"; done
+    for r in "${ROLES[@]}"; do m="$m UNIT=user@${UID_OF[$r]}.service UNIT=user-${UID_OF[$r]}.slice"; done
     m="$m _UID=0 + _TRANSPORT=kernel"
     cat <<EOF
 # Rendered by airlock-agents-apply: reads the journal for the audit store, the only one of its
 # units that can (a DynamicUser in systemd-journal, no network, nothing writable but its cursor).
-# journalctl's matches pick the candidate lines; Vector's filter decides what is kept. systemd
-# connects its output to Vector's socket ($AUDIT_IN): only root and airlock-audit can, so nothing
-# else can put lines there. A Vector restart breaks the stream: this restarts with it, from its
-# cursor.
+# journalctl's matches pick the candidate lines; Vector's filter decides what is kept. Its output
+# is the pipe $AUDIT_IN (made at boot; only root and airlock-audit can open it, so nothing else
+# can put lines there): opening it waits until Vector reads. When Vector stops the pipe breaks,
+# journalctl exits, and this starts again from its cursor, waiting for Vector. What was still in
+# the pipe at that moment (64 KiB at most) is lost: the store is a copy.
 [Unit]
 Description=airlock audit journal reader
-BindsTo=airlock-audit-vector.service
+Wants=airlock-audit-vector.service
 After=airlock-audit-vector.service
 
 [Service]
@@ -908,8 +911,11 @@ SupplementaryGroups=systemd-journal
 StateDirectory=airlock-audit-journal
 # From its cursor once it has one; the first time, the last $AUDIT_RETENTION (journalctl takes
 # --since only without a cursor to resume from).
-ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; s=--since=-$AUDIT_RETENTION; [ ! -s "\$\$c" ] || s=; exec /usr/bin/journalctl --follow --output=json --no-pager --cursor-file="\$\$c" \$\$s$m'
+ExecStart=/bin/sh -c 'c=%S/airlock-audit-journal/cursor; s=--since=-$AUDIT_RETENTION; [ ! -s "\$\$c" ] || s=; exec /usr/bin/journalctl --follow --all --output=json --no-pager --cursor-file="\$\$c" \$\$s$m'
+# --all: without it journalctl blanks any field of 4 KiB or more (a padded request would arrive
+# empty). Its own errors go to the journal, never down the pipe.
 StandardOutput=file:$AUDIT_IN
+StandardError=journal
 Restart=always
 RestartSec=3
 NoNewPrivileges=yes
@@ -957,9 +963,9 @@ render_audit_redact() {
         if is_string(v) {
           s = string!(v)
           s = replace(s, r'(?i)([?&;](?:access_token|refresh_token|id_token|private_token|token|api_key|apikey|api-key|key|secret|client_secret|password|passwd|pwd|auth|sig|signature|code|session|sessionid|jwt|x-amz-security-token|x-amz-signature|x-amz-credential|x-goog-signature|x-goog-credential)=)[^&;\s"#\\]*', "${1}REDACTED")
-          s = replace(s, r'(?i)("(?:access_token|refresh_token|id_token|token|auth_token|api_key|apikey|secret|client_secret|password|passwd|private_key)"\s*:\s*")[^"]*', "${1}REDACTED")
-          s = replace(s, r'(?i)((?:^|\s)--?(?:password|passwd|token|secret|api-key|apikey|auth-token|access-token)(?:=|\s+))[^\s"]+', "${1}REDACTED")
-          s = replace(s, r'\b((?:[A-Z][A-Z0-9_]*_)?(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)(?:_[A-Z0-9_]*)?=)[^\s"\x27&]+', "${1}REDACTED")
+          s = replace(s, r'(?i)("(?:access_?token|refresh_?token|id_?token|session_?token|auth_?token|token|api_?key|apikey|secret|client_?secret|password|passwd|private_?key|cookie)"\s*:\s*")(?:[^"\\]|\\.)*', "${1}REDACTED")
+          s = replace(s, r'(?i)((?:^|\s)--?(?:password|passwd|token|secret|api-key|apikey|auth-token|access-token)(?:=|\s+))(?:"[^"]*"|\x27[^\x27]*\x27|[^\s"\x27]+)', "${1}REDACTED")
+          s = replace(s, r'\b((?:[A-Z][A-Z0-9_]*_)?(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)(?:_[A-Z0-9_]*)?=)(?:"[^"]*"|\x27[^\x27]*\x27|[^\s"\x27&]+)', "${1}REDACTED")
           s = replace(s, r'\b([Bb]earer|[Bb]asic|BEARER|BASIC)(\s+)[A-Za-z0-9+/=._~-]*[0-9+/=_~][A-Za-z0-9+/=._~-]*', "${1}${2}REDACTED")
           s = replace(s, r'(?i)((?:\b|_)(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|private-token)["\x27]?\s*[:=]\s*["\x27]?)([A-Za-z]+\s+)?[A-Za-z0-9+/=._~-]{8,}', "${1}${2}REDACTED")
           s = replace(s, r'(?i)(\b(?:set-)?cookie["\x27]?\s*:\s*)[^\r\n"]+', "${1}REDACTED")
@@ -967,7 +973,7 @@ render_audit_redact() {
           s = replace(s, r'\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255}|glpat-[A-Za-z0-9_-]{20,}|glsa_[A-Za-z0-9_]{20,}|xox[abposr]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{48}|[sr]k_live_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{36}|dckr_pat_[A-Za-z0-9_-]{20,}|pypi-[A-Za-z0-9_-]{50,}|ya29\.[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{35}|(?:AKIA|ASIA)[A-Z0-9]{16})\b', "REDACTED")
           s = replace(s, r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', "REDACTED-JWT")
           s = replace(s, r'(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)', "REDACTED-PRIVATE-KEY")
-          if length(s) > 8192 { s = truncate(s, 8192) + "...[cut at 8 KiB]" }
+          if strlen(s) > 8192 { s = truncate(s, 8192) + "...[cut at 8192 characters]" }
           s
         } else { v }
       }
@@ -994,10 +1000,13 @@ render_audit_vector() {
 data_dir: $AUDIT_LIB/vector
 sources:
   journal:
-    type: socket
-    mode: unix_stream
-    path: $AUDIT_IN
-    socket_file_mode: 0o600
+    type: exec
+    mode: streaming
+    command: ["/usr/bin/cat", "$AUDIT_IN"]
+    include_stderr: false
+    streaming:
+      respawn_on_exit: true
+      respawn_interval_secs: 1
     framing:
       method: newline_delimited
       newline_delimited:
@@ -1005,7 +1014,8 @@ sources:
 transforms:
   # journalctl -o json: MESSAGE -> message, _HOSTNAME -> host, the time journald received the
   # line (not the sender's _SOURCE_REALTIME_TIMESTAMP). A field with control characters or
-  # invalid UTF-8 arrives as a byte array, which redaction can't read: withheld, its size kept.
+  # invalid UTF-8 arrives as a byte array (a repeated field as an array of values), which
+  # redaction can't read: withheld, its length kept.
   journal_fields:
     type: remap
     inputs: [journal]
@@ -1014,7 +1024,7 @@ transforms:
       j, err = parse_json(to_string(.message) ?? "")
       if err != null || !is_object(j) { abort }
       . = object!(j)
-      . = map_values(.) -> |v| { if is_array(v) { "withheld: " + to_string(length(array!(v))) + " bytes not text" } else { v } }
+      . = map_values(.) -> |v| { if is_array(v) { "withheld: not plain text (" + to_string(length(array!(v))) + " values)" } else { v } }
       m = del(.MESSAGE)
       .message = if is_string(m) { m } else { "" }
       h = del(._HOSTNAME)
@@ -1035,13 +1045,13 @@ transforms:
         comm = to_string(._COMM) ?? ""
         unit = to_string(._SYSTEMD_UNIT) ?? ""
         about = ""
-        if uid == "0" || uid == "" { about = (to_string(.UNIT) ?? "") + " " + (to_string(.USER_UNIT) ?? "") }
+        if uid == "0" || uid == "" { about = to_string(.UNIT) ?? "" }
         exe = to_string(._EXE) ?? ""
         transport = to_string(._TRANSPORT) ?? ""
         msg = to_string(.message) ?? ""
         # Only fields journald sets decide who wrote a line (SYSLOG_IDENTIFIER and the like are the
         # sender's to choose). Box output: podman's conmon (its binary) with a container's fields.
-        box_output = ends_with(exe, "/conmon") && exists(.CONTAINER_ID)
+        box_output = includes(["/usr/bin/conmon", "/usr/libexec/podman/conmon"], exe) && exists(.CONTAINER_ID)
         # logind, machined and polkit by their units. (An agent's own sudo or su runs as root but
         # stays in the agent's cgroup: the owner uid below keeps it. Nobody else's sudo is read.)
         svc = includes(["systemd-logind.service", "systemd-machined.service", "polkit.service"], unit)
@@ -1851,8 +1861,10 @@ if [ "$AUDIT" = on ]; then
     if getent passwd "$AUDIT_USER" >/dev/null; then ok "account $AUDIT_USER"
     else step "create the account $AUDIT_USER (systemd-sysusers)" systemd-sysusers /etc/sysusers.d/airlock-audit.conf; fi
     if [ "$(stat -c %a "$ROOT$AUDIT_LIB/vl" 2>/dev/null)" = 700 ] && [ "$(stat -c %a "$ROOT$AUDIT_LIB/vector" 2>/dev/null)" = 700 ] \
-            && { [ -n "$ROOT" ] || [ "$(stat -c %U "$AUDIT_LIB/vl")" = "$AUDIT_USER" ]; }; then ok "$AUDIT_LIB: $AUDIT_USER's, 0700"
-    else step "$AUDIT_LIB: $AUDIT_USER's, 0700" systemd-tmpfiles --create /etc/tmpfiles.d/airlock-audit.conf; fi
+            && [ -p "$ROOT$AUDIT_IN" ] && [ ! -L "$ROOT$AUDIT_IN" ] && [ "$(stat -c %a "$ROOT$AUDIT_IN" 2>/dev/null)" = 600 ] \
+            && { [ -n "$ROOT" ] || [ "$(stat -c %U "$AUDIT_LIB/vl")" = "$AUDIT_USER" ] && [ "$(stat -c %U:%a "${AUDIT_IN%/*}")" = "$AUDIT_USER:700" ]; }; then
+        ok "$AUDIT_LIB and the pipe $AUDIT_IN: $AUDIT_USER's, 0700/0600"
+    else step "$AUDIT_LIB and the pipe $AUDIT_IN: $AUDIT_USER's, 0700/0600" systemd-tmpfiles --create /etc/tmpfiles.d/airlock-audit.conf; fi
     if [ ! -f "$ROOT$AUDIT_VL" ] || [ ! -f "$ROOT$AUDIT_VMAUTH" ]; then
         echo "note: the audit store waits for VictoriaLogs and vmauth: sudo update-victorialogs, then apply again" >&2
     elif [ "$audit_changed" = 0 ] && systemctl is-enabled --quiet airlock-audit-vl.service 2>/dev/null \

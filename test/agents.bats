@@ -3374,12 +3374,17 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     j="$u/airlock-audit-journal.service"
     grep -qx 'DynamicUser=yes' "$j" && grep -qx 'SupplementaryGroups=systemd-journal' "$j" && grep -qx 'PrivateNetwork=yes' "$j"
     grep -qx 'CapabilityBoundingSet=' "$j" && grep -qx 'NoNewPrivileges=yes' "$j" && grep -qx 'RestrictAddressFamilies=AF_UNIX' "$j"
-    grep -qx 'StandardOutput=file:/run/airlock-audit-collect/journal.sock' "$j"
-    grep -q 'journalctl --follow --output=json --no-pager --cursor-file=' "$j"
+    grep -qx 'StandardOutput=file:/run/airlock-audit-in/journal' "$j" && grep -qx 'StandardError=journal' "$j"
+    grep -q 'journalctl --follow --all --output=json --no-pager --cursor-file=' "$j"
+    ! grep -q '^BindsTo=' "$j"
+    # the pipe: made at boot (tmpfiles), so the reader's output never lands in a regular file
+    grep -qx 'p /run/airlock-audit-in/journal 0600 airlock-audit airlock-audit -' "$T/ar/etc/tmpfiles.d/airlock-audit.conf"
+    grep -qx 'd /run/airlock-audit-in 0700 airlock-audit airlock-audit -' "$T/ar/etc/tmpfiles.d/airlock-audit.conf"
+    grep -qx 'Restart=always' "$u/airlock-audit-vector.service"
+    grep -qx 'EnvironmentFile=-/run/airlock-audit-vmauth/keys' "$u/airlock-audit-vmauth.service"
     ! grep -q '_COMM=sudo' "$j" && grep -q ' + _TRANSPORT=kernel' "$j"
     ! grep -q 'systemd-journal' "$u/airlock-audit-vector.service"
-    grep -qx 'RuntimeDirectory=airlock-audit-collect' "$u/airlock-audit-vector.service"
-    grep -qx '    type: socket' "$T/ar/etc/airlock-audit/vector.yaml" && grep -qx '    socket_file_mode: 0o600' "$T/ar/etc/airlock-audit/vector.yaml"
+    grep -qx '    command: \["/usr/bin/cat", "/run/airlock-audit-in/journal"\]' "$T/ar/etc/airlock-audit/vector.yaml"
     ! grep -q 'type: journald' "$T/ar/etc/airlock-audit/vector.yaml"
     # ...and only the collector: the account itself isn't in the group (the store, the door and
     # the relay never read the journal)
@@ -3391,7 +3396,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     ! grep -q 'type: throttle' "$T/ar/etc/airlock-audit/vector.yaml"
     # vmauth's own endpoints take a throwaway key made at each start, never stored
     grep -qx 'RuntimeDirectory=airlock-audit-vmauth' "$u/airlock-audit-vmauth.service"
-    grep -qx 'EnvironmentFile=/run/airlock-audit-vmauth/keys' "$u/airlock-audit-vmauth.service"
+    grep -qx 'EnvironmentFile=-/run/airlock-audit-vmauth/keys' "$u/airlock-audit-vmauth.service"
     grep -q '^ExecStart=/usr/local/bin/vmauth -envflag.enable -envflag.prefix=VM_ ' "$u/airlock-audit-vmauth.service"
     for k in metrics flags pprof reload; do grep -q "VM_${k}AuthKey=" "$u/airlock-audit-vmauth.service" || { echo "$k"; return 1; }; done
     ! grep -q 'type: file' "$T/ar/etc/airlock-audit/vector.yaml"
@@ -3427,25 +3432,32 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     audit_site "external nftables"
     run "$P" --env
     [ "$status" -ne 0 ]; [[ "$output" == *"name your rules' log prefixes"* ]]
-    audit_site "external nftables" "audit-nft-prefix site-agent-drop: site-agentweb-drop:"; audit_render
-    grep -qF 'starts_with(msg, "site-agent-drop:") || starts_with(msg, "site-agentweb-drop:")' "$T/ar/etc/airlock-audit/vector.yaml"
+    audit_site "external nftables" "audit-nft-prefix site-agents-drop: site-agentweb-drop:"; audit_render
+    grep -qF 'starts_with(msg, "site-agents-drop:") || starts_with(msg, "site-agentweb-drop:")' "$T/ar/etc/airlock-audit/vector.yaml"
     # shorter than 16 characters: a process name could forge it at the start of a kernel line
     audit_site "external nftables" "audit-nft-prefix web-drop:"
     run "$P" --env
     [ "$status" -ne 0 ]; [[ "$output" == *"bad nft log prefix 'web-drop:' (16 to 42 characters"* ]]
+    # 15 characters without the colon is still too short; 16 with or without one is fine
+    audit_site "external nftables" "audit-nft-prefix abcdefghijklmno"
+    run "$P" --env
+    [ "$status" -ne 0 ]
+    audit_site "external nftables" "audit-nft-prefix abcdefghijklmnop"
+    run "$P" --env
+    [ "$status" -eq 0 ]
     ! grep -q 'airlock-agents-agent-drop' "$T/ar/etc/airlock-audit/vector.yaml"
 }
 
 @test "the collector's filter keeps the agents' lines and drops the rest (vector validate + vector test)" {
     command -v vector >/dev/null || skip "no vector here"
     audit_site; audit_render
-    sed -e "s#^data_dir: .*#data_dir: $T/vdata#" -e "s#path: /run/airlock-audit-collect/#path: $T/#" "$T/ar/etc/airlock-audit/vector.yaml" > "$T/v.yaml"; mkdir -p "$T/vdata"
+    sed -e "s#^data_dir: .*#data_dir: $T/vdata#" "$T/ar/etc/airlock-audit/vector.yaml" > "$T/v.yaml"; mkdir -p "$T/vdata"
     run vector validate --no-environment "$T/v.yaml"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     run vector test "$T/v.yaml" "$REPO/test/fixtures/audit-vector-tests.yaml"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *failed* ]]
-    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 43 ]
+    [ "$(grep -c '\.\.\. passed' <<< "$output")" -ge 48 ]
 }
 
 @test "apply with audit on: the account, the data dirs, then waits for VictoriaLogs; with it, enables the store" {
@@ -3454,7 +3466,7 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"would: install /etc/systemd/system/airlock-audit-vl.service"* ]]
     [[ "$output" == *"would: create the account airlock-audit (systemd-sysusers)"* ]]
-    [[ "$output" == *"would: /var/lib/airlock-audit: airlock-audit's, 0700"* ]]
+    [[ "$output" == *"would: /var/lib/airlock-audit and the pipe /run/airlock-audit-in/journal: airlock-audit's, 0700/0600"* ]]
     [[ "$output" == *"note: the audit store waits for VictoriaLogs and vmauth: sudo update-victorialogs"* ]]
     mkdir -p "$R/usr/local/bin"; printf '\x7fELF' > "$R/usr/local/bin/victoria-logs"; chmod 0755 "$R/usr/local/bin/victoria-logs"
     run "$P"

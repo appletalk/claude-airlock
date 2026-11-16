@@ -302,20 +302,25 @@ machine (nothing leaves it):
   kind; `Bearer`/`Basic` values, `Authorization`, API key and token headers, cookies;
   credentials in URLs; common vendor key formats (GitHub, GitLab, Slack, Anthropic, OpenAI,
   Stripe, Hugging Face, npm, Docker Hub, PyPI, Google, AWS); JWTs; private key blocks), then
-  every field cut at 8 KiB. A key printed line by line reaches the journal as separate lines:
-  only its first line is recognised. The parameter name stays, so a refused `?token=` still shows. Envoy
+  every field cut at 8192 characters. A key printed line by line reaches the journal as separate
+  lines: only its first line is recognised. The parameter name stays, so a refused `?token=` still shows. Envoy
   never logs the credentials it adds; this is for secrets a box sends itself, since whatever
   reads the store (an auditor's model included) may send it on. The raw lines stay in Envoy's
   files and the journal.
 - **Nothing is dropped for volume:** a rate limit would let a box hide one request behind a burst
-  of others. A flood can push old days out of the disk cap (the store keeps the last two days
-  whatever happens); VictoriaLogs logs each day it drops, among the store's own lines. The store
-  is a copy for querying: the journal and Envoy's files stay the record.
+  of others. The cost, plainly: a flood is cheap and can push old days out of the disk cap within
+  the hour (the store keeps the last two days whatever happens), and it costs the journal too
+  (its own size cap). VictoriaLogs logs each day it drops, among the store's own lines, so a
+  flood is visible, not prevented. The store is a copy for querying: the journal and Envoy's
+  files stay the record.
+- **Not covered:** an Envoy line over journald's line limit (48 KiB, a request with a huge path)
+  arrives split, as plain journal lines without Envoy's fields; lines from airlock-envoy's socket
+  relays (`airlock-envoy-proxy@`); and up to 64 KiB of lines in flight when Vector restarts.
 - **Where:** a VictoriaLogs under its own account `airlock-audit`, data in `/var/lib/airlock-audit`,
   kept 90 days up to 5 GB (`audit on retention 180d max-disk 10G` to change). Vector 0.57 or later (your distribution's package) feeds it without
   reading the journal itself: a small reader unit (a dynamic user, the only one in
-  `systemd-journal`, no network) runs `journalctl` with fixed matches and systemd hands its output
-  to Vector's own socket, so Vector only ever sees the candidate lines. `make install-agents` installs
+  `systemd-journal`, no network) runs `journalctl` with fixed matches, and systemd hands its output
+  to a pipe made at boot that only Vector reads, so Vector only ever sees the candidate lines. `make install-agents` installs
   VictoriaLogs and vmauth from images pinned by digest (`sudo update-victorialogs`).
 - **Access:** the store has no network port. It, vmauth and Vector run in a network namespace of
   their own; the only way in is the socket `/run/airlock-audit/vl.sock`, which only
@@ -323,9 +328,9 @@ machine (nothing leaves it):
   which leads to vmauth: queries (`/select/`) pass, nothing else (no inserts, no deletes; vmauth's
   own endpoints take a random key made at each start that nobody holds). To query by hand:
   `curl --unix-socket /run/airlock-audit/vl.sock http://x/select/logsql/query -d 'query=_time:1h | limit 10'`.
-- **With external nftables**, name your drop rules' log prefixes, 16 characters or more (a
-  shorter one could be forged by a process name): `audit-nft-prefix myhost-agent-drop:
-  myhost-agentweb-drop:`.
+- **With external nftables**, name your drop rules' log prefixes, 16 characters or more before
+  any colon (a process name is at most 15, and the kernel starts some lines with it):
+  `audit-nft-prefix myhost-agent-drop: myhost-agentweb-drop:`.
 - `audit off` stops and disables the units; the data in `/var/lib/airlock-audit` stays until you
   remove it.
 
