@@ -147,6 +147,14 @@ What holds against the box is Claude Code's managed settings,
 `/etc/claude-code/managed-settings.json`. They also:
 
 - keep the auto-updater and claude.ai connectors off;
+- skip registering the official plugin marketplace on first launch
+  (`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL`). It downloads from
+  `downloads.claude.ai`, falling back to a git clone from GitHub. Under the default egress
+  both are refused, and Claude Code retried for weeks, each attempt a refusal (in the proxy
+  posture, in the proxy's log). A box that allows GitHub would have registered it through
+  the clone; there, add it by hand if you want it
+  (`/plugin marketplace add anthropics/claude-plugins-official`). Claude Code's built-in
+  plugins are unaffected;
 - refuse messages from your other Claude sessions (`crossSessionInbound`). Cross-session
   messaging reaches across machines over Remote Control, so any session on the account
   could otherwise steer a box. Driving the box yourself from the app over Remote Control is

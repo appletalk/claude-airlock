@@ -262,10 +262,10 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
 
 # First layer: managed (policy) settings in the image, applied after anything the box can
 # write. Checked statically here; the built image is checked by hand (see the commit).
-@test "the image ships managed settings that keep telemetry, error reporting, updates and connectors off" {
+@test "the image ships managed settings that keep telemetry, error reporting, updates, connectors and the marketplace auto-install off" {
   m="$BATS_TEST_DIRNAME/../image/managed-settings.json"
-  run jq -r '.env | [.DISABLE_TELEMETRY, .DISABLE_ERROR_REPORTING, .DISABLE_AUTOUPDATER, .ENABLE_CLAUDEAI_MCP_SERVERS] | join(",")' "$m"
-  [ "$output" = "1,1,1,false" ]
+  run jq -r '.env | [.DISABLE_TELEMETRY, .DISABLE_ERROR_REPORTING, .DISABLE_AUTOUPDATER, .ENABLE_CLAUDEAI_MCP_SERVERS, .CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL] | join(",")' "$m"
+  [ "$output" = "1,1,1,false,1" ]
   grep -q '^COPY managed-settings.json /etc/claude-code/managed-settings.json$' "$BATS_TEST_DIRNAME/../image/Dockerfile"
 }
 
