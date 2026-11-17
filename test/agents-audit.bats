@@ -40,7 +40,8 @@ denies() { run "$OP" audit denies "$@"; }
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     q="$(sed -n 1p "$CALLS")"
     pred='(audit.kind:in("envoy-refused","envoy-web-refused") or (audit.kind:"" log_type:in("envoy-access","envoy-web") (envoy.flags:NR or envoy.flags:UAEX or envoy.details:="lua_response" or envoy.details:~"^rbac_access_denied" or envoy.route:~"^deny-" or (log_type:envoy-web envoy.flags:~"UF|DF") or (envoy.status:>=400 -envoy.details:via_upstream -envoy.details:~"^(upstream_|no_healthy_upstream)" -envoy.details:~"timeout"))))'
-    [[ "$q" == '_time:>='????-??-??T??:??:??Z" $pred | sort by (_time desc) | limit 7 | fields "* ]] || { echo "$q"; return 1; }
+    # the newest 10000 lines, whatever --limit says: it counts rows, after repeats collapse
+    [[ "$q" == '_time:>='????-??-??T??:??:??Z" $pred | sort by (_time desc) | limit 10000 | fields "* ]] || { echo "$q"; return 1; }
     [[ "$(sed -n 2p "$CALLS")" == *'| stats count() n' ]]
     [[ "$output" == *"(no refusals since "* ]]
 }
@@ -49,14 +50,14 @@ denies() { run "$OP" audit denies "$@"; }
     row '{"_time":"2026-11-15T14:02:11.5Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.connection":"12","envoy.method":"CONNECT","envoy.authority":"example.org:443","envoy.path":"","envoy.route":"deny-connect","envoy.status":"403","envoy.flags":"-","envoy.details":"direct_response"}'
     row '{"_time":"2026-11-15T14:01:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.connection":"11","envoy.method":"POST","envoy.authority":"git.example.org","envoy.path":"/api/v1/repos/a/b/merge","envoy.route":"git.example.org-refused","envoy.status":"403","envoy.flags":"-","envoy.details":"direct_response"}'
     row '{"_time":"2026-11-15T14:00:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"GET","envoy.authority":"git.example.org","envoy.path":"/","envoy.route":"git.example.org-read","envoy.status":"423","envoy.details":"lua_response"}'
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == "2026-11-15 14:02:11  agent            agent-infra              403  CONNECT example.org:443  [deny-connect]" ]]
     [[ "${lines[1]}" == "    example.org:443 is not a destination of agent-infra: add it to the agent-infra lines" ]]
     [[ "${lines[2]}" == *"POST git.example.org/api/v1/repos/a/b/merge  [git.example.org-refused]" ]]
     [[ "${lines[3]}" == *"refused by the rules of git.example.org: its http line"* ]]
     [[ "${lines[5]}" == *"locked: airlock-envoy-cred unlock" ]]
-    [[ "${lines[6]}" == "(3 refusals since "*"; the site file: /etc/airlock-envoy/site.conf)" ]]
+    [[ "${lines[6]}" == "(3 refusals in 3 rows since "*"; the site file: /etc/airlock-envoy/site.conf)" ]]
 }
 
 @test "a refused TLS name gets its user from the latest CONNECT before it with that connection id" {
@@ -66,7 +67,7 @@ denies() { run "$OP" audit denies "$@"; }
         '{"_time":"2026-11-15T14:04:45Z","envoy.connection":"40","envoy.user":"old","envoy.listener":"old-l","envoy.authority":"old.example.org:443"}' \
         '{"_time":"2026-11-15T14:04:59Z","envoy.connection":"40","envoy.user":"agent","envoy.listener":"agent-infra","envoy.authority":"svc.example.org:443"}' \
         '{"_time":"2026-11-15T14:09:00Z","envoy.connection":"40","envoy.user":"later","envoy.listener":"later-l","envoy.authority":"later.example.org:443"}' > "$T/connects"
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == *"agent            agent-infra                -  TLS other.example.org in a tunnel to svc.example.org:443  [no route NR]" ]]
     [[ "${lines[1]}" == "    the tunnel to svc.example.org:443 sent the TLS name other.example.org: only svc.example.org passes" ]]
@@ -77,7 +78,7 @@ denies() { run "$OP" audit denies "$@"; }
 @test "the join takes only a CONNECT from 20 s before to 3 s after: an older tunnel with the same id is not a guess" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"40","envoy.sni":"other.example.org","envoy.flags":"NR"}'
     printf '%s\n' '{"_time":"2026-11-15T14:04:30Z","envoy.connection":"40","envoy.user":"agent2","envoy.listener":"agent2-l","envoy.authority":"x.example.org:443"}' > "$T/connects"
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == *"  ?                ?                          -  TLS other.example.org in a tunnel to ?  "* ]] || { echo "$output"; return 1; }
     q="$(grep CONNECT "$CALLS")"
@@ -130,7 +131,7 @@ denies() { run "$OP" audit denies "$@"; }
 @test "an HTTP line without a method (the parser refused it) is not taken for a TLS refusal or joined" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.connection":"7","envoy.status":"400","envoy.details":"http1.codec_error"}'
     printf '%s\n' '{"_time":"2026-11-15T14:04:59Z","envoy.connection":"7","envoy.user":"other","envoy.listener":"other-l","envoy.authority":"old.example.org:443"}' > "$T/connects"
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == *"agent            agent-infra              400  (a request Envoy could not read) "* ]] || { echo "$output"; return 1; }
     [ "${lines[1]}" = "    Envoy refused the request itself (http1.codec_error)" ]
@@ -144,7 +145,7 @@ denies() { run "$OP" audit denies "$@"; }
     row '{"_time":"2026-11-15T14:02:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"503","envoy.flags":"UAEX","envoy.details":"ext_authz_error"}'
     row '{"_time":"2026-11-15T14:01:00Z","log_type":"envoy-web","envoy.listener":"w","envoy.user":"agent","envoy.sni":"n.example.org","envoy.route":"web","envoy.flags":"UF"}'
     row '{"_time":"2026-11-15T14:00:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"GET","envoy.authority":"a.example.org","envoy.path":"/x_y","envoy.route":"a.example.org-read","envoy.status":"400","envoy.details":"http1.unexpected_underscore"}'
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "${lines[1]}" = "    the credential for a.example.org has no token (airlock-envoy-cred)" ] || { echo "$output"; return 1; }
     [ "${lines[3]}" = "    a body over the limit of the rules of m.example.org (its http line)" ]
@@ -158,7 +159,7 @@ denies() { run "$OP" audit denies "$@"; }
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"m.example.org","envoy.path":"/mcp","envoy.route":"m.example.org-ep0-post","envoy.status":"200","envoy.details":"lua_response"}'
     row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"g.example.org","envoy.path":"/o/r/git-receive-pack","envoy.route":"g.example.org-push-guard","envoy.status":"400","envoy.flags":"UAEX","envoy.details":"ext_authz_denied"}'
     row '{"_time":"2026-11-15T14:03:00Z","log_type":"envoy-access","envoy.listener":"l","envoy.user":"agent","envoy.method":"POST","envoy.authority":"api.example.org","envoy.path":"/graphql","envoy.route":"api.example.org-graphql","envoy.status":"413","envoy.details":"request_payload_too_large"}'
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "${lines[1]}" = "    a tool call the mcp rules of m.example.org refuse: tools or deny-tools on its http line" ] || { echo "$output"; return 1; }
     [ "${lines[3]}" = "    the push check refused the push to g.example.org (Envoy's own log says why)" ]
@@ -168,7 +169,7 @@ denies() { run "$OP" audit denies "$@"; }
 @test "an SNI line with no CONNECT to join shows no user rather than a guess; a bad id is never queried" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"41","envoy.sni":"x.example.org","envoy.flags":"NR"}'
     row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.connection":"1) or (x","envoy.sni":"y.example.org","envoy.flags":"NR"}'
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == *"  ?                ?                          -  TLS x.example.org in a tunnel to ?  "* ]]
     q="$(grep CONNECT "$CALLS")"
@@ -179,7 +180,7 @@ denies() { run "$OP" audit denies "$@"; }
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-web","envoy.listener":"agent-web","envoy.user":"agent","envoy.sni":"metrics.example.org","envoy.route":"deny-internal-name"}'
     row '{"_time":"2026-11-15T14:04:00Z","log_type":"envoy-access","envoy.connection":"5","envoy.sni":"one.example.org","envoy.route":"tls-no-sni","envoy.details":"rbac_access_denied_matched_policy[server-name-sent]"}'
     printf '%s\n' '{"_time":"2026-11-15T14:03:55Z","envoy.connection":"5","envoy.user":"agent","envoy.listener":"agent-infra","envoy.authority":"10.99.0.1:6443"}' > "$T/connects"
-    denies
+    denies --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "${lines[0]}" == *"web TLS metrics.example.org  [deny-internal-name]" ]]
     [[ "${lines[1]}" == *"metrics.example.org is an internal name: web never reaches one"* ]]
@@ -196,9 +197,64 @@ denies() { run "$OP" audit denies "$@"; }
 
 @test "more than shown: the closing line says so" {
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.user":"agent","envoy.listener":"agent-infra","envoy.method":"CONNECT","envoy.authority":"a.example.org:443","envoy.route":"deny-connect","envoy.status":"403"}'
-    COUNT=312 denies --limit 1
+    COUNT=312 denies --limit 1 --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "${lines[2]}" == "(1 of 312 refusals since "*", newest first: --limit <n> for more)" ]]
+    [[ "${lines[2]}" == "(1 row (1 of 312 refusals) since "*", newest first: --limit <n> for more)" ]] || { echo "$output"; return 1; }
+}
+
+@test "repeats in a row are one row with their count and when the run began; each reason once, numbered, below" {
+    c='"log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"CONNECT","envoy.authority":"a.example.org:443","envoy.route":"deny-connect","envoy.status":"403","envoy.details":"direct_response"'
+    p='"log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"POST","envoy.authority":"api.example.org","envoy.path":"/graphql","envoy.route":"api.example.org-refused","envoy.status":"403","envoy.details":"direct_response"'
+    row "{\"_time\":\"2026-11-15T14:05:00Z\",\"envoy.connection\":\"3\",$c}"
+    row "{\"_time\":\"2026-11-15T14:04:00Z\",\"envoy.connection\":\"2\",$c}"
+    row "{\"_time\":\"2026-11-15T14:03:00Z\",\"envoy.connection\":\"1\",$c}"
+    row "{\"_time\":\"2026-11-15T14:02:00Z\",$p}"
+    row "{\"_time\":\"2026-11-15T14:01:00Z\",\"envoy.connection\":\"9\",$c}"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "${lines[0]}" = "2026-11-15 14:05:00  agent            agent-infra              403  #1   CONNECT a.example.org:443 (x3, from 14:03:00)  [deny-connect]" ] || { echo "$output"; return 1; }
+    [ "${lines[1]}" = "2026-11-15 14:02:00  agent            agent-infra              403  #2   POST api.example.org/graphql  [api.example.org-refused]" ]
+    # alike but not in a row: a row of its own, the same note
+    [ "${lines[2]}" = "2026-11-15 14:01:00  agent            agent-infra              403  #1   CONNECT a.example.org:443  [deny-connect]" ]
+    [ "${lines[3]}" = "#1    a.example.org:443 is not a destination of agent-infra: add it to the agent-infra lines" ]
+    [[ "${lines[4]}" == "#2    refused by the rules of api.example.org: its http line"* ]]
+    [[ "${lines[5]}" == "(5 refusals in 3 rows since "*"; the site file: /etc/airlock-envoy/site.conf)" ]]
+    [ "${#lines[@]}" -eq 6 ]
+    # --full: the reason under every row, no numbers or notes
+    denies --full
+    [ "${lines[0]}" = "2026-11-15 14:05:00  agent            agent-infra              403  CONNECT a.example.org:443 (x3, from 14:03:00)  [deny-connect]" ] || { echo "$output"; return 1; }
+    [ "${lines[1]}" = "    a.example.org:443 is not a destination of agent-infra: add it to the agent-infra lines" ]
+    [ "${lines[5]}" = "    a.example.org:443 is not a destination of agent-infra: add it to the agent-infra lines" ]
+    [[ "${lines[6]}" == "(5 refusals in 3 rows since "* ]]
+}
+
+@test "refusals that differ in any logged field are not collapsed: path, user, status, details" {
+    b='"log_type":"envoy-access","envoy.listener":"l","envoy.method":"GET","envoy.authority":"a.example.org","envoy.route":"a.example.org-refused"'
+    row "{\"_time\":\"2026-11-15T14:05:00Z\",$b,\"envoy.user\":\"agent\",\"envoy.path\":\"/x\",\"envoy.status\":\"403\",\"envoy.details\":\"direct_response\"}"
+    row "{\"_time\":\"2026-11-15T14:04:00Z\",$b,\"envoy.user\":\"agent\",\"envoy.path\":\"/y\",\"envoy.status\":\"403\",\"envoy.details\":\"direct_response\"}"
+    row "{\"_time\":\"2026-11-15T14:03:00Z\",$b,\"envoy.user\":\"agent2\",\"envoy.path\":\"/y\",\"envoy.status\":\"403\",\"envoy.details\":\"direct_response\"}"
+    row "{\"_time\":\"2026-11-15T14:02:00Z\",$b,\"envoy.user\":\"agent2\",\"envoy.path\":\"/y\",\"envoy.status\":\"423\",\"envoy.details\":\"lua_response\"}"
+    row "{\"_time\":\"2026-11-15T14:01:00Z\",$b,\"envoy.user\":\"agent2\",\"envoy.path\":\"/y\",\"envoy.status\":\"423\",\"envoy.details\":\"lua_response2\"}"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"(5 refusals in 5 rows since "* ]] || { echo "$output"; return 1; }
+    ! grep -q '(x' <<< "$output" || return 1
+}
+
+@test "--limit counts rows, not lines: a long run is one row, and the closing line counts both" {
+    c='"log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"CONNECT","envoy.authority":"a.example.org:443","envoy.route":"deny-connect","envoy.status":"403"'
+    for i in 1 2 3 4 5; do row "{\"_time\":\"2026-11-15T14:0${i}:00Z\",$c}"; done
+    row '{"_time":"2026-11-15T13:00:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"CONNECT","envoy.authority":"b.example.org:443","envoy.route":"deny-connect","envoy.status":"403"}'
+    denies --limit 1
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == *"CONNECT a.example.org:443 (x5, from 14:05:00)  [deny-connect]" ]] || { echo "$output"; return 1; }
+    [[ "${lines[-1]}" == "(1 row (5 of 6 refusals) since "*", newest first: --limit <n> for more)" ]]
+    ! grep -q 'b.example.org' <<< "$output" || return 1
+    # a run begun the day before keeps its date
+    : > "$T/rows"
+    row "{\"_time\":\"2026-11-15T00:01:00Z\",$c}"; row "{\"_time\":\"2026-11-14T23:59:00Z\",$c}"
+    denies --since 30d
+    [[ "${lines[0]}" == *"CONNECT a.example.org:443 (x2, from 2026-11-14 23:59:00)  [deny-connect]" ]] || { echo "$output"; return 1; }
 }
 
 @test "the store unreachable or refusing: an error, exit 1; no audit store: says how to turn it on" {

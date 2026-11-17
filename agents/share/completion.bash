@@ -58,7 +58,7 @@ _airlock_agents() {
                 fi ;;
             audit)
                 if [ "$COMP_CWORD" = 2 ]; then words=(denies events ui login --days)
-                elif [ "${COMP_WORDS[2]}" = denies ]; then words=(--since --limit)
+                elif [ "${COMP_WORDS[2]}" = denies ]; then words=(--since --limit --full)
                 elif [ "${COMP_WORDS[2]}" = ui ]; then words=(--port)
                 elif [ "${COMP_WORDS[2]}" = events ]; then
                     case "${COMP_WORDS[COMP_CWORD-1]}" in
