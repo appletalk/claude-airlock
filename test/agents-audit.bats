@@ -272,7 +272,7 @@ for i in range(10000):
     [ "$status" -eq 0 ] || { echo "$output" | tail -3; return 1; }
     [[ "${lines[0]}" == *"CONNECT a.example.org:443 (x5000, from 14:00:00)  [deny-connect]" ]] || { echo "$output" | head -3; return 1; }
     [[ "${lines[1]}" == *"CONNECT b.example.org:443 (x5000+, from 14:00:00)  [deny-connect]" ]]
-    [[ "${lines[-1]}" == "(2 rows, 10000 of 20000 refusals, since "*"only the newest 10000 were read: narrow --since for the rest)" ]] || { echo "${lines[-1]}"; return 1; }
+    [[ "${lines[-1]}" == "(2 rows, 10000 of 20000 refusals, since "*"only the newest 10000 were read, so older refusals are not shown and the last count may be low)" ]] || { echo "${lines[-1]}"; return 1; }
     # stopped by --limit before the lines ran out: no mark, and --limit is the way to more
     COUNT=20000 denies --limit 1
     [[ "${lines[0]}" == *"(x5000, from 14:00:00)  [deny-connect]" ]] || { echo "$output" | head -3; return 1; }
@@ -295,6 +295,48 @@ for i in range(600):
     # a third row needs them: then they are looked up
     denies --limit 3
     grep -q 'envoy.connection:in(7000,' "$CALLS" || return 1
+}
+
+@test "a run of one TLS name longer than a lookup chunk (500) is still one row, fully counted" {
+    python3 -c '
+import json
+for i in range(600):
+    print(json.dumps({"_time": "2026-11-15T14:00:00Z", "log_type": "envoy-access", "envoy.connection": str(8000 + i),
+                      "envoy.sni": "x.example.org", "envoy.flags": "NR"}))' > "$T/rows"
+    python3 -c '
+import json
+for i in range(600):
+    print(json.dumps({"_time": "2026-11-15T13:59:59Z", "envoy.connection": str(8000 + i), "envoy.user": "agent",
+                      "envoy.listener": "l", "envoy.authority": "svc.example.org:443"}))' > "$T/connects"
+    denies --limit 1
+    [ "$status" -eq 0 ] || { echo "$output" | tail -3; return 1; }
+    [[ "${lines[0]}" == *"TLS x.example.org in a tunnel to svc.example.org:443 (x600, from 14:00:00)  [no route NR]" ]] || { echo "${lines[0]}"; return 1; }
+    [[ "${lines[-1]}" == "(600 refusals in 1 row since "* ]]
+}
+
+@test "a narrow terminal (80, 100 columns): the host and the run count stay on the row" {
+    command -v script >/dev/null || skip "no script(1) to give the command a terminal"
+    c='"log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"CONNECT","envoy.authority":"a.example.org:443","envoy.route":"deny-connect","envoy.status":"403"'
+    for i in 5 4 3; do row "{\"_time\":\"2026-11-15T14:0${i}:00Z\",$c}"; done
+    for w in 80 100; do
+        out="$(script -qec "stty cols $w rows 40; '$OP' audit denies" /dev/null | tr -d '\r')"
+        first="$(head -1 <<< "$out")"
+        [[ "$first" == *"CONNECT a.example.org:443 (x3"* ]] || { echo "$w: $first"; return 1; }
+        while IFS= read -r l; do [ "${#l}" -le "$w" ] || { echo "$w: too wide: $l"; return 1; }; done <<< "$out"
+    done
+}
+
+@test "a reason exactly as wide as its line stays one line; one column more wraps" {
+    for extra in 0 1; do
+        : > "$T/rows"
+        base="web could not connect to .example.org (down, or an internal address its kernel filter refuses)"
+        sni="$(printf 'a%.0s' $(seq 1 $((194 - ${#base} + extra)))).example.org"
+        row "{\"_time\":\"2026-11-15T14:01:00Z\",\"log_type\":\"envoy-web\",\"envoy.listener\":\"w\",\"envoy.user\":\"agent\",\"envoy.sni\":\"$sni\",\"envoy.route\":\"web\",\"envoy.flags\":\"UF\"}"
+        denies
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        n="$(grep -c . <<< "$output")"
+        [ "$n" -eq $((3 + extra)) ] || { echo "extra $extra: $n lines"; echo "$output"; return 1; }
+    done
 }
 
 @test "a long path never hides the run count, and a reason in wide or non-ASCII text stays whole and valid UTF-8" {

@@ -1164,13 +1164,20 @@ for r, t, oldest, n, _, what, st, tag, sni_line in groups:
     run = f" (x{n}{more}, from {oldest[11:] if oldest[:10] == t[:10] else oldest})" if n > 1 or more else ""
     why = printable(hint(r, sni_line), 200)
     ref = "" if full else f"#{notes.setdefault(why, len(notes) + 1):<3} "
-    head = (f"{t}  {printable(r.get('envoy.user') or '?', 16):<16} {printable(r.get('envoy.listener') or '?', 24):<24} "
-            f"{printable(st, 3):>3}  {ref}")
+    # On a narrow terminal the user and listener columns shrink (under 120 columns; under 100
+    # the time drops its year too), and the run count drops its "from" when what would get
+    # under 20 columns: the host and the count stay on the row.
+    uw, lw = (16, 24) if width >= 120 else (10, 14) if width >= 100 else (8, 12)
+    head = (f"{t if width >= 100 else t[5:]}  {printable(r.get('envoy.user') or '?', uw):<{uw}} "
+            f"{printable(r.get('envoy.listener') or '?', lw):<{lw}} {printable(st, 3):>3}  {ref}")
+    if run and width - sum(map(cols, head + run)) - 6 < 20:
+        run = f" (x{n}{more})"
     what = printable(what, 120)
-    # what is shortened rather than the count after it (the route tag goes first)
-    room = width - sum(map(cols, head + run)) - 6
+    # what is shortened rather than the count after it (the route tag goes first); when it
+    # has to be, a little of the tag stays
+    room = width - sum(map(cols, head + run))
     if sum(map(cols, what)) > room:
-        what = fit(what, max(10, room - 3)) + "..."
+        what = fit(what, max(6, room - 9)) + "..."
     print(fit(f"{head}{what}{run}  [{printable(tag, 60)}]", width))
     if full:
         for line in wrapped(why, max(20, width - 4)):
@@ -1187,7 +1194,7 @@ if total == 0:
     print(f"(no refusals since {start_local})")
 elif len(rows) == FETCH and not stopped and total > lines:
     print(fit(f"({nrows}, {lines} of {total} refusals, since {start_local}, newest first; only the newest "
-              f"{FETCH} were read: narrow --since for the rest)", width))
+              f"{FETCH} were read, so older refusals are not shown and the last count may be low)", width))
 elif total > lines:
     print(fit(f"({nrows}, {lines} of {total} refusals, since {start_local}, newest first: --limit <n> for more)", width))
 else:

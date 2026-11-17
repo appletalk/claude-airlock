@@ -382,10 +382,11 @@ machine (nothing leaves it):
   and Envoy's route. Repeats in a row (alike in every field Envoy logged but the connection id)
   are one row, counted, with when the run began (`(x23, from ...)`); the newest 10000 lines are
   read for that (a run still going at the last of them shows as `x5000+`), and `--limit` counts
-  rows. A long request is shortened rather than its count; lines fit the terminal's width. Each row carries a number for its reason, printed once
-  below the rows: which site file line would change it (a listener's destinations, a host's `http`
-  line, an internal name, a locked credential, a protected branch); `--full` puts the reason under
-  every row instead. It also lists web failing
+  rows. A long request is shortened rather than its count; lines fit the terminal's width (on a
+  narrow one, user and listener shorten and the count drops its time). Each row carries a number
+  for its reason, printed once below the rows: which site file line would change it (a listener's
+  destinations, a host's `http` line, an internal name, a locked credential, a protected branch);
+  `--full` puts the reason under every row instead. It also lists web failing
   to reach a name (its kernel filter refuses internal addresses that way). A refused TLS name has
   no user in Envoy's line: it is taken from the CONNECT that opened that tunnel (the one with the
   same connection id from 20 seconds before it to 3 seconds after, as ids restart with Envoy and
