@@ -199,7 +199,7 @@ denies() { run "$OP" audit denies "$@"; }
     row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.user":"agent","envoy.listener":"agent-infra","envoy.method":"CONNECT","envoy.authority":"a.example.org:443","envoy.route":"deny-connect","envoy.status":"403"}'
     COUNT=312 denies --limit 1 --full
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "${lines[2]}" == "(1 row (1 of 312 refusals) since "*", newest first: --limit <n> for more)" ]] || { echo "$output"; return 1; }
+    [[ "${lines[2]}" == "(1 row, 1 of 312 refusals, since "*", newest first: --limit <n> for more)" ]] || { echo "$output"; return 1; }
 }
 
 @test "repeats in a row are one row with their count and when the run began; each reason once, numbered, below" {
@@ -235,20 +235,95 @@ denies() { run "$OP" audit denies "$@"; }
     row "{\"_time\":\"2026-11-15T14:03:00Z\",$b,\"envoy.user\":\"agent2\",\"envoy.path\":\"/y\",\"envoy.status\":\"403\",\"envoy.details\":\"direct_response\"}"
     row "{\"_time\":\"2026-11-15T14:02:00Z\",$b,\"envoy.user\":\"agent2\",\"envoy.path\":\"/y\",\"envoy.status\":\"423\",\"envoy.details\":\"lua_response\"}"
     row "{\"_time\":\"2026-11-15T14:01:00Z\",$b,\"envoy.user\":\"agent2\",\"envoy.path\":\"/y\",\"envoy.status\":\"423\",\"envoy.details\":\"lua_response2\"}"
+    # each of these differs from the one before in one field only: listener, flags, authority, log_type
+    l='"envoy.user":"agent2","envoy.method":"GET","envoy.path":"/y","envoy.route":"a.example.org-refused","envoy.status":"423","envoy.details":"lua_response2"'
+    row "{\"_time\":\"2026-11-15T14:00:50Z\",\"log_type\":\"envoy-access\",\"envoy.listener\":\"l2\",\"envoy.authority\":\"a.example.org\",$l}"
+    row "{\"_time\":\"2026-11-15T14:00:40Z\",\"log_type\":\"envoy-access\",\"envoy.listener\":\"l2\",\"envoy.authority\":\"a.example.org\",\"envoy.flags\":\"UAEX\",$l}"
+    row "{\"_time\":\"2026-11-15T14:00:30Z\",\"log_type\":\"envoy-access\",\"envoy.listener\":\"l2\",\"envoy.authority\":\"b.example.org\",\"envoy.flags\":\"UAEX\",$l}"
+    row "{\"_time\":\"2026-11-15T14:00:20Z\",\"log_type\":\"envoy-web\",\"envoy.listener\":\"l2\",\"envoy.authority\":\"b.example.org\",\"envoy.flags\":\"UAEX\",$l}"
     denies
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"(5 refusals in 5 rows since "* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"(9 refusals in 9 rows since "* ]] || { echo "$output"; return 1; }
     ! grep -q '(x' <<< "$output" || return 1
+}
+
+@test "refused TLS names in a row joined to different users are two rows; the same TLS name in one tunnel each, one user, is one" {
+    row '{"_time":"2026-11-15T14:05:10Z","log_type":"envoy-access","envoy.connection":"51","envoy.sni":"x.example.org","envoy.flags":"NR"}'
+    row '{"_time":"2026-11-15T14:05:00Z","log_type":"envoy-access","envoy.connection":"50","envoy.sni":"x.example.org","envoy.flags":"NR"}'
+    row '{"_time":"2026-11-15T14:04:50Z","log_type":"envoy-access","envoy.connection":"49","envoy.sni":"x.example.org","envoy.flags":"NR"}'
+    printf '%s\n' \
+        '{"_time":"2026-11-15T14:05:09Z","envoy.connection":"51","envoy.user":"alice","envoy.listener":"l1","envoy.authority":"svc.example.org:443"}' \
+        '{"_time":"2026-11-15T14:04:59Z","envoy.connection":"50","envoy.user":"agent","envoy.listener":"l2","envoy.authority":"svc.example.org:443"}' \
+        '{"_time":"2026-11-15T14:04:49Z","envoy.connection":"49","envoy.user":"agent","envoy.listener":"l2","envoy.authority":"svc.example.org:443"}' > "$T/connects"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "${lines[0]}" == *"alice            l1 "*"TLS x.example.org in a tunnel to svc.example.org:443  [no route NR]" ]] || { echo "$output"; return 1; }
+    [[ "${lines[1]}" == *"agent            l2 "*"TLS x.example.org in a tunnel to svc.example.org:443 (x2, from 14:04:50)  [no route NR]" ]]
+}
+
+@test "the newest 10000 lines read: the closing line says so even at --limit, and the last run is marked open-ended" {
+    python3 -c '
+import json
+for i in range(10000):
+    print(json.dumps({"_time": "2026-11-15T14:00:00Z",
+                      "log_type": "envoy-access", "envoy.listener": "l", "envoy.user": "agent", "envoy.method": "CONNECT",
+                      "envoy.authority": ("a" if i < 5000 else "b") + ".example.org:443", "envoy.route": "deny-connect", "envoy.status": "403"}))' > "$T/rows"
+    COUNT=20000 denies --limit 2
+    [ "$status" -eq 0 ] || { echo "$output" | tail -3; return 1; }
+    [[ "${lines[0]}" == *"CONNECT a.example.org:443 (x5000, from 14:00:00)  [deny-connect]" ]] || { echo "$output" | head -3; return 1; }
+    [[ "${lines[1]}" == *"CONNECT b.example.org:443 (x5000+, from 14:00:00)  [deny-connect]" ]]
+    [[ "${lines[-1]}" == "(2 rows, 10000 of 20000 refusals, since "*"only the newest 10000 were read: narrow --since for the rest)" ]] || { echo "${lines[-1]}"; return 1; }
+    # stopped by --limit before the lines ran out: no mark, and --limit is the way to more
+    COUNT=20000 denies --limit 1
+    [[ "${lines[0]}" == *"(x5000, from 14:00:00)  [deny-connect]" ]] || { echo "$output" | head -3; return 1; }
+    [[ "${lines[-1]}" == "(1 row, 5000 of 20000 refusals, since "*"--limit <n> for more)" ]]
+}
+
+@test "the CONNECT lookup stops with the rows: TLS names past the last row shown cost no query" {
+    python3 -c '
+import json
+for i in range(600):
+    print(json.dumps({"_time": "2026-11-15T14:00:00Z", "log_type": "envoy-access", "envoy.listener": "l", "envoy.user": "agent",
+                      "envoy.method": "CONNECT", "envoy.authority": ("a" if i == 0 else "b") + ".example.org:443",
+                      "envoy.route": "deny-connect", "envoy.status": "403"}))
+for i in range(600):
+    print(json.dumps({"_time": "2026-11-15T13:00:00Z", "log_type": "envoy-access", "envoy.connection": str(7000 + i),
+                      "envoy.sni": "n.example.org", "envoy.flags": "NR"}))' > "$T/rows"
+    denies --limit 2
+    [ "$status" -eq 0 ] || { echo "$output" | tail -3; return 1; }
+    ! grep -q envoy.method:CONNECT "$CALLS" || { echo "looked up past the rows shown"; return 1; }
+    # a third row needs them: then they are looked up
+    denies --limit 3
+    grep -q 'envoy.connection:in(7000,' "$CALLS" || return 1
+}
+
+@test "a long path never hides the run count, and a reason in wide or non-ASCII text stays whole and valid UTF-8" {
+    long="/$(printf 'a%.0s' $(seq 1 150))"
+    for i in 1 2 3; do row "{\"_time\":\"2026-11-15T14:0$((6 - i)):00Z\",\"log_type\":\"envoy-access\",\"envoy.listener\":\"l\",\"envoy.user\":\"agent\",\"envoy.method\":\"GET\",\"envoy.authority\":\"a.example.org\",\"envoy.path\":\"$long\",\"envoy.route\":\"deny-http\",\"envoy.status\":\"403\"}"; done
+    sni="$(printf 'é%.0s' $(seq 1 20))$(printf '界%.0s' $(seq 1 60)).example.org"
+    row "{\"_time\":\"2026-11-15T14:01:00Z\",\"log_type\":\"envoy-web\",\"envoy.listener\":\"w\",\"envoy.user\":\"agent\",\"envoy.sni\":\"$sni\",\"envoy.route\":\"web\",\"envoy.flags\":\"UF\"}"
+    denies
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # what is shortened so the count shows; the route tag after it is what the width cuts
+    [[ "${lines[0]}" == *"aaa... (x3, from 14:03:00)  [de"* ]] || { echo "${lines[0]}"; return 1; }
+    printf '%s' "$output" | iconv -f UTF-8 -t UTF-8 >/dev/null || { echo "invalid UTF-8"; return 1; }
+    # the note wrapped, not cut: its tail is there
+    [[ "$(tr '\n' ' ' <<< "$output" | tr -s ' ')" == *"(down, or an internal address its kernel filter refuses)"* ]] || { echo "$output"; return 1; }
+    # wrapped at a space, never mid-word
+    grep -q 'an int$' <<< "$output" && return 1
+    while IFS= read -r l; do
+        [ "$(printf '%s' "$l" | python3 -c 'import sys,unicodedata; print(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in sys.stdin.read()))')" -le 200 ] || { echo "too wide: $l"; return 1; }
+    done <<< "$output"
 }
 
 @test "--limit counts rows, not lines: a long run is one row, and the closing line counts both" {
     c='"log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"CONNECT","envoy.authority":"a.example.org:443","envoy.route":"deny-connect","envoy.status":"403"'
-    for i in 1 2 3 4 5; do row "{\"_time\":\"2026-11-15T14:0${i}:00Z\",$c}"; done
+    for i in 5 4 3 2 1; do row "{\"_time\":\"2026-11-15T14:0${i}:00Z\",$c}"; done
     row '{"_time":"2026-11-15T13:00:00Z","log_type":"envoy-access","envoy.listener":"agent-infra","envoy.user":"agent","envoy.method":"CONNECT","envoy.authority":"b.example.org:443","envoy.route":"deny-connect","envoy.status":"403"}'
     denies --limit 1
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "${lines[0]}" == *"CONNECT a.example.org:443 (x5, from 14:05:00)  [deny-connect]" ]] || { echo "$output"; return 1; }
-    [[ "${lines[-1]}" == "(1 row (5 of 6 refusals) since "*", newest first: --limit <n> for more)" ]]
+    [[ "${lines[0]}" == *"CONNECT a.example.org:443 (x5, from 14:01:00)  [deny-connect]" ]] || { echo "$output"; return 1; }
+    [[ "${lines[-1]}" == "(1 row, 5 of 6 refusals, since "*", newest first: --limit <n> for more)" ]]
     ! grep -q 'b.example.org' <<< "$output" || return 1
     # a run begun the day before keeps its date
     : > "$T/rows"

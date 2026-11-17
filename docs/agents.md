@@ -381,7 +381,8 @@ machine (nothing leaves it):
   time, user and listener, status, what was asked (method and host, or the TLS name in a tunnel)
   and Envoy's route. Repeats in a row (alike in every field Envoy logged but the connection id)
   are one row, counted, with when the run began (`(x23, from ...)`); the newest 10000 lines are
-  read for that, and `--limit` counts rows. Each row carries a number for its reason, printed once
+  read for that (a run still going at the last of them shows as `x5000+`), and `--limit` counts
+  rows. A long request is shortened rather than its count; lines fit the terminal's width. Each row carries a number for its reason, printed once
   below the rows: which site file line would change it (a listener's destinations, a host's `http`
   line, an internal name, a locked credential, a protected branch); `--full` puts the reason under
   every row instead. It also lists web failing

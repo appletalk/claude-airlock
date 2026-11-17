@@ -901,10 +901,44 @@ audit_denies() {
     cutoff="$(since_epoch "$since")"
     audit_ready
     set_cols
-    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" "$full" "$W" <<"PY" | rows_out "$W"
-import datetime, json, re, subprocess, sys, textwrap
+    python3 -I - "$AUDIT_SOCK" "$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)" "$limit" "$CMD" "$full" "$W" <<"PY" | clean
+import datetime, json, re, subprocess, sys, unicodedata
 sock, start, limit, cmd, full = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5] == "1"
 width = int(sys.argv[6])
+
+# Lines are fitted to the terminal here, by display width (a wide character takes two columns),
+# as audit events does: the shell's cut counts bytes, and would split a character and drop the
+# rest of a wrapped line.
+def cols(c):
+    return 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+
+def fit(s, w):
+    out, n = [], 0
+    for c in s:
+        n += cols(c)
+        if n > w:
+            break
+        out.append(c)
+    return "".join(out)
+
+def wrapped(s, w):   # s wrapped at spaces to w columns (display width), a word too long cut in pieces of w
+    line, n = "", 0
+    for word in s.split():
+        while sum(map(cols, word)) > w:   # a word wider than a line: pieces of it
+            if line:
+                yield line
+                line, n = "", 0
+            piece = fit(word, w) or word[0]
+            yield piece
+            word = word[len(piece):]
+        wn = sum(map(cols, word))
+        if line and n + 1 + wn > w:
+            yield line
+            line, n = "", 0
+        if word:
+            line, n = (f"{line} {word}", n + 1 + wn) if line else (word, wn)
+    if line:
+        yield line
 
 # Envoy's own refusals: a deny- route (CONNECT or plain HTTP outside the listener, an internal
 # name asked of web), a TLS name no destination takes (NR) or an address entry refuses (RBAC), a
@@ -980,41 +1014,45 @@ def is_sni(r):
 # batches cut by size, each query well under VictoriaLogs' length limit (16 KiB): a window with
 # many ids (a burst) is split across queries.
 JOIN_BEFORE, JOIN_AFTER = 20, 3   # after: Envoy flushes its log once a second
-sni_rows = [r for r in rows if is_sni(r) and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))]
-ids = sorted({r["envoy.connection"] for r in sni_rows})
 opened = {}
 def utc(t):
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 JOIN_BYTES = 10000   # windows and ids per query (the rest of the query is under 300 bytes)
-if ids:
-    spans = []   # [start, end, {ids}]
-    for k, cid in sorted((when(r.get("_time"))[0][0], r["envoy.connection"]) for r in sni_rows):
-        if spans and k - JOIN_BEFORE <= spans[-1][1]:
-            spans[-1][1] = k + JOIN_AFTER + 1
-            spans[-1][2].add(cid)
-        else:
-            spans.append([k - JOIN_BEFORE, k + JOIN_AFTER + 1, {cid}])
-    batches, cur, size = [], [], 0   # each: [(start, end, [ids])]
-    for a, b, s in spans:
-        win = len(f"_time:[{utc(a)}, {utc(b)}] or ")
-        todo = sorted(s, key=int)
-        while todo:
-            if cur and size + win + len(todo[0]) + 1 > JOIN_BYTES:
-                batches.append(cur); cur, size = [], 0
-            room, take = JOIN_BYTES - size - win, []
-            while todo and (not take or room >= len(todo[0]) + 1):
-                room -= len(todo[0]) + 1; take.append(todo.pop(0))
-            cur.append((a, b, take)); size = JOIN_BYTES - room
-    if cur:
-        batches.append(cur)
-    for batch in batches:
-        times = " or ".join(f"_time:[{utc(a)}, {utc(b)}]" for a, b, _ in batch)
-        bids = sorted({i for _, _, t in batch for i in t}, key=int)
-        for c in query(f'({times}) log_type:envoy-access envoy.method:CONNECT '
-                       f'envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) '
-                       f'envoy.connection:in({",".join(bids)}) | sort by (_time desc) | limit 10000 '
-                       f'| fields _time, envoy.connection, envoy.user, envoy.listener, envoy.authority'):
-            opened.setdefault(c.get("envoy.connection", ""), []).append((when(c.get("_time"))[0], c))
+# The lookup runs JOIN_CHUNK TLS names at a time, when the rows reach the first not looked up
+# yet, so names past the last row shown cost no query (a sparse 10000 would be some 70).
+JOIN_CHUNK = 500
+def lookup(chunk):
+    sni_rows = [r for r in chunk if is_sni(r) and re.fullmatch(r"[0-9]{1,20}", r.get("envoy.connection", ""))]
+    ids = sorted({r["envoy.connection"] for r in sni_rows})
+    if ids:
+        spans = []   # [start, end, {ids}]
+        for k, cid in sorted((when(r.get("_time"))[0][0], r["envoy.connection"]) for r in sni_rows):
+            if spans and k - JOIN_BEFORE <= spans[-1][1]:
+                spans[-1][1] = k + JOIN_AFTER + 1
+                spans[-1][2].add(cid)
+            else:
+                spans.append([k - JOIN_BEFORE, k + JOIN_AFTER + 1, {cid}])
+        batches, cur, size = [], [], 0   # each: [(start, end, [ids])]
+        for a, b, s in spans:
+            win = len(f"_time:[{utc(a)}, {utc(b)}] or ")
+            todo = sorted(s, key=int)
+            while todo:
+                if cur and size + win + len(todo[0]) + 1 > JOIN_BYTES:
+                    batches.append(cur); cur, size = [], 0
+                room, take = JOIN_BYTES - size - win, []
+                while todo and (not take or room >= len(todo[0]) + 1):
+                    room -= len(todo[0]) + 1; take.append(todo.pop(0))
+                cur.append((a, b, take)); size = JOIN_BYTES - room
+        if cur:
+            batches.append(cur)
+        for batch in batches:
+            times = " or ".join(f"_time:[{utc(a)}, {utc(b)}]" for a, b, _ in batch)
+            bids = sorted({i for _, _, t in batch for i in t}, key=int)
+            for c in query(f'({times}) log_type:envoy-access envoy.method:CONNECT '
+                           f'envoy.log_type:in(DownstreamTunnelSuccessfullyEstablished,DownstreamEnd) '
+                           f'envoy.connection:in({",".join(bids)}) | sort by (_time desc) | limit 10000 '
+                           f'| fields _time, envoy.connection, envoy.user, envoy.listener, envoy.authority'):
+                opened.setdefault(c.get("envoy.connection", ""), []).append((when(c.get("_time"))[0], c))
 
 def hint(r, sni_line):
     route, st, fl, det = r.get("envoy.route", ""), r.get("envoy.status", ""), r.get("envoy.flags", ""), r.get("envoy.details", "")
@@ -1063,9 +1101,24 @@ def hint(r, sni_line):
     return f"Envoy refused the request itself ({det or 'no details'})"
 
 groups = []   # [row (newest, joined), its time shown, oldest time shown, count, key, what, status, tag, sni line]
-for r in rows:
+stopped = False   # the row limit, not the lines read, ended the rows
+JOINED = ("log_type", "envoy.sni", "envoy.route", "envoy.status", "envoy.flags", "envoy.details")   # not joined
+joined_to = 0   # rows before this index are looked up
+for i, r in enumerate(rows):
     key, t = when(r.get("_time"))
     sni_line = is_sni(r)
+    if sni_line and i >= joined_to:
+        # rows full, and this line can't go on the last one whoever opened its tunnel: done
+        if len(groups) == limit and not (groups[-1][8] and all(r.get(f, "") == groups[-1][0].get(f, "") for f in JOINED)):
+            stopped = True
+            break
+        chunk, j = [], i
+        while j < len(rows) and len(chunk) < JOIN_CHUNK:
+            if is_sni(rows[j]):
+                chunk.append(rows[j])
+            j += 1
+        lookup(chunk)
+        joined_to = j
     if sni_line:
         c = [x for x in opened.get(r.get("envoy.connection", ""), [])
              if (key[0] - JOIN_BEFORE, key[1]) <= x[0] <= (key[0] + JOIN_AFTER, key[1])]
@@ -1095,6 +1148,7 @@ for r in rows:
         groups[-1][3] += 1
     else:
         if len(groups) == limit:
+            stopped = True
             break
         groups.append([r, t, t, 1, gkey, what, st, tag, sni_line])
 
@@ -1105,31 +1159,40 @@ for r, t, oldest, n, _, what, st, tag, sni_line in groups:
     lines += n
     # the count before the route tag, not after it, for the same reason; a run begun the same day
     # says only its time
-    run = f" (x{n}, from {oldest[11:] if oldest[:10] == t[:10] else oldest})" if n > 1 else ""
+    # the last row when the lines read ran out first: its run may go on past them (x5000+)
+    more = "+" if len(rows) == FETCH and not stopped and groups[-1][0] is r else ""
+    run = f" (x{n}{more}, from {oldest[11:] if oldest[:10] == t[:10] else oldest})" if n > 1 or more else ""
     why = printable(hint(r, sni_line), 200)
     ref = "" if full else f"#{notes.setdefault(why, len(notes) + 1):<3} "
-    print(f"{t}  {printable(r.get('envoy.user') or '?', 16):<16} {printable(r.get('envoy.listener') or '?', 24):<24} "
-          f"{printable(st, 3):>3}  {ref}{printable(what, 120)}{run}  [{printable(tag, 60)}]")
+    head = (f"{t}  {printable(r.get('envoy.user') or '?', 16):<16} {printable(r.get('envoy.listener') or '?', 24):<24} "
+            f"{printable(st, 3):>3}  {ref}")
+    what = printable(what, 120)
+    # what is shortened rather than the count after it (the route tag goes first)
+    room = width - sum(map(cols, head + run)) - 6
+    if sum(map(cols, what)) > room:
+        what = fit(what, max(10, room - 3)) + "..."
+    print(fit(f"{head}{what}{run}  [{printable(tag, 60)}]", width))
     if full:
-        print(f"    {why}")
+        for line in wrapped(why, max(20, width - 4)):
+            print(f"    {line}")
 if notes:
     print("")
     for why, i in notes.items():
-        for j, line in enumerate(textwrap.wrap(why, max(20, width - 6), break_long_words=True, break_on_hyphens=False)):
+        for j, line in enumerate(wrapped(why, max(20, width - 6))):
             print(f"{('#' + str(i)) if j == 0 else '':<5} {line}")
 
 start_local = when(start)[1]
 nrows = f"{len(groups)} row{'s' if len(groups) != 1 else ''}"
 if total == 0:
     print(f"(no refusals since {start_local})")
-elif len(rows) == FETCH and len(groups) < limit and total > lines:
-    print(f"({nrows} ({lines} of {total} refusals) since {start_local}, newest first; only the newest "
-          f"{FETCH} were read: narrow --since for the rest)")
+elif len(rows) == FETCH and not stopped and total > lines:
+    print(fit(f"({nrows}, {lines} of {total} refusals, since {start_local}, newest first; only the newest "
+              f"{FETCH} were read: narrow --since for the rest)", width))
 elif total > lines:
-    print(f"({nrows} ({lines} of {total} refusals) since {start_local}, newest first: --limit <n> for more)")
+    print(fit(f"({nrows}, {lines} of {total} refusals, since {start_local}, newest first: --limit <n> for more)", width))
 else:
-    print(f"({total} refusal{'s' if total != 1 else ''} in {nrows} since "
-          f"{start_local}; the site file: /etc/airlock-envoy/site.conf)")
+    print(fit(f"({total} refusal{'s' if total != 1 else ''} in {nrows} since "
+              f"{start_local}; the site file: /etc/airlock-envoy/site.conf)", width))
 PY
 }
 # ---- the auditor (an auditor line in agents.conf) ----------------------------------------------
