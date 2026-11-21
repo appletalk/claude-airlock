@@ -493,7 +493,7 @@ EOF
       victoria-logs) echo "LogsQL, reads only: \`curl 'http://$host/select/logsql/query' -d 'query=...'\` (also hits, stats_query and the rest under /select/logsql/)." ;;
       git) echo "git fetch and push over http:// (remotes are rewritten in the box). The server's branch protection decides what a push may touch.$scoped" ;;
       git-read) echo "git fetch only (remotes are rewritten in the box); a push is refused.$scoped" ;;
-      forgejo) echo "Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`tea\` logged in$unset. API reads, PR create and edit, comments, labels, reviewers. Refused: merge, approve, files written through the API, branch and tag API, releases, settings, keys, deletes, the web UI.$scoped" ;;
+      forgejo) echo "Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`gt\` logged in$unset. API reads, PR create and edit, comments, labels, reviewers. Refused: merge, approve, files written through the API, branch and tag API, releases, settings, keys, deletes, the web UI.$scoped" ;;
       github-api) echo "\`gh\` is set up, no token needed$unset. Reads, issues, PR create and edit, comments, labels, reviewers. Refused: merge, approve, auto-merge, settings, hooks, keys, deletes, Projects beyond the pinned boards.$scoped$gh_rest" ;;
       github-issues) echo "\`gh\` is set up, no token needed$unset. Reads, issues, comments, labels, assignees. Refused: PR create and edit, merge, approve, settings, deletes.$scoped$gh_rest" ;;
       kubernetes-read) echo "\`kubectl\` is set up read-only, KUBECONFIG is set$unset: get, describe, list, watch, logs, events, top, \`auth can-i\`, \`auth whoami\`. Refused: every write, exec, attach, cp, port-forward, proxy. What it may read is the token's RBAC. \"the server has asked for the client to provide credentials\" means the proxy's token expired: ask the human to renew it." ;;
@@ -836,7 +836,7 @@ fi
 # it cannot be complete. `mount add` therefore also prints what the box will get.
 AIRLOCK_MOUNT_DENY=".ssh .keychain .gnupg .kube .password-store .claude .aws .azure .docker .pki
   .mozilla .config/sops .config/age .config/claude-airlock .config/gcloud .config/gh
-  .config/tea .config/containers .config/chromium .config/google-chrome
+  .config/tea .config/gitea-cli .config/containers .config/chromium .config/google-chrome
   .config/rclone .config/helm .config/hcloud .config/op .config/git .config/argocd
   .config/pip .config/Code .terraform.d .m2 .gradle
   .local/share/keyrings .local/share/containers"
@@ -3135,31 +3135,24 @@ elif [ -n "$_gh_line" ]; then
     echo "claude-airlock: gh: api.github.com has the $_gh_rules rules on this proxy, so writes beyond them (PR create or edit, for github-issues) get 403" >&2
   fi
 fi
-# tea, for each Forgejo host the proxy serves (forgejo rules) with a credential: a box-only login
-# at http://<host>, through the proxy, which replaces the placeholder token with the bot's. tea
-# matches a repo's remote to a login by host (ssh_host covers ssh remotes on any port). tea has
-# no config-path option and reads only ~/.config/tea, which the image doesn't have: mounted
-# read-only here, the entrypoint copies it into place for dev (an image without that step just
-# has no tea login).
+# gt, for the Forgejo host the proxy serves (forgejo rules) with a credential: no config file,
+# the environment names the instance (GITEA_CLI_HOST) and a placeholder token (GITEA_TOKEN) that
+# the proxy replaces with the bot's, as gh's GH_TOKEN. gt takes one instance from the
+# environment, so with several Forgejo hosts it gets the first. Its remotes are the rewritten
+# http:// ones; GITEA_INSTANCE_SSH_HOST also matches a remote left on ssh. A GITEA_TOKEN secret
+# is left to win.
 _fj_hosts=()
 while IFS= read -r _h; do [ -n "$_h" ] && _fj_hosts+=( "$_h" ); done \
   < <(awk '$2 == "forgejo" && $3 == "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
 while IFS= read -r _h; do
-  [ -n "$_h" ] && echo "claude-airlock: the proxy has no credential for $_h, so tea is not set up for it" >&2
+  [ -n "$_h" ] && echo "claude-airlock: the proxy has no credential for $_h, so gt is not set up for it" >&2
 done < <(awk '$2 == "forgejo" && $3 != "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
 if [ "${#_fj_hosts[@]}" -gt 0 ]; then
-  (umask 077; mkdir -p "$BOX_CFG/tea")
-  { echo "# Written by claude-airlock for this box: tea speaks plain HTTP through the proxy, which"
-    echo "# adds the credential (the token here is a placeholder)."
-    echo "logins:"
-    _fj_def=true
-    for _h in "${_fj_hosts[@]}"; do
-      printf -- '- name: %s\n  url: http://%s\n  token: airlock-proxy-adds-the-credential\n  default: %s\n  ssh_host: %s\n' \
-        "$_h" "$_h" "$_fj_def" "$_h"
-      _fj_def=false
-    done
-  } > "$BOX_CFG/tea/config.yml"
-  args+=( -v "$BOX_CFG/tea:/etc/airlock-box/tea:ro" )
+  args+=( -e "GITEA_CLI_HOST=http://${_fj_hosts[0]}" -e "GITEA_INSTANCE_SSH_HOST=${_fj_hosts[0]}" )
+  grep -qE '^GITEA_TOKEN=' "$ENV_FILE" || args+=( -e "GITEA_TOKEN=airlock-proxy-adds-the-credential" )
+  if [ "${#_fj_hosts[@]}" -gt 1 ]; then
+    echo "claude-airlock: gt is set up for ${_fj_hosts[0]} only (it takes one instance from the environment)" >&2
+  fi
 fi
 
 # kubectl, for each Kubernetes API server the proxy serves (kubernetes-read rules) with a

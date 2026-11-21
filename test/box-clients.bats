@@ -51,7 +51,6 @@ if [ "\${1:-}" = run ]; then
     case "\$a" in
       *:/home/dev/.gitconfig:rw) cp "\${a%%:*}" "$SNAP/gitconfig"; echo "\${a%%:*}" > "$SNAP/gitconfig.src" ;;
       *:/etc/airlock-box/gh:ro) cp -r "\${a%%:*}" "$SNAP/gh"; echo "\${a%%:*}" > "$SNAP/gh.src" ;;
-      *:/etc/airlock-box/tea:ro) cp -r "\${a%%:*}" "$SNAP/tea"; echo "\${a%%:*}" > "$SNAP/tea.src" ;;
       *:/etc/airlock-box/kube:ro) cp -r "\${a%%:*}" "$SNAP/kube"; echo "\${a%%:*}" > "$SNAP/kube.src" ;;
     esac
   done
@@ -88,7 +87,7 @@ no_clients() {
   refute arg_matches '^GH_TOKEN='
   refute arg_matches '^GH_CONFIG_DIR='
   refute arg_matches 'airlock-box/gh'
-  refute arg_matches 'airlock-box/tea'
+  refute arg_matches '^GITEA_'
   refute arg_matches 'airlock-box/kube'
   refute arg_matches '^KUBECONFIG='
 }
@@ -336,42 +335,46 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   [[ "$(check)" == *"it and its directory must be root's"* ]]
 }
 
-@test "a Forgejo host (forgejo rules) with a credential: a box tea login and its git remotes on the ssh port" {
+@test "a Forgejo host (forgejo rules) with a credential: gt from the environment, and its git remotes on the ssh port" {
   host_config 'AIRLOCK_GIT_SSH_PORTS=2222'
   manifest 'git.example.org 443 forgejo yes\nmetrics.example.org 443 victoria-metrics no\n'
   run _launch "$P"
   launched
-  arg_matches '/box-config\.[0-9]*\.[0-9]*/tea:/etc/airlock-box/tea:ro$'
   [ "$(box_url ssh://git@git.example.org:2222/o/r.git)" = http://git.example.org/o/r.git ]
   [ "$(box_url git@git.example.org:o/r.git)" = http://git.example.org/o/r.git ]
-  grep -qx '  url: http://git.example.org' "$SNAP/tea/config.yml"
-  grep -qx '  token: airlock-proxy-adds-the-credential' "$SNAP/tea/config.yml"
-  grep -qx '  ssh_host: git.example.org' "$SNAP/tea/config.yml"
-  grep -qx '  default: true' "$SNAP/tea/config.yml"
-  refute arg_matches 'airlock-box/gh'               # no api.github.com: no gh
-  # tea itself reads it that way (and matches an ssh remote on 2222 to it).
-  if command -v tea >/dev/null; then
-    mkdir -p "$BATS_TEST_TMPDIR/xdg/tea" && cp "$SNAP/tea/config.yml" "$BATS_TEST_TMPDIR/xdg/tea/"
-    out="$(XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg" HOME="$BATS_TEST_TMPDIR" tea login list)"
-    [[ "$out" == *"http://git.example.org"* ]]
-  fi
+  has_arg GITEA_CLI_HOST=http://git.example.org
+  has_arg GITEA_INSTANCE_SSH_HOST=git.example.org
+  has_arg GITEA_TOKEN=airlock-proxy-adds-the-credential
+  [[ "$output" != *"gt is set up for"* ]]
+  refute arg_matches 'airlock-box/tea'               # no config file mounted any more
+  refute arg_matches 'airlock-box/gh'                # no api.github.com: no gh
 }
 
-@test "two Forgejo hosts: one login each, only the first default" {
+@test "two Forgejo hosts: gt gets the first, and the launch says so" {
   manifest 'a.example.org 443 forgejo yes\nb.example.org 443 forgejo yes\n'
-  _launch "$P" >/dev/null 2>&1 || true
-  [ "$(grep -c '^- name: ' "$SNAP/tea/config.yml")" = 2 ]
-  [ "$(grep -c '  default: true' "$SNAP/tea/config.yml")" = 1 ]
-  grep -A2 '^- name: a.example.org' "$SNAP/tea/config.yml" | grep -q 'url: http://a.example.org'
+  run _launch "$P"
+  launched
+  has_arg GITEA_CLI_HOST=http://a.example.org
+  refute arg_matches '^GITEA_CLI_HOST=http://b.example.org'
+  [[ "$output" == *"gt is set up for a.example.org only"* ]]
 }
 
-@test "a Forgejo host without a credential: no tea login (said), git still rewritten" {
+@test "a Forgejo host without a credential: no gt environment (said), git still rewritten" {
   manifest 'git.example.org 443 forgejo no\n'
   run _launch "$P"
   launched
-  [[ "$output" == *"no credential for git.example.org, so tea is not set up"* ]]
-  refute arg_matches 'airlock-box/tea'
+  [[ "$output" == *"no credential for git.example.org, so gt is not set up"* ]]
+  refute arg_matches '^GITEA_'
   [ "$(box_url git@git.example.org:o/r.git)" = http://git.example.org/o/r.git ]
+}
+
+@test "a GITEA_TOKEN secret is not overridden by gt's placeholder" {
+  manifest 'git.example.org 443 forgejo yes\n'
+  _launch "$P" secret set GITEA_TOKEN real-token-value >/dev/null
+  run _launch "$P"
+  launched
+  has_arg GITEA_CLI_HOST=http://git.example.org
+  refute arg_matches '^GITEA_TOKEN='
 }
 
 @test "a Kubernetes API server (kubernetes-read) with a credential: a read-only box kubeconfig at http://, no user or token" {
@@ -439,12 +442,12 @@ seed_md() { cat "$BATS_TEST_DIRNAME/../config/box-CLAUDE.md"; }
   grep -qF "ask the human to unlock it on the host. Never retry, and never try to unlock from the box" <<< "$md"
   grep -qF -- "- **\`metrics.example.org\`** (rules \`victoria-metrics\`, no credential): Prometheus-style" <<< "$md"
   grep -qF "curl 'http://metrics.example.org/api/v1/query?query=up'" <<< "$md"
-  grep -qF -- "- **\`git.example.org\`** (rules \`forgejo\`, the proxy adds the credential): Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`tea\` logged in. API" <<< "$md"
+  grep -qF -- "- **\`git.example.org\`** (rules \`forgejo\`, the proxy adds the credential): Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`gt\` logged in. API" <<< "$md"
   grep -qF "\`gh\` is set up, no token needed (not set up here: the proxy holds no credential for it). Reads" <<< "$md"
   grep -qF -- "- **\`10.0.0.10\`** (rules \`kubernetes-read\`, the proxy adds the credential): \`kubectl\` is set up read-only, KUBECONFIG is set: get" <<< "$md"
   grep -qF "rules the launcher doesn't know" <<< "$md"
   # Repo scoping: what a 403 means on git and GitHub hosts, and REST through gh api for GitHub.
-  grep -qF "tea\` logged in. API" <<< "$md"
+  grep -qF "gt\` logged in. API" <<< "$md"
   grep -qF "the web UI. It may be scoped to some repos: a 403 for another repo is that scope" <<< "$md"
   grep -qF "deletes. It may be scoped to some repos" <<< "$md"
   grep -qF "If \`/graphql\` gets 403" <<< "$md"

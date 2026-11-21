@@ -240,7 +240,7 @@ More in [docs/configuration.md](docs/configuration.md#secrets-airlock-secret).
 | Host config (`~/.config/claude-airlock/config`): every key | [docs/configuration.md](docs/configuration.md#host-config-configclaude-airlockconfig) |
 | Per-project config (`.airlock/config`): `egress =`, `share =`, `share_rw =`, `artifact_dirs =`, `image =` | [docs/configuration.md](docs/configuration.md#project-config-projectairlockconfig) |
 | Secrets, read-only host mounts (`airlock mount`), host sockets (`airlock socket`), permission mode (`airlock mode`) | [docs/configuration.md](docs/configuration.md) |
-| Egress through a host proxy (`airlock egress proxy`), and plain HTTP through the proxy (git, gh, tea, kubectl without a credential in the box) | [docs/egress-proxy.md](docs/egress-proxy.md) |
+| Egress through a host proxy (`airlock egress proxy`), and plain HTTP through the proxy (git, gh, gt, kubectl without a credential in the box) | [docs/egress-proxy.md](docs/egress-proxy.md) |
 | Scratch files (`$AIRLOCK_TMP`) and pasting images into a box (`airlock paste`) | [docs/scratch-and-pastes.md](docs/scratch-and-pastes.md) |
 | Installing and updating, signing in (`airlock login`), telemetry, statusline | [docs/install.md](docs/install.md) |
 | Running boxes as a dedicated user, and installing from a bundle | [docs/dedicated-user.md](docs/dedicated-user.md) |

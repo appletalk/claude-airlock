@@ -75,7 +75,7 @@ route. Images built before this posture are refused with a message to rebuild th
 
 A proxy can serve some hosts by **plain HTTP**: the box sends `http://<host>/...`, and the
 proxy checks the request, adds the credential and does the TLS (airlock-envoy's `http`
-lines). This is how a box uses git, gh, tea and kubectl without holding a credential.
+lines). This is how a box uses git, gh, gt and kubectl without holding a credential.
 
 If the proxy writes a client manifest next to its socket (`<name>.clients` beside
 `<name>.sock`; airlock-envoy does), each launch points the box's clients at those hosts.
@@ -124,15 +124,16 @@ socket itself (`http_unix_socket`), with a placeholder `GH_TOKEN` the proxy repl
   repo or for `/graphql` means, and gives the `gh api` (REST) forms for PRs, issues, comments
   and checks.
 
-### tea
+### gt
 
-For each Forgejo host (rules `forgejo`) the proxy has a credential for, the box gets a tea
-login at `http://<host>` with a placeholder token the proxy replaces with the bot's. tea
-matches a repo's ssh or https remote to it by host.
+For the Forgejo host (rules `forgejo`) the proxy has a credential for, the box's `gt` (the Gitea
+CLI) is set up from the environment, the way `gh` is: `GITEA_CLI_HOST=http://<host>`,
+`GITEA_INSTANCE_SSH_HOST=<host>` and `GITEA_TOKEN`, a placeholder the proxy replaces with the
+bot's. No config file is written. gt matches the repo's (rewritten) remote to that instance.
 
-The launcher mounts it read-only and the entrypoint copies it to `~/.config/tea` (tea reads
-nothing else), so an image built before this has no tea login. Your own tea config is never
-mounted (`.config/tea` is on the deny list).
+gt takes one instance from the environment, so with several Forgejo hosts it gets the first and
+the launch says so. A `GITEA_TOKEN` secret wins over the placeholder. Your own gt config is
+never mounted (`.config/gitea-cli` is on the deny list, as is `.config/tea`).
 
 ### kubectl
 
@@ -171,7 +172,7 @@ killed while its box runs on, the next launch sweeps that copy: the box keeps it
 config but its gh config empties, so gh fails closed (no network) until the box is
 relaunched.
 
-The clients (git, gh, tea, kubectl) are in `:dev` and the images built on it. A `:base` box
+The clients (git, gh, gt, kubectl) are in `:dev` and the images built on it. A `:base` box
 gets the same config files but has no client to read them.
 
 ### The manifest is checked

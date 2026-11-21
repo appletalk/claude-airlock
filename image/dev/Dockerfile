@@ -449,7 +449,7 @@ RUN set -eux; \
     rm -rf "$t" "$ANSIBLE_HOME"
 
 # ============================================================================
-# Infra clients - kubectl, helm, sops, tea, drill.
+# Infra clients - kubectl, helm, sops, gt, drill.
 # ============================================================================
 # Unlike the validators above these are clients: they are only useful against an
 # endpoint the project grants via `egress =` (an apiserver `IPv4:port`, a Forgejo
@@ -461,18 +461,20 @@ RUN set -eux; \
 ARG KUBECTL_VERSION=1.37.2
 ARG HELM_VERSION=4.3.2
 ARG SOPS_VERSION=3.13.3
-ARG TEA_VERSION=0.16.0
+# gt (Gitea CLI, gitea.com/gitea/cli): the release binary from dl.gitea.com. The pins come from
+# the release's checksums.txt (GPG-signed upstream; that key is not verified here).
+ARG GT_VERSION=2.0.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       amd64) kcsha=c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4; \
              hmsha=d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983; \
              spsha=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b; \
-             tesha=9c142c8a0b31485eea2387031c1c404f12b7141075eb4ffbd7ced49441590636 ;; \
+             gtsha=228cc69be2089a4bba06762b262fd61fdc6ce95d92e01e2bce1c29465bbb498e ;; \
       arm64) kcsha=fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509; \
              hmsha=df31cb61680ef728f82c770e5280dd565617bee6b039d37e85c677288be4bbb0; \
              spsha=53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438b94d77; \
-             tesha=0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879 ;; \
+             gtsha=40267c0d907501843a9fefc1a79ff589716d3ea65f8e92e1821be1d579808282 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" -o /tmp/kubectl; \
@@ -485,13 +487,15 @@ RUN set -eux; \
     curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${arch}" -o /tmp/sops; \
     echo "${spsha}  /tmp/sops" | sha256sum -c -; \
     install -m 0555 /tmp/sops /usr/local/bin/sops; \
-    curl -fsSL "https://dl.gitea.com/tea/${TEA_VERSION}/tea-${TEA_VERSION}-linux-${arch}" -o /tmp/tea; \
-    echo "${tesha}  /tmp/tea" | sha256sum -c -; \
-    install -m 0555 /tmp/tea /usr/local/bin/tea; \
-    rm -f /tmp/kubectl /tmp/helm.tgz /tmp/sops /tmp/tea; \
-    kubectl version --client; helm version --short; sops --version --disable-version-check; tea --version; drill -v
+    curl -fsSL "https://dl.gitea.com/gitea-cli/${GT_VERSION}/gitea-cli-${GT_VERSION}-linux-${arch}" -o /tmp/gt; \
+    echo "${gtsha}  /tmp/gt" | sha256sum -c -; \
+    install -m 0555 /tmp/gt /usr/local/bin/gt; \
+    rm -f /tmp/kubectl /tmp/helm.tgz /tmp/sops /tmp/gt; \
+    kubectl version --client; helm version --short; sops --version --disable-version-check; gt --version; drill -v
 # sops checks GitHub for a newer release; blocked in a box, that is a stall per call.
 ENV SOPS_DISABLE_VERSION_CHECK=1
+# gt checks for a new release the same way.
+ENV GITEA_CLI_NO_UPDATE_NOTIFIER=1
 
 # Claude Code LAST: copied from the base image built alongside this one (see the top of
 # this file). Only ~/.local: the rest of the base's $HOME is installer residue that the
