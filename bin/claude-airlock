@@ -462,7 +462,8 @@ _airlock_client_manifest() {
 # secrets file by key (the box CLAUDE.md is written before the env-file is), never the value.
 _airlock_gt_host_secret() {
   [ -f "$STATE_DIR/secrets" ] || return 1
-  grep -qE '^[[:space:]]*(GITEA_CLI_HOST|GITEA_INSTANCE_URL|GITEA_INSTANCE_SSH_HOST)[[:space:]]*=' "$STATE_DIR/secrets"
+  # A value, as the secrets loop requires (it drops empty ones and anything after a #).
+  grep -qE '^[[:space:]]*(GITEA_CLI_HOST|GITEA_INSTANCE_URL|GITEA_INSTANCE_SSH_HOST)[[:space:]]*=[[:space:]]*[^[:space:]#]' "$STATE_DIR/secrets"
 }
 
 _airlock_box_directives() {

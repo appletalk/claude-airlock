@@ -396,6 +396,12 @@ AIRLOCK_GIT_EMAIL=box@example.org'
     grep -F -- '- **`a.example.org`**' <<< "$md" | grep -qF 'a secret points gt at another instance'
     _launch "$P" secret rm "$k" >/dev/null
   done
+  # An empty one is dropped by the secrets loop, so it doesn't count here either.
+  printf 'GITEA_CLI_HOST=\n' >> "$(state_dir "$P")/secrets"
+  run _launch "$P"
+  launched
+  has_arg GITEA_CLI_HOST=http://a.example.org
+  [[ "$output" != *"so gt keeps it"* ]]
 }
 
 @test "box CLAUDE.md with two Forgejo hosts: gt logged in for the first only" {
