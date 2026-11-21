@@ -135,6 +135,9 @@ gt takes one instance from the environment, so with several Forgejo hosts it get
 the launch says so. A `GITEA_TOKEN` secret wins over the placeholder. Your own gt config is
 never mounted (`.config/gitea-cli` is on the deny list, as is `.config/tea`).
 
+`fj` (forgejo-cli) is in the image too, for its `--help`: it gets no login (it reads only its own
+key file, which the box doesn't have), so it can't reach the Forgejo host.
+
 ### kubectl
 
 For each Kubernetes API server (rules `kubernetes-read`) the proxy has a credential for,

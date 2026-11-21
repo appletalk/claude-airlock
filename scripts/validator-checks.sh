@@ -207,6 +207,7 @@ expect_ok   "sops filestatus reports a plaintext file"      sops_status sops/pla
 expect_fail "sops filestatus does not call plaintext encrypted" sops_status sops/plain.yaml true
 # No offline mode to exercise: these only prove the binaries are present and run.
 expect_ok   "gt runs"                                       gt --version
+expect_ok   "fj runs"                                       fj version
 expect_ok   "drill runs"                                    drill -v
 
 # Developer tools: dev's, not the base's (image/Dockerfile keeps them out). A local round
