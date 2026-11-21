@@ -357,6 +357,7 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   has_arg GITEA_CLI_HOST=http://a.example.org
   refute arg_matches '^GITEA_CLI_HOST=http://b.example.org'
   [[ "$output" == *"gt is set up for a.example.org only"* ]]
+  [[ "$output" == *"gt in a repo on b.example.org is not supported"* ]]
 }
 
 @test "a Forgejo host without a credential: no gt environment (said), git still rewritten" {
@@ -368,13 +369,38 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   [ "$(box_url git@git.example.org:o/r.git)" = http://git.example.org/o/r.git ]
 }
 
-@test "a GITEA_TOKEN secret is not overridden by gt's placeholder" {
+@test "a GITEA_TOKEN secret is not overridden by gt's placeholder, and the launch says it puts a real token in the box" {
   manifest 'git.example.org 443 forgejo yes\n'
   _launch "$P" secret set GITEA_TOKEN real-token-value >/dev/null
   run _launch "$P"
   launched
   has_arg GITEA_CLI_HOST=http://git.example.org
   refute arg_matches '^GITEA_TOKEN='
+  [[ "$output" == *"a GITEA_TOKEN secret is set and used instead, which puts a real token in the box"* ]]
+  [[ "$output" != *"real-token-value"* ]]
+}
+
+@test "a GITEA_CLI_HOST or GITEA_INSTANCE_URL secret: gt keeps it, the launcher does not point it elsewhere, and says so" {
+  manifest 'git.example.org 443 forgejo yes\n'
+  for k in GITEA_CLI_HOST GITEA_INSTANCE_URL; do
+    _launch "$P" secret set "$k" https://other.example.org >/dev/null
+    run _launch "$P"
+    launched
+    refute arg_matches '^GITEA_CLI_HOST='
+    refute arg_matches '^GITEA_INSTANCE_SSH_HOST='
+    has_arg GITEA_TOKEN=airlock-proxy-adds-the-credential
+    [[ "$output" == *"so gt keeps it and is not pointed at git.example.org"* ]]
+    _launch "$P" secret rm "$k" >/dev/null
+  done
+}
+
+@test "box CLAUDE.md with two Forgejo hosts: gt logged in for the first only" {
+  manifest 'a.example.org 443 forgejo yes\nb.example.org 443 forgejo yes\n'
+  _launch "$P" >/dev/null 2>&1 || true
+  launched
+  md="$(box_md)"
+  grep -F -- '- **`a.example.org`**' <<< "$md" | grep -qF '`gt` logged in.'
+  grep -F -- '- **`b.example.org`**' <<< "$md" | grep -qF '`gt` not set up for it (gt takes one instance, `a.example.org`'
 }
 
 @test "a Kubernetes API server (kubernetes-read) with a credential: a read-only box kubeconfig at http://, no user or token" {

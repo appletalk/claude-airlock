@@ -130,13 +130,20 @@ For the Forgejo host (rules `forgejo`) the proxy has a credential for, the box's
 CLI) is set up from the environment, the way `gh` is: `GITEA_CLI_HOST=http://<host>`,
 `GITEA_INSTANCE_SSH_HOST=<host>` and `GITEA_TOKEN`, a placeholder the proxy replaces with the
 bot's. No config file is written. gt matches the repo's (rewritten) remote to that instance.
+An image built before gt replaced tea has only tea, which no longer gets a login: rebuild it.
 
-gt takes one instance from the environment, so with several Forgejo hosts it gets the first and
-the launch says so. A `GITEA_TOKEN` secret wins over the placeholder. Your own gt config is
-never mounted (`.config/gitea-cli` is on the deny list, as is `.config/tea`).
+- gt takes one instance from the environment, so with several Forgejo hosts it gets the first;
+  the launch says so, and the box's CLAUDE.md says gt isn't set up for the others.
+- A `GITEA_TOKEN` secret wins over the placeholder, and the launch names it: it puts a real
+  token in the box, which the proxy otherwise keeps out. A `GITEA_CLI_HOST` or
+  `GITEA_INSTANCE_URL` secret is kept too (and named), and the launcher doesn't point gt at the
+  proxy host.
+- Your own gt config is never mounted (`.config/gitea-cli` is on the deny list, as is
+  `.config/tea`).
 
 `fj` (forgejo-cli) is in the image too, for its `--help`: it gets no login (it reads only its own
-key file, which the box doesn't have), so it can't reach the Forgejo host.
+key file, `~/.local/share/forgejo-cli/keys.json`, which the box doesn't have and the mount deny
+list keeps out), so it can't reach the Forgejo host.
 
 ### kubectl
 

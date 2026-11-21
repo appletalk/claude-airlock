@@ -477,7 +477,9 @@ there is no way to.
 EOF
   # The proxy may scope a host to some repos (airlock-envoy's repos); the manifest doesn't
   # say which, so the box learns it from a 403 and is told what that means and what works.
-  local unset scoped gh_rest
+  local unset scoped gh_rest gt_note fj_first
+  # gt takes one instance from the environment: the first Forgejo host with a credential.
+  fj_first="$(awk '$2 == "forgejo" && $3 == "yes" { print $1; exit }' <<< "$_CLIENT_HOSTS")"
   scoped=" It may be scoped to some repos: a 403 for another repo is that scope, not an outage."
   # shellcheck disable=SC2016  # literal backquotes: Markdown code spans
   gh_rest=' If `/graphql` gets 403 (refused under repo scoping; most `gh pr` and `gh issue` commands use it), use the REST API through `gh api`: `gh api repos/<owner>/<repo>/pulls -f title=... -f head=<branch> -f base=main` (create), `gh api "repos/<owner>/<repo>/pulls?state=open"` (list), `gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -f body=...` (edit), `gh api repos/<owner>/<repo>/issues/<n>/comments -f body=...` (comment), `gh api repos/<owner>/<repo>/issues -f title=... -f body=...` (issue), `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` (checks); check out a PR with `git fetch origin pull/<n>/head`. Draft to ready and resolving review threads need GraphQL: ask the human.'
@@ -485,6 +487,10 @@ EOF
     [ -n "$host" ] || continue
     unset=""
     [ "$cred" = yes ] || unset=" (not set up here: the proxy holds no credential for it)"
+    gt_note="\`gt\` logged in$unset"
+    if [ "$rules" = forgejo ] && [ "$cred" = yes ] && [ "$host" != "$fj_first" ]; then
+      gt_note="\`gt\` not set up for it (gt takes one instance, \`$fj_first\`; use plain HTTP API calls here)"
+    fi
     # shellcheck disable=SC2016  # literal backquotes: Markdown code spans
     printf -- '- **`%s`** (rules `%s`, %s): ' "$host" "$rules" \
       "$([ "$cred" = yes ] && echo "the proxy adds the credential" || echo "no credential")"
@@ -493,7 +499,7 @@ EOF
       victoria-logs) echo "LogsQL, reads only: \`curl 'http://$host/select/logsql/query' -d 'query=...'\` (also hits, stats_query and the rest under /select/logsql/)." ;;
       git) echo "git fetch and push over http:// (remotes are rewritten in the box). The server's branch protection decides what a push may touch.$scoped" ;;
       git-read) echo "git fetch only (remotes are rewritten in the box); a push is refused.$scoped" ;;
-      forgejo) echo "Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), \`gt\` logged in$unset. API reads, PR create and edit, comments, labels, reviewers. Refused: merge, approve, files written through the API, branch and tag API, releases, settings, keys, deletes, the web UI.$scoped" ;;
+      forgejo) echo "Forgejo as the proxy's bot account: git fetch and push (remotes rewritten), $gt_note. API reads, PR create and edit, comments, labels, reviewers. Refused: merge, approve, files written through the API, branch and tag API, releases, settings, keys, deletes, the web UI.$scoped" ;;
       github-api) echo "\`gh\` is set up, no token needed$unset. Reads, issues, PR create and edit, comments, labels, reviewers. Refused: merge, approve, auto-merge, settings, hooks, keys, deletes, Projects beyond the pinned boards.$scoped$gh_rest" ;;
       github-issues) echo "\`gh\` is set up, no token needed$unset. Reads, issues, comments, labels, assignees. Refused: PR create and edit, merge, approve, settings, deletes.$scoped$gh_rest" ;;
       kubernetes-read) echo "\`kubectl\` is set up read-only, KUBECONFIG is set$unset: get, describe, list, watch, logs, events, top, \`auth can-i\`, \`auth whoami\`. Refused: every write, exec, attach, cp, port-forward, proxy. What it may read is the token's RBAC. \"the server has asked for the client to provide credentials\" means the proxy's token expired: ask the human to renew it." ;;
@@ -839,7 +845,7 @@ AIRLOCK_MOUNT_DENY=".ssh .keychain .gnupg .kube .password-store .claude .aws .az
   .config/tea .config/gitea-cli .config/containers .config/chromium .config/google-chrome
   .config/rclone .config/helm .config/hcloud .config/op .config/git .config/argocd
   .config/pip .config/Code .terraform.d .m2 .gradle
-  .local/share/keyrings .local/share/containers"
+  .local/share/keyrings .local/share/containers .local/share/forgejo-cli"
 
 # Canonical path on stdout if DIR may be mounted; otherwise the reason on stderr and 1.
 _airlock_mount_check() {
@@ -3148,10 +3154,18 @@ while IFS= read -r _h; do
   [ -n "$_h" ] && echo "claude-airlock: the proxy has no credential for $_h, so gt is not set up for it" >&2
 done < <(awk '$2 == "forgejo" && $3 != "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
 if [ "${#_fj_hosts[@]}" -gt 0 ]; then
-  args+=( -e "GITEA_CLI_HOST=http://${_fj_hosts[0]}" -e "GITEA_INSTANCE_SSH_HOST=${_fj_hosts[0]}" )
-  grep -qE '^GITEA_TOKEN=' "$ENV_FILE" || args+=( -e "GITEA_TOKEN=airlock-proxy-adds-the-credential" )
+  if grep -qE '^(GITEA_CLI_HOST|GITEA_INSTANCE_URL)=' "$ENV_FILE"; then
+    echo "claude-airlock: a GITEA_CLI_HOST or GITEA_INSTANCE_URL secret is set, so gt keeps it and is not pointed at ${_fj_hosts[0]}" >&2
+  else
+    args+=( -e "GITEA_CLI_HOST=http://${_fj_hosts[0]}" -e "GITEA_INSTANCE_SSH_HOST=${_fj_hosts[0]}" )
+  fi
+  if grep -qE '^GITEA_TOKEN=' "$ENV_FILE"; then
+    echo "claude-airlock: the proxy adds the Forgejo credential for ${_fj_hosts[0]}, yet a GITEA_TOKEN secret is set and used instead, which puts a real token in the box (airlock secret rm GITEA_TOKEN)" >&2
+  else
+    args+=( -e "GITEA_TOKEN=airlock-proxy-adds-the-credential" )
+  fi
   if [ "${#_fj_hosts[@]}" -gt 1 ]; then
-    echo "claude-airlock: gt is set up for ${_fj_hosts[0]} only (it takes one instance from the environment)" >&2
+    echo "claude-airlock: gt is set up for ${_fj_hosts[0]} only (it takes one instance from the environment); gt in a repo on ${_fj_hosts[*]:1} is not supported" >&2
   fi
 fi
 

@@ -38,9 +38,11 @@ mounted() { engine_args | grep -qx -- "$1:$1:ro"; }
 
 @test "refuses protected directories and anything inside them (no override)" {
   p="$(mkproj mntdeny)"
-  mkdir -p "$H/.config/rclone" "$H/.config/helm" "$H/.terraform.d" "$H/.config/git" "$H/.m2"
+  mkdir -p "$H/.config/rclone" "$H/.config/helm" "$H/.terraform.d" "$H/.config/git" "$H/.m2" \
+           "$H/.config/gitea-cli" "$H/.config/tea" "$H/.local/share/forgejo-cli"
   for d in "$H/.ssh" "$H/.kube" "$H/.config/sops" "$H/.config/sops/age" \
-           "$H/.config/rclone" "$H/.config/helm" "$H/.terraform.d" "$H/.config/git" "$H/.m2"; do
+           "$H/.config/rclone" "$H/.config/helm" "$H/.terraform.d" "$H/.config/git" "$H/.m2" \
+           "$H/.config/gitea-cli" "$H/.config/tea" "$H/.local/share/forgejo-cli"; do
     run _launch "$p" mount add "$d"
     [ "$status" -ne 0 ] || { echo "accepted $d"; false; }
     [[ "$output" == *"protected"* ]]
