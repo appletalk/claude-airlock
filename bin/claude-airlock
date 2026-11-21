@@ -457,6 +457,14 @@ _airlock_client_manifest() {
 # The box CLAUDE.md section for the manifest's hosts: how to reach each one and what its rules
 # allow, so boxed Claude neither tries https:// (403 "use http://") nor guesses at the limits.
 # Only validated manifest fields go in (host names, rule names). Prints nothing for no hosts.
+# A secret that tells gt which instance to use (GITEA_CLI_HOST, GITEA_INSTANCE_URL or
+# GITEA_INSTANCE_SSH_HOST): then the launcher leaves gt's host alone. Read from the project's
+# secrets file by key (the box CLAUDE.md is written before the env-file is), never the value.
+_airlock_gt_host_secret() {
+  [ -f "$STATE_DIR/secrets" ] || return 1
+  grep -qE '^[[:space:]]*(GITEA_CLI_HOST|GITEA_INSTANCE_URL|GITEA_INSTANCE_SSH_HOST)[[:space:]]*=' "$STATE_DIR/secrets"
+}
+
 _airlock_box_directives() {
   local host rules cred
   [ -n "$_CLIENT_HOSTS" ] || return 0
@@ -488,7 +496,9 @@ EOF
     unset=""
     [ "$cred" = yes ] || unset=" (not set up here: the proxy holds no credential for it)"
     gt_note="\`gt\` logged in$unset"
-    if [ "$rules" = forgejo ] && [ "$cred" = yes ] && [ "$host" != "$fj_first" ]; then
+    if [ "$rules" = forgejo ] && [ "$cred" = yes ] && _airlock_gt_host_secret; then
+      gt_note="\`gt\` not set up for it (a secret points gt at another instance; use plain HTTP API calls here)"
+    elif [ "$rules" = forgejo ] && [ "$cred" = yes ] && [ "$host" != "$fj_first" ]; then
       gt_note="\`gt\` not set up for it (gt takes one instance, \`$fj_first\`; use plain HTTP API calls here)"
     fi
     # shellcheck disable=SC2016  # literal backquotes: Markdown code spans
@@ -3154,8 +3164,8 @@ while IFS= read -r _h; do
   [ -n "$_h" ] && echo "claude-airlock: the proxy has no credential for $_h, so gt is not set up for it" >&2
 done < <(awk '$2 == "forgejo" && $3 != "yes" { print $1 }' <<< "$_CLIENT_HOSTS")
 if [ "${#_fj_hosts[@]}" -gt 0 ]; then
-  if grep -qE '^(GITEA_CLI_HOST|GITEA_INSTANCE_URL)=' "$ENV_FILE"; then
-    echo "claude-airlock: a GITEA_CLI_HOST or GITEA_INSTANCE_URL secret is set, so gt keeps it and is not pointed at ${_fj_hosts[0]}" >&2
+  if _airlock_gt_host_secret; then
+    echo "claude-airlock: a GITEA_CLI_HOST, GITEA_INSTANCE_URL or GITEA_INSTANCE_SSH_HOST secret is set, so gt keeps it and is not pointed at ${_fj_hosts[0]}" >&2
   else
     args+=( -e "GITEA_CLI_HOST=http://${_fj_hosts[0]}" -e "GITEA_INSTANCE_SSH_HOST=${_fj_hosts[0]}" )
   fi
@@ -3164,7 +3174,7 @@ if [ "${#_fj_hosts[@]}" -gt 0 ]; then
   else
     args+=( -e "GITEA_TOKEN=airlock-proxy-adds-the-credential" )
   fi
-  if [ "${#_fj_hosts[@]}" -gt 1 ]; then
+  if [ "${#_fj_hosts[@]}" -gt 1 ] && ! _airlock_gt_host_secret; then
     echo "claude-airlock: gt is set up for ${_fj_hosts[0]} only (it takes one instance from the environment); gt in a repo on ${_fj_hosts[*]:1} is not supported" >&2
   fi
 fi

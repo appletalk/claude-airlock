@@ -135,9 +135,9 @@ An image built before gt replaced tea has only tea, which no longer gets a login
 - gt takes one instance from the environment, so with several Forgejo hosts it gets the first;
   the launch says so, and the box's CLAUDE.md says gt isn't set up for the others.
 - A `GITEA_TOKEN` secret wins over the placeholder, and the launch names it: it puts a real
-  token in the box, which the proxy otherwise keeps out. A `GITEA_CLI_HOST` or
-  `GITEA_INSTANCE_URL` secret is kept too (and named), and the launcher doesn't point gt at the
-  proxy host.
+  token in the box, which the proxy otherwise keeps out. A `GITEA_CLI_HOST`,
+  `GITEA_INSTANCE_URL` or `GITEA_INSTANCE_SSH_HOST` secret is kept too (and named): the launcher
+  then sets no gt host, and the box's CLAUDE.md says gt isn't set up for the proxy host.
 - Your own gt config is never mounted (`.config/gitea-cli` is on the deny list, as is
   `.config/tea`).
 

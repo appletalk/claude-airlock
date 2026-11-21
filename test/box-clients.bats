@@ -380,16 +380,20 @@ AIRLOCK_GIT_EMAIL=box@example.org'
   [[ "$output" != *"real-token-value"* ]]
 }
 
-@test "a GITEA_CLI_HOST or GITEA_INSTANCE_URL secret: gt keeps it, the launcher does not point it elsewhere, and says so" {
-  manifest 'git.example.org 443 forgejo yes\n'
-  for k in GITEA_CLI_HOST GITEA_INSTANCE_URL; do
+@test "a gt host secret (GITEA_CLI_HOST, GITEA_INSTANCE_URL, GITEA_INSTANCE_SSH_HOST): gt keeps it, the launcher does not point it elsewhere, and says so everywhere" {
+  manifest 'a.example.org 443 forgejo yes\nb.example.org 443 forgejo yes\n'
+  for k in GITEA_CLI_HOST GITEA_INSTANCE_URL GITEA_INSTANCE_SSH_HOST; do
     _launch "$P" secret set "$k" https://other.example.org >/dev/null
     run _launch "$P"
     launched
     refute arg_matches '^GITEA_CLI_HOST='
     refute arg_matches '^GITEA_INSTANCE_SSH_HOST='
     has_arg GITEA_TOKEN=airlock-proxy-adds-the-credential
-    [[ "$output" == *"so gt keeps it and is not pointed at git.example.org"* ]]
+    [[ "$output" == *"so gt keeps it and is not pointed at a.example.org"* ]]
+    [[ "$output" != *"gt is set up for a.example.org only"* ]]       # no contradicting warning
+    md="$(box_md)"
+    refute grep -qF '`gt` logged in' <<< "$md"
+    grep -F -- '- **`a.example.org`**' <<< "$md" | grep -qF 'a secret points gt at another instance'
     _launch "$P" secret rm "$k" >/dev/null
   done
 }
