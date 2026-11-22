@@ -107,6 +107,15 @@ COPY managed-settings.json /etc/claude-code/managed-settings.json
 RUN chmod 0444 /etc/airlock/firewall.conf /etc/claude-code/managed-settings.json \
     && chmod 0555 /usr/local/bin/init-firewall.sh /usr/local/bin/airlock-entrypoint
 
+# No setuid or setgid file in the box. None is needed at runtime: the entrypoint drops to dev with
+# gosu (not setuid), and su, mount, passwd and the rest only matter to a box that could gain
+# privileges, which no_new_privs already stops. Without the bit each one is an ordinary program
+# run as dev. The packages behind them are Debian's required base (util-linux is Essential), so
+# they stay installed and lose only the bit. Each image does this after its last package
+# install, so none can bring a bit back unnoticed; the image smoke test checks the running box.
+RUN find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
+    && ! find / -xdev -type f -perm /6000 | grep .
+
 # On PATH before the installer runs (it warns when its target dir is not), and inherited
 # by the dev image, which copies the install into the same place.
 ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"

@@ -946,3 +946,15 @@ W
     grep -qF "in $BATS_TEST_TMPDIR/ro/sub/x.conf: ask whoever manages it." "$out"
   fi
 }
+
+@test "every image strips setuid and setgid bits after its last package install, and checks it" {
+  for f in image/Dockerfile image/dev/Dockerfile image/playwright/Dockerfile; do
+    d="$BATS_TEST_DIRNAME/../$f"
+    grep -qF 'RUN find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \' "$d" || { echo "$f: no strip"; false; }
+    grep -qF '    && ! find / -xdev -type f -perm /6000 | grep .' "$d" || { echo "$f: no check"; false; }
+    # after the last apt-get install / npm install in that file
+    strip="$(grep -n 'perm /6000 -exec chmod' "$d" | cut -d: -f1)"
+    last="$(grep -nE 'apt-get install|npm install' "$d" | tail -1 | cut -d: -f1)"
+    [ -z "$last" ] || [ "$strip" -gt "$last" ] || { echo "$f: strip at $strip before install at $last"; false; }
+  done
+}

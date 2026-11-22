@@ -2251,6 +2251,20 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   # merge, so a box whose settings.json lost the keys (or came from the retired `telemetry
   # on`, which deleted DISABLE_TELEMETRY) is corrected on its next launch. The mounted
   # managed settings keep them off regardless; this keeps the file honest.
+  # Settings that make Claude run a command on its own (on events, or at start to fetch a
+  # credential) are not the box's to keep: a box that wrote one would have it run in every later
+  # session of this project. Hooks are refused anyway (allowManagedHooksOnly in the managed
+  # settings); the helpers have no managed switch, so they are dropped here each launch.
+  _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper'
+  _dropped="$(jq -r --arg k "$_cmdkeys" '($k | split(" ")) as $ks | [keys[] | select(. as $x | $ks | index($x))] | join(" ")' "$_bscur" 2>/dev/null || true)"
+  if [ -n "$_dropped" ]; then
+    if jq --arg k "$_cmdkeys" '($k | split(" ")) as $ks | with_entries(select(.key as $x | $ks | index($x) | not))' "$_bscur" > "$_bsd/nocmd" 2>/dev/null; then
+      _bscur="$_bsd/nocmd"
+      echo "airlock: removed $_dropped from the box's settings.json (a setting that runs a command; the box may not keep one)" >&2
+    else
+      echo "airlock: WARNING: could not remove $_dropped from $_bs; hooks stay refused by the managed settings" >&2
+    fi
+  fi
   _tfilter='.env |= ((if type == "object" then . else {} end) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
   if jq "$_tfilter" "$_bscur" > "$_bsd/final" 2>/dev/null; then
     _bscur="$_bsd/final"

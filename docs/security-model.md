@@ -102,6 +102,14 @@ write, and widening anything always prompts on the host.
   with no usable capability. The engine's `--init` would run as root for the box's whole
   life; the launcher passes `--init=false` to images that carry the init, and `--init` only
   for an `exec` box on an image built before it.
+- No file in a box is setuid or setgid. Each image strips every bit after its last package
+  install (the base system's `su`, `mount`, `passwd` and the like stay installed, as ordinary
+  programs), and the image smoke test fails on a box that has one. no_new_privs already stopped
+  them; this removes the dependency on it.
+- A box cannot keep a setting that runs a command. The managed settings allow managed hooks only,
+  so no hook from the box's own settings or the workspace's `.claude/` runs, and each launch
+  removes `hooks` and the credential helpers (`apiKeyHelper`, `awsAuthRefresh`,
+  `awsCredentialExport`, `otelHeadersHelper`) from the box's `settings.json`, with a notice.
 - A process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork bomb.
 - An optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
 

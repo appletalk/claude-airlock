@@ -275,6 +275,30 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
   [ "$(jq -r '.crossSessionInbound' "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = refuse ]
 }
 
+# Hooks run commands on events; managed-only hooks refuse every other source (user, project,
+# local), so a box cannot plant one for its next session or the workspace's next box.
+@test "the image's managed settings allow managed hooks only" {
+  [ "$(jq -r '.allowManagedHooksOnly' "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = true ]
+}
+
+# A box that writes a setting which makes Claude run a command (a hook, or a credential helper
+# run at start) must not keep it into the next launch; its other keys stay.
+@test "command-running keys the box wrote into its settings.json are removed at launch, with a notice" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch /tmp/x"}]}]},"apiKeyHelper":"/tmp/k","awsAuthRefresh":"x","awsCredentialExport":"x","otelHeadersHelper":"x","theme":"dark"}' > "$sd/dot-claude/settings.json"
+  run _launch "$p"
+  [[ "$output" == *"removed apiKeyHelper awsAuthRefresh awsCredentialExport hooks otelHeadersHelper from the box's settings.json"* ]] || { echo "$output"; false; }
+  out="$(_box_settings "$p")"
+  for k in hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper; do
+    [ "$(jq --arg k "$k" 'has($k)' <<<"$out")" = false ] || { echo "$k kept: $out"; false; }
+  done
+  [ "$(jq -r .theme <<<"$out")" = dark ]
+  [ "$(jq -r .env.DISABLE_TELEMETRY <<<"$out")" = 1 ]
+  # and nothing to remove: no notice
+  run _launch "$p"
+  [[ "$output" != *"removed "*"from the box's settings.json"* ]]
+}
+
 # The box can write its settings.json. Valid JSON that is not an object used to make every
 # filter fail silently, leaving the baseline and the telemetry keys out.
 @test "a non-object settings.json is reset and telemetry asserted" {

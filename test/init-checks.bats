@@ -8,6 +8,11 @@ setup() {
   CHECK="$BATS_TEST_DIRNAME/../scripts/init-checks.sh"
   P="$BATS_TEST_TMPDIR/proc"
   mkdir -p "$P"
+  # the tree searched for setuid/setgid files: a clean one with an ordinary binary in it
+  R="$BATS_TEST_TMPDIR/rootfs"
+  mkdir -p "$R/usr/bin" && : > "$R/usr/bin/tool" && chmod 0755 "$R/usr/bin/tool"
+  printf '%s\n' '#!/bin/bash' 'for f in "$@"; do [ "$f" != "${STUB_CAPS:-}" ] || echo "$f cap_net_raw=ep"; done' > "$BATS_TEST_TMPDIR/getcap"
+  chmod +x "$BATS_TEST_TMPDIR/getcap"
   # pid 1: dumb-init as dev; pid 7: the command, its own session leader
   mkproc 1 dumb-init 1000 0000000000000000 "S 0 1 1"
   mkproc 7 bash 1000 0000000000000000 "S 1 7 7"
@@ -30,7 +35,9 @@ mkproc() {
   printf '%s (%s) %s 0 0\n' "$pid" "$c" "$st" > "$P/$pid/stat"
 }
 
-check() { run env -u DUMB_INIT_SETSID -u DUMB_INIT_DEBUG PROC="$P" SELF_PID=7 bash "$CHECK" "$@"; }
+# getcap is stubbed: setting a real file capability needs root. STUB_CAPS names the file to
+# report, as getcap does for a file that carries some.
+check() { run env -u DUMB_INIT_SETSID -u DUMB_INIT_DEBUG PROC="$P" ROOTFS="$R" GETCAP="$BATS_TEST_TMPDIR/getcap" SELF_PID=7 bash "$CHECK" "$@"; }
 
 @test "a box under dumb-init as dev, nothing root, no capabilities: every check passes" {
   check
@@ -78,7 +85,7 @@ check() { run env -u DUMB_INIT_SETSID -u DUMB_INIT_DEBUG PROC="$P" SELF_PID=7 ba
 }
 
 @test "a DUMB_INIT_* variable reaching the command: fails" {
-  run env DUMB_INIT_SETSID=0 PROC="$P" SELF_PID=7 bash "$CHECK"
+  run env DUMB_INIT_SETSID=0 PROC="$P" ROOTFS="$R" GETCAP="$BATS_TEST_TMPDIR/getcap" SELF_PID=7 bash "$CHECK"
   [ "$status" -ne 0 ]
   [[ "$output" == *"FAIL  the command sees DUMB_INIT_* variables"* ]]
 }
@@ -152,4 +159,32 @@ check() { run env -u DUMB_INIT_SETSID -u DUMB_INIT_DEBUG PROC="$P" SELF_PID=7 ba
   [ "$status" -ne 0 ]
   [[ "$output" == *"root: pid 4 (nouid)"* ]]
   [[ "$output" == *"root: pid 5 (nogid)"* ]]
+}
+
+@test "a setuid file on the root filesystem: fails, and names it" {
+  chmod u+s "$R/usr/bin/tool"
+  check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"setuid/setgid: $R/usr/bin/tool"* ]]
+  [[ "$output" == *"FAIL  1 setuid or setgid file(s) on the root filesystem"* ]]
+}
+
+@test "a setgid file counts too" {
+  chmod g+s "$R/usr/bin/tool"
+  check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAIL  1 setuid or setgid file(s)"* ]]
+}
+
+@test "a file with file capabilities: fails, and names it" {
+  STUB_CAPS="$R/usr/bin/tool" check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"file capabilities: $R/usr/bin/tool cap_net_raw=ep"* ]]
+  [[ "$output" == *"FAIL  1 file(s) carry file capabilities"* ]]
+}
+
+@test "no getcap to ask: fails rather than vouching for it" {
+  run env PROC="$P" ROOTFS="$R" GETCAP="$BATS_TEST_TMPDIR/no-such-getcap" SELF_PID=7 bash "$CHECK"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAIL  getcap is not available"* ]]
 }

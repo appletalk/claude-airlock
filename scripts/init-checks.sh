@@ -11,13 +11,18 @@
 #   - this command is a session leader (dumb-init's default mode, the place the command had as
 #     PID 1: DUMB_INIT_SETSID=0 from the environment must not switch it off) and sees no
 #     DUMB_INIT_* variable;
+#   - no file on the box's root filesystem is setuid or setgid (the images strip every bit) or
+#     carries file capabilities;
 #   - an orphaned process is reaped: no zombie is left behind.
 #
 # PROC (default /proc) lets test/init-checks.bats run the same checks against a made-up tree;
-# the orphan step needs the real one and is skipped when PROC is not /proc.
+# the orphan step needs the real one and is skipped when PROC is not /proc. ROOTFS (default /)
+# is the tree searched for setuid and setgid files, for the same reason.
 set -uo pipefail
 
 PROC="${PROC:-/proc}"
+ROOTFS="${ROOTFS:-/}"
+GETCAP="${GETCAP:-getcap}"
 SELF="${SELF_PID:-$$}"
 fail=0
 bad()  { printf '  FAIL  %s\n' "$1"; fail=1; }
@@ -68,6 +73,25 @@ is "$nnp" 0 "every process runs with no_new_privs" "$nnp process(es) without no_
 sid="$(sed 's/^.*) //' "$PROC/$SELF/stat" 2>/dev/null | awk '{ print $4 }')"
 is "$sid" "$SELF" "the command is a session leader" "the command's session is '${sid:-?}', not its own ($SELF)"
 if env | grep -q '^DUMB_INIT_'; then bad "the command sees DUMB_INIT_* variables"; else pass "no DUMB_INIT_* in the command's environment"; fi
+
+# setuid/setgid: the root filesystem only (-xdev), so the workspace and other host mounts are not
+# searched. find exits non-zero on directories dev can't read (/root and the like); a file in one
+# of those can't be executed by dev either, so only what it can reach counts.
+sx="$(find "$ROOTFS" -xdev -type f -perm /6000 -print 2>/dev/null || true)"
+n="$(printf '%s' "$sx" | grep -c . || true)"
+[ "$n" = 0 ] || printf '%s\n' "$sx" | head -20 | sed 's/^/        setuid\/setgid: /'
+is "$n" 0 "no setuid or setgid file on the root filesystem" "$n setuid or setgid file(s) on the root filesystem"
+
+# File capabilities are the other way a binary gains privilege without the bit. getcap prints
+# only the files that carry some; without getcap there is nothing to vouch for it, so that fails.
+if command -v "$GETCAP" >/dev/null 2>&1; then
+  fc="$(find "$ROOTFS" -xdev -type f -exec "$GETCAP" {} + 2>/dev/null || true)"
+  n="$(printf '%s' "$fc" | grep -c . || true)"
+  [ "$n" = 0 ] || printf '%s\n' "$fc" | head -20 | sed 's/^/        file capabilities: /'
+  is "$n" 0 "no file carries file capabilities" "$n file(s) carry file capabilities"
+else
+  bad "getcap is not available, so file capabilities were not checked"
+fi
 
 if [ "$PROC" = /proc ]; then
   # A child that backgrounds a sleep and exits: the sleep is reparented to PID 1 and, once it

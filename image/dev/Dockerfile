@@ -508,11 +508,21 @@ ENV SOPS_DISABLE_VERSION_CHECK=1
 # gt checks for a new release the same way.
 ENV GITEA_CLI_NO_UPDATE_NOTIFIER=1
 
+# No setuid or setgid file in the box. None is needed at runtime: the entrypoint drops to dev with
+# gosu (not setuid), and su, mount, passwd and the rest only matter to a box that could gain
+# privileges, which no_new_privs already stops. Without the bit each one is an ordinary program
+# run as dev. The packages behind them are Debian's required base (util-linux is Essential), so
+# they stay installed and lose only the bit. Each image does this after its last package
+# install, so none can bring a bit back unnoticed; the image smoke test checks the running box.
+RUN find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
+    && ! find / -xdev -type f -perm /6000 | grep .
+
 # Claude Code LAST: copied from the base image built alongside this one (see the top of
 # this file). Only ~/.local: the rest of the base's $HOME is installer residue that the
 # launcher's mounts (~/.claude, ~/.claude.json) cover at runtime anyway.
 COPY --from=claude --chown=dev:dev /home/dev/.local /home/dev/.local
 RUN gosu dev claude --version
+
 
 # ENTRYPOINT / CMD / USER(root) / WORKDIR / PATH are all inherited from the base's `os`
 # stage: the entrypoint still raises the firewall as root, then drops to the dev user.

@@ -30,3 +30,12 @@ RUN mkdir -p /opt/google/chrome \
 # Chromium's own sandbox is redundant here (the airlock container IS the sandbox)
 # and needs caps we don't grant, so projects should launch Chromium with
 # --no-sandbox. ENTRYPOINT / USER(root) / WORKDIR are inherited from dev.
+
+# No setuid or setgid file in the box. None is needed at runtime: the entrypoint drops to dev with
+# gosu (not setuid), and su, mount, passwd and the rest only matter to a box that could gain
+# privileges, which no_new_privs already stops. Without the bit each one is an ordinary program
+# run as dev. The packages behind them are Debian's required base (util-linux is Essential), so
+# they stay installed and lose only the bit. Each image does this after its last package
+# install, so none can bring a bit back unnoticed; the image smoke test checks the running box.
+RUN find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
+    && ! find / -xdev -type f -perm /6000 | grep .

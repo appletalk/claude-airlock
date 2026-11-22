@@ -10,5 +10,6 @@
     "type": "command",
     "command": "bash /etc/airlock/statusline.sh"
   },
-  "crossSessionInbound": "refuse"
+  "crossSessionInbound": "refuse",
+  "allowManagedHooksOnly": true
 }
