@@ -21,7 +21,7 @@
 set -uo pipefail
 
 PROC="${PROC:-/proc}"
-PROC="${PROC%/}"; PROC="${PROC:-/}"   # /proc/ is /proc (the orphan step compares the name)
+while [ "$PROC" != / ] && [ "${PROC%/}" != "$PROC" ]; do PROC="${PROC%/}"; done   # /proc/ is /proc (the orphan step compares the name)
 ROOTFS="${ROOTFS:-/}"
 GETCAP="${GETCAP:-getcap}"
 SELF="${SELF_PID:-$$}"

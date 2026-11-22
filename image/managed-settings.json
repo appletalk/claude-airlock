@@ -11,5 +11,6 @@
     "command": "exec /usr/bin/env -i PATH=/usr/bin:/bin HOME=/home/dev \"AIRLOCK_HOST_USER=$AIRLOCK_HOST_USER\" /bin/bash --noprofile --norc /etc/airlock/statusline.sh"
   },
   "crossSessionInbound": "refuse",
-  "allowManagedHooksOnly": true
+  "allowManagedHooksOnly": true,
+  "disableCommandPluginSources": true
 }

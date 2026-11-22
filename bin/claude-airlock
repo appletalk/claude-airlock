@@ -803,6 +803,7 @@ if [ "${1:-}" = "secret" ]; then
       else echo "  (none)"; fi ;;
     rm)
       _sk="${3:?usage: airlock secret rm KEY}"
+      case "$_sk" in ''|*[!A-Za-z0-9_]*) echo "airlock: invalid key '$_sk' (A-Z 0-9 _ only)" >&2; exit 1 ;; esac
       if [ -f "$_sstore" ] && grep -q "^${_sk}=" "$_sstore"; then sed -i "/^${_sk}=/d" "$_sstore"; echo "airlock: removed $_sk"
       elif [ -f "$_sstore" ]; then echo "airlock: $_sk is not set"; else echo "airlock: no secrets"; fi ;;
     *) echo "usage: airlock secret set KEY VALUE|pass:PATH  |  airlock secret list  |  airlock secret rm KEY" >&2; exit 1 ;;
@@ -2255,21 +2256,30 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   # Settings that make Claude run a command on its own (on events, or at start to fetch a
   # credential) are not the box's to keep: a box that wrote one would have it run in every later
   # session of this project. Hooks are refused anyway (allowManagedHooksOnly in the managed
-  # settings); the helpers have no managed switch, so they are dropped here each launch.
-  _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion'
+  # settings); the helpers have no managed switch, so they are dropped here each launch. The
+  # list follows Claude Code's own list of settings that hold a command (2.1.330), less
+  # statusLine (the managed one wins) and policyHelpers (honoured only from admin sources).
+  # If a filter fails, the box starts from the baseline alone: never from the unfiltered file.
+  _bsfallback() {
+    if cp -- "$_repo/config/box-settings.json" "$_bsd/fallback" 2>/dev/null; then _bscur="$_bsd/fallback"
+    else echo '{}' > "$_bsd/fallback"; _bscur="$_bsd/fallback"; fi
+    echo "airlock: WARNING: could not $1 in $_bs; the box's settings start from the airlock baseline" >&2
+  }
+  _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion processWrapper subagentStatusLine'
   _dropped="$(jq -r --arg k "$_cmdkeys" '($k | split(" ")) as $ks | [keys[] | select(. as $x | $ks | index($x))] | join(" ")' "$_bscur" 2>/dev/null || true)"
   if [ -n "$_dropped" ]; then
     if jq --arg k "$_cmdkeys" '($k | split(" ")) as $ks | with_entries(select(.key as $x | $ks | index($x) | not))' "$_bscur" > "$_bsd/nocmd" 2>/dev/null; then
       _bscur="$_bsd/nocmd"
       echo "airlock: removed $_dropped from the box's settings.json (a setting that runs a command; the box may not keep one)" >&2
     else
-      echo "airlock: WARNING: could not remove $_dropped from $_bs; hooks stay refused by the managed settings" >&2
+      _bsfallback "remove $_dropped"
     fi
   fi
   # `env` runs a command too: Claude passes it to everything it starts (the status line, the
   # Bash tool, git), so a box that wrote BASH_ENV, PATH, LD_PRELOAD or NODE_OPTIONS there would
   # run its own code in every later session. The box keeps only the names the baseline sets
-  # (config/box-settings.json) and the two asserted below; any other is dropped, with a notice
+  # (config/box-settings.json; their values are the baseline's when the merge above worked) and
+  # the two asserted below; any other is dropped, with a notice
   # that names only the plain ones (a name is box-written text, printed on the host terminal).
   _envallow="$(jq -c '[(.env // {} | keys[]), "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING"] | unique' "$_repo/config/box-settings.json" 2>/dev/null)" \
     || _envallow='["DISABLE_TELEMETRY","DISABLE_ERROR_REPORTING"]'
@@ -2283,7 +2293,7 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
       _bscur="$_bsd/noenv"
       echo "airlock: removed env $_envdrop from the box's settings.json (Claude passes env to every command it runs; the box keeps only the airlock's names)" >&2
     else
-      echo "airlock: WARNING: could not filter env in $_bs; the box keeps it" >&2
+      _bsfallback "filter env"
     fi
   fi
   _tfilter='.env |= ((if type == "object" then . else {} end) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
@@ -2634,10 +2644,10 @@ done
 # $AIRLOCK_PASTES: that directory, or else this project's $AIRLOCK_TMP/pastes.
 _pastes="$AIRLOCK_TMP/pastes"
 _paste_pin=""
-# The paste dir and the extra mounts come from anywhere on the host, so a mount there without
-# nosuid,nodev would carry that into the box (the workspace and the state dirs inherit them
-# from /home). Inert today (no capabilities, no_new_privs); podman takes the options, docker's
-# -v doesn't.
+# The paste dir and the extra mounts (the agents' queue and inbox) are often outside /home, on
+# a mount without nosuid,nodev, which a bind carries into the box. Inert today (no capabilities,
+# no_new_privs); podman takes the options, docker's -v doesn't. Other host binds keep the
+# source mount's flags.
 _hostbind=""
 [ "$AIRLOCK_ENGINE" != podman ] || _hostbind=",nosuid,nodev"
 if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then

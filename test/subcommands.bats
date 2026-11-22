@@ -24,6 +24,15 @@ setup() { setup_airlock_env; }
   [[ "$output" == *"NEVERSET is not set"* ]] && [[ "$output" != *removed* ]] || { echo "$output"; false; }
 }
 
+@test "secret rm refuses a key that isn't a plain name (it is a regex and a sed script)" {
+  p="$(mkproj)"
+  _launch "$p" secret set KEEP x
+  run _launch "$p" secret rm '.*'
+  [ "$status" -ne 0 ] && [[ "$output" == *"invalid key"* ]]
+  run _launch "$p" secret list
+  [[ "$output" == *"KEEP"* ]]
+}
+
 @test "secret rejects an invalid key" {
   run _launch "$(mkproj)" secret set "bad key" val
   [ "$status" -ne 0 ]

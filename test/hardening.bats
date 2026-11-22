@@ -279,17 +279,18 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
 # local), so a box cannot plant one for its next session or the workspace's next box.
 @test "the image's managed settings allow managed hooks only" {
   [ "$(jq -r '.allowManagedHooksOnly' "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = true ]
+  [ "$(jq -r '.disableCommandPluginSources' "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = true ]
 }
 
 # A box that writes a setting which makes Claude run a command (a hook, or a credential helper
 # run at start) must not keep it into the next launch; its other keys stay.
 @test "command-running keys the box wrote into its settings.json are removed at launch, with a notice" {
   p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
-  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch /tmp/x"}]}]},"apiKeyHelper":"/tmp/k","awsAuthRefresh":"x","awsCredentialExport":"x","otelHeadersHelper":"x","gcpAuthRefresh":"x","proxyAuthHelper":"x","fileSuggestion":{"type":"command","command":"x"},"theme":"dark"}' > "$sd/dot-claude/settings.json"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch /tmp/x"}]}]},"apiKeyHelper":"/tmp/k","awsAuthRefresh":"x","awsCredentialExport":"x","otelHeadersHelper":"x","gcpAuthRefresh":"x","proxyAuthHelper":"x","fileSuggestion":{"type":"command","command":"x"},"processWrapper":["x"],"subagentStatusLine":{"type":"command","command":"x"},"theme":"dark"}' > "$sd/dot-claude/settings.json"
   run _launch "$p"
-  [[ "$output" == *"removed apiKeyHelper awsAuthRefresh awsCredentialExport fileSuggestion gcpAuthRefresh hooks otelHeadersHelper proxyAuthHelper from the box's settings.json"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"removed apiKeyHelper awsAuthRefresh awsCredentialExport fileSuggestion gcpAuthRefresh hooks otelHeadersHelper processWrapper proxyAuthHelper subagentStatusLine from the box's settings.json"* ]] || { echo "$output"; false; }
   out="$(_box_settings "$p")"
-  for k in hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion; do
+  for k in hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion processWrapper subagentStatusLine; do
     [ "$(jq --arg k "$k" 'has($k)' <<<"$out")" = false ] || { echo "$k kept: $out"; false; }
   done
   [ "$(jq -r .theme <<<"$out")" = dark ]

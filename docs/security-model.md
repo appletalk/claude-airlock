@@ -108,18 +108,24 @@ write, and widening anything always prompts on the host.
   them; this removes the dependency on it. (Directories such as `/var/mail` keep their setgid
   bit, which only sets the group of a new file in them.)
 - The box's own `settings.json` cannot keep a setting that runs a command into its next
-  session. The managed settings allow managed hooks only, so no hook from the box's own
-  settings or the workspace's `.claude/` runs. Each launch removes `hooks` and the command
-  settings (`apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`,
-  `gcpAuthRefresh`, `proxyAuthHelper`, `fileSuggestion`) from that file, and every `env` name
+  session. The managed settings allow managed hooks only (so no hook from the box's own
+  settings or the workspace's `.claude/` runs) and refuse command-sourced plugins. Each launch
+  removes `hooks` and the command settings (`apiKeyHelper`, `awsAuthRefresh`,
+  `awsCredentialExport`, `otelHeadersHelper`, `gcpAuthRefresh`, `proxyAuthHelper`,
+  `fileSuggestion`, `processWrapper`, `subagentStatusLine`) from that file, and every `env` name
   but the airlock's own (Claude passes `env` to every command it starts, so `BASH_ENV`, `PATH`
-  or `LD_PRELOAD` there would run the box's code), with a notice. A setting written during a
-  session can still act in that session until the box ends. The managed status line runs with
-  an empty environment (`env -i`).
+  or `LD_PRELOAD` there would run the box's code), with a notice; if a filter fails, the box
+  starts from the airlock baseline. This needs `jq` on the host: without it the launcher warns
+  and leaves the file as it is. A setting written during a session can still act in that
+  session until the box ends.
+- The managed status line's bash starts from an empty environment (`env -i`, a fixed `PATH`),
+  so `BASH_ENV` or a `PATH` from any settings file can't steer it. The `/bin/sh` and `env` that
+  start it still load the dynamic loader's `LD_*` variables from `env`, which matters for the
+  workspace's settings (below).
 - Not covered: the workspace's `.claude/settings*.json` (`env`, `apiKeyHelper`) and
-  `.mcp.json`, MCP servers the box adds to its `~/.claude.json`, and plugins and skills the
-  box installs. The launcher doesn't rewrite project files; review them like the rest of a
-  touched workspace (below).
+  `.mcp.json`, MCP servers the box adds to its `~/.claude.json`, plugins and skills the box
+  installs, and MCP servers declared in its `~/.claude/agents/*.md`. The launcher doesn't
+  rewrite project files; review them like the rest of a touched workspace (below).
 - A process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork bomb.
 - An optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
 

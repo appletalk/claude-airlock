@@ -189,8 +189,9 @@ check() { run env -u DUMB_INIT_SETSID -u DUMB_INIT_DEBUG PROC="$P" ROOTFS="$R" G
   [[ "$output" == *"FAIL  getcap is not available"* ]]
 }
 
-# PROC=/proc/ (a trailing slash) is the real /proc: the orphan step runs (it compared the literal).
-@test "PROC with a trailing slash still runs the orphan step" {
-  run env PROC=/proc/ bash "$CHECK"
+# PROC=/proc/ (trailing slashes) is the real /proc: the orphan step runs (it compared the
+# literal). The file walk stays on the made-up tree with the stub getcap.
+@test "PROC with trailing slashes still runs the orphan step" {
+  run env PROC=/proc// ROOTFS="$R" GETCAP="$BATS_TEST_TMPDIR/getcap" bash "$CHECK"
   [[ "$output" == *"orphan"* ]] || [[ "$output" == *"zombie"* ]] || { echo "$output"; false; }
 }
