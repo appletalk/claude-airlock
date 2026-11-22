@@ -568,3 +568,23 @@ EOF
   [[ "$args" == *"--memory"* ]]
   [[ "$args" == *"6g"* ]]
 }
+
+# If a settings filter fails, the box starts from the airlock baseline, never from its own
+# unfiltered file: a jq that fails only the call listing the command keys stands in for any.
+@test "a failing settings filter places the baseline, not the box's file" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
+  printf '%s\n' '{"apiKeyHelper":"/x","env":{"LD_PRELOAD":"/x.so"},"model":"box"}' > "$sd/dot-claude/settings.json"
+  real="$(command -v jq)"
+  cat > "$STUBBIN/jq" <<STUB
+#!/bin/bash
+for a in "\$@"; do case "\$a" in *'index(\$x))] | join'*) exit 5 ;; esac; done
+exec "$real" "\$@"
+STUB
+  chmod +x "$STUBBIN/jq"
+  run _launch "$p"
+  rm -f "$STUBBIN/jq"
+  [[ "$output" == *"could not list the command settings"*"start from the airlock baseline"* ]] || { echo "$output"; false; }
+  out="$(_box_settings "$p")"
+  jq -e 'has("apiKeyHelper") or has("model") or (.env | has("LD_PRELOAD")) | not' <<<"$out" >/dev/null || { echo "$out"; false; }
+  [ "$(jq -r .env.DISABLE_TELEMETRY <<<"$out")" = 1 ]
+}

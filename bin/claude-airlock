@@ -2266,7 +2266,7 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
     echo "airlock: WARNING: could not $1 in $_bs; the box's settings start from the airlock baseline" >&2
   }
   _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion processWrapper subagentStatusLine'
-  _dropped="$(jq -r --arg k "$_cmdkeys" '($k | split(" ")) as $ks | [keys[] | select(. as $x | $ks | index($x))] | join(" ")' "$_bscur" 2>/dev/null || true)"
+  _dropped="$(jq -r --arg k "$_cmdkeys" '($k | split(" ")) as $ks | [keys[] | select(. as $x | $ks | index($x))] | join(" ")' "$_bscur" 2>/dev/null)" || { _dropped=""; _bsfallback "list the command settings"; }
   if [ -n "$_dropped" ]; then
     if jq --arg k "$_cmdkeys" '($k | split(" ")) as $ks | with_entries(select(.key as $x | $ks | index($x) | not))' "$_bscur" > "$_bsd/nocmd" 2>/dev/null; then
       _bscur="$_bsd/nocmd"
@@ -2313,6 +2313,8 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   rm -rf "$_bsd"
 elif ! command -v jq >/dev/null 2>&1; then
   echo "airlock: WARNING: jq not found; the box's settings.json was not checked (the mounted managed settings still apply)" >&2
+else
+  echo "airlock: WARNING: $_repo/config/box-settings.json is missing; the box's settings.json was not checked (the mounted managed settings still apply)" >&2
 fi
 
 # --- Concurrent-session guard: two sessions on ONE conversation ---
