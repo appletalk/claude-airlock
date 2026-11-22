@@ -7,6 +7,7 @@ load helper
 
 setup() {
   setup_airlock_env
+  HB=",nosuid,nodev"; [ "$ENGINE" != docker ] || HB=""   # podman adds them to host binds; docker -v takes neither
   T="$(readlink -f "$BATS_TEST_TMPDIR")"
   # stat stub: owners and modes from files ("value path" lines), the real stat otherwise; every
   # directory above the tmpdir is reported root's and closed, as /srv would be.
@@ -33,16 +34,16 @@ STUB
   p="$(mkproj em)"
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro"\n' "$Q/requests" "$Q/answers" > "$CFG"
   _launch "$p" >/dev/null 2>&1 || true
-  engine_args | grep -qx -- "$Q/requests:$Q/requests:rw"
-  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro"
+  engine_args | grep -qx -- "$Q/requests:$Q/requests:rw$HB"
+  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro$HB"
 }
 
 @test "extra mounts from the launching process add to the config's" {
   p="$(mkproj emenv)"
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro"\n' "$Q/answers" > "$CFG"
   AIRLOCK_EXTRA_MOUNTS="$Q/requests:rw" _launch "$p" >/dev/null 2>&1 || true
-  engine_args | grep -qx -- "$Q/requests:$Q/requests:rw"
-  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro"
+  engine_args | grep -qx -- "$Q/requests:$Q/requests:rw$HB"
+  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro$HB"
 }
 
 @test "the box-writable .airlock/config can't add an extra mount or managed settings" {
@@ -158,8 +159,8 @@ STUB
   p="$(mkproj emlines)"
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro\n%s:ro"\n' "$Q/requests" "$Q/answers" > "$CFG"
   : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
-  engine_args | grep -qx -- "$Q/requests:$Q/requests:ro"
-  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro"
+  engine_args | grep -qx -- "$Q/requests:$Q/requests:ro$HB"
+  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro$HB"
 }
 
 @test "extra mounts: read-write needs a root-owned dir (ours is read-only only); named twice, mounted once, ro wins; env-only mounted once; no globbing" {
@@ -170,11 +171,11 @@ STUB
   [[ "$output" == *"read-write needs a directory root owns"* ]]; if engine_args | grep -q -- "^$Q/mine:"; then return 1; fi
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:ro"\n' "$Q/mine" > "$CFG"
   : > "$ENGINE_ARGS_FILE"; _launch "$p" >/dev/null 2>&1 || true
-  engine_args | grep -qx -- "$Q/mine:$Q/mine:ro"
+  engine_args | grep -qx -- "$Q/mine:$Q/mine:ro$HB"
   # twice (config rw + env ro): one mount, read-only
   printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw"\n' "$Q/requests" > "$CFG"
   : > "$ENGINE_ARGS_FILE"; AIRLOCK_EXTRA_MOUNTS="$Q/requests:ro" _launch "$p" >/dev/null 2>&1 || true
-  [ "$(engine_args | grep -c -- "^$Q/requests:")" = 1 ]; engine_args | grep -qx -- "$Q/requests:$Q/requests:ro"
+  [ "$(engine_args | grep -c -- "^$Q/requests:")" = 1 ]; engine_args | grep -qx -- "$Q/requests:$Q/requests:ro$HB"
   # environment only (nothing in the config): once
   : > "$CFG"; : > "$ENGINE_ARGS_FILE"; AIRLOCK_EXTRA_MOUNTS="$Q/answers:ro" _launch "$p" >/dev/null 2>&1 || true
   [ "$(engine_args | grep -c -- "^$Q/answers:")" = 1 ]
@@ -358,4 +359,16 @@ mdfile() {  # mdfile <path> <text> [owner] [mode]
   printf 'PLANTED\n' >> "$(state_dir "$p")/dot-claude/CLAUDE.md"
   _launch "$p" >/dev/null 2>&1 || true
   [ "$(box_md "$p")" = "$(seed_md)" ]
+}
+
+# A host directory from outside /home can sit on a mount without nosuid,nodev; podman adds
+# both, docker's -v takes neither (it would refuse the run), so docker gets the plain mode.
+@test "extra mounts: nosuid,nodev under podman, the plain mode under docker" {
+  p="$(mkproj emopts)"
+  printf 'AIRLOCK_EXTRA_MOUNTS="%s:rw %s:ro"\n' "$Q/requests" "$Q/answers" > "$CFG"
+  AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro,nosuid,nodev"
+  AIRLOCK_ENGINE_OVERRIDE=docker _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- "$Q/requests:$Q/requests:rw"
+  engine_args | grep -qx -- "$Q/answers:$Q/answers:ro"
 }

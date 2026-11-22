@@ -15,9 +15,13 @@ setup() { setup_airlock_env; }
   run _launch "$p" secret list
   [[ "$output" == *"LIT = ***"* ]]                # literal value masked
 
-  _launch "$p" secret rm TOKEN
+  run _launch "$p" secret rm TOKEN
+  [[ "$output" == *"removed TOKEN"* ]]
   run _launch "$p" secret list
   [[ "$output" != *"TOKEN"* ]]
+  # a name that was never set says so, not "removed"
+  run _launch "$p" secret rm NEVERSET
+  [[ "$output" == *"NEVERSET is not set"* ]] && [[ "$output" != *removed* ]] || { echo "$output"; false; }
 }
 
 @test "secret rejects an invalid key" {

@@ -188,3 +188,9 @@ check() { run env -u DUMB_INIT_SETSID -u DUMB_INIT_DEBUG PROC="$P" ROOTFS="$R" G
   [ "$status" -ne 0 ]
   [[ "$output" == *"FAIL  getcap is not available"* ]]
 }
+
+# PROC=/proc/ (a trailing slash) is the real /proc: the orphan step runs (it compared the literal).
+@test "PROC with a trailing slash still runs the orphan step" {
+  run env PROC=/proc/ bash "$CHECK"
+  [[ "$output" == *"orphan"* ]] || [[ "$output" == *"zombie"* ]] || { echo "$output"; false; }
+}

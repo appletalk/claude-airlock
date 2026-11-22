@@ -14,6 +14,7 @@ load helper
 
 setup() {
   setup_airlock_env
+  HB=",nosuid,nodev"; [ "$ENGINE" != docker ] || HB=""   # podman adds them to host binds; docker -v takes neither
   # A 1x1 PNG and a BMP header, as the two shapes a real clipboard offers.
   PNG_B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
   # Keep scratch inside the bats tmpdir: the suite must not write to the real
@@ -530,7 +531,7 @@ mkinbox() {
   mkdir -p "$AIRLOCK_HOME/.config/claude-airlock"
   printf 'AIRLOCK_PASTE_DIR=%s\n' "$D" > "$AIRLOCK_HOME/.config/claude-airlock/config"
   _launch "$p" >/dev/null 2>&1 || true
-  engine_args | grep -qx -- "$D:$D:ro"
+  engine_args | grep -qx -- "$D:$D:ro$HB"
   ! engine_args | grep -q -- "^$D:$D:rw" || false
   engine_args | grep -qx -- "AIRLOCK_PASTES=$D"
 }

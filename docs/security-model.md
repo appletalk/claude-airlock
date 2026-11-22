@@ -105,11 +105,21 @@ write, and widening anything always prompts on the host.
 - No file in a box is setuid or setgid. Each image strips every bit after its last package
   install (the base system's `su`, `mount`, `passwd` and the like stay installed, as ordinary
   programs), and the image smoke test fails on a box that has one. no_new_privs already stopped
-  them; this removes the dependency on it.
-- A box cannot keep a setting that runs a command. The managed settings allow managed hooks only,
-  so no hook from the box's own settings or the workspace's `.claude/` runs, and each launch
-  removes `hooks` and the credential helpers (`apiKeyHelper`, `awsAuthRefresh`,
-  `awsCredentialExport`, `otelHeadersHelper`) from the box's `settings.json`, with a notice.
+  them; this removes the dependency on it. (Directories such as `/var/mail` keep their setgid
+  bit, which only sets the group of a new file in them.)
+- The box's own `settings.json` cannot keep a setting that runs a command into its next
+  session. The managed settings allow managed hooks only, so no hook from the box's own
+  settings or the workspace's `.claude/` runs. Each launch removes `hooks` and the command
+  settings (`apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`,
+  `gcpAuthRefresh`, `proxyAuthHelper`, `fileSuggestion`) from that file, and every `env` name
+  but the airlock's own (Claude passes `env` to every command it starts, so `BASH_ENV`, `PATH`
+  or `LD_PRELOAD` there would run the box's code), with a notice. A setting written during a
+  session can still act in that session until the box ends. The managed status line runs with
+  an empty environment (`env -i`).
+- Not covered: the workspace's `.claude/settings*.json` (`env`, `apiKeyHelper`) and
+  `.mcp.json`, MCP servers the box adds to its `~/.claude.json`, and plugins and skills the
+  box installs. The launcher doesn't rewrite project files; review them like the rest of a
+  touched workspace (below).
 - A process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork bomb.
 - An optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
 

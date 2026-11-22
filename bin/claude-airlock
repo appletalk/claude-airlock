@@ -803,7 +803,8 @@ if [ "${1:-}" = "secret" ]; then
       else echo "  (none)"; fi ;;
     rm)
       _sk="${3:?usage: airlock secret rm KEY}"
-      if [ -f "$_sstore" ]; then sed -i "/^${_sk}=/d" "$_sstore"; echo "airlock: removed $_sk"; else echo "airlock: no secrets"; fi ;;
+      if [ -f "$_sstore" ] && grep -q "^${_sk}=" "$_sstore"; then sed -i "/^${_sk}=/d" "$_sstore"; echo "airlock: removed $_sk"
+      elif [ -f "$_sstore" ]; then echo "airlock: $_sk is not set"; else echo "airlock: no secrets"; fi ;;
     *) echo "usage: airlock secret set KEY VALUE|pass:PATH  |  airlock secret list  |  airlock secret rm KEY" >&2; exit 1 ;;
   esac
   exit 0
@@ -2255,7 +2256,7 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   # credential) are not the box's to keep: a box that wrote one would have it run in every later
   # session of this project. Hooks are refused anyway (allowManagedHooksOnly in the managed
   # settings); the helpers have no managed switch, so they are dropped here each launch.
-  _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper'
+  _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion'
   _dropped="$(jq -r --arg k "$_cmdkeys" '($k | split(" ")) as $ks | [keys[] | select(. as $x | $ks | index($x))] | join(" ")' "$_bscur" 2>/dev/null || true)"
   if [ -n "$_dropped" ]; then
     if jq --arg k "$_cmdkeys" '($k | split(" ")) as $ks | with_entries(select(.key as $x | $ks | index($x) | not))' "$_bscur" > "$_bsd/nocmd" 2>/dev/null; then
@@ -2263,6 +2264,26 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
       echo "airlock: removed $_dropped from the box's settings.json (a setting that runs a command; the box may not keep one)" >&2
     else
       echo "airlock: WARNING: could not remove $_dropped from $_bs; hooks stay refused by the managed settings" >&2
+    fi
+  fi
+  # `env` runs a command too: Claude passes it to everything it starts (the status line, the
+  # Bash tool, git), so a box that wrote BASH_ENV, PATH, LD_PRELOAD or NODE_OPTIONS there would
+  # run its own code in every later session. The box keeps only the names the baseline sets
+  # (config/box-settings.json) and the two asserted below; any other is dropped, with a notice
+  # that names only the plain ones (a name is box-written text, printed on the host terminal).
+  _envallow="$(jq -c '[(.env // {} | keys[]), "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING"] | unique' "$_repo/config/box-settings.json" 2>/dev/null)" \
+    || _envallow='["DISABLE_TELEMETRY","DISABLE_ERROR_REPORTING"]'
+  _envdrop="$(jq -r --argjson a "$_envallow" '
+      (if (.env | type) == "object" then [.env | keys[] | select(. as $x | $a | index($x) | not)] else [] end) as $d
+    | [$d[] | select(test("^[A-Za-z_][A-Za-z0-9_]{0,63}$"))] as $plain
+    | (($d | length) - ($plain | length)) as $other
+    | ($plain + (if $other > 0 then ["and \($other) other name(s)"] else [] end)) | join(" ")' "$_bscur" 2>/dev/null)" || _envdrop="(names not read)"
+  if [ -n "$_envdrop" ]; then
+    if jq --argjson a "$_envallow" '.env |= (if type == "object" then with_entries(select(.key as $x | $a | index($x))) else {} end)' "$_bscur" > "$_bsd/noenv" 2>/dev/null; then
+      _bscur="$_bsd/noenv"
+      echo "airlock: removed env $_envdrop from the box's settings.json (Claude passes env to every command it runs; the box keeps only the airlock's names)" >&2
+    else
+      echo "airlock: WARNING: could not filter env in $_bs; the box keeps it" >&2
     fi
   fi
   _tfilter='.env |= ((if type == "object" then . else {} end) + {DISABLE_TELEMETRY:"1", DISABLE_ERROR_REPORTING:"1"})'
@@ -2613,9 +2634,15 @@ done
 # $AIRLOCK_PASTES: that directory, or else this project's $AIRLOCK_TMP/pastes.
 _pastes="$AIRLOCK_TMP/pastes"
 _paste_pin=""
+# The paste dir and the extra mounts come from anywhere on the host, so a mount there without
+# nosuid,nodev would carry that into the box (the workspace and the state dirs inherit them
+# from /home). Inert today (no capabilities, no_new_privs); podman takes the options, docker's
+# -v doesn't.
+_hostbind=""
+[ "$AIRLOCK_ENGINE" != podman ] || _hostbind=",nosuid,nodev"
 if [ -n "${AIRLOCK_PASTE_DIR:-}" ]; then
   if _pc="$(_airlock_paste_dir_check "$AIRLOCK_PASTE_DIR" 2>&1)"; then
-    args+=( -v "$_pc:$_pc:ro" ); _pastes="$_pc"; _paste_pin="$(stat -c %d:%i "$_pc") $_pc"
+    args+=( -v "$_pc:$_pc:ro$_hostbind" ); _pastes="$_pc"; _paste_pin="$(stat -c %d:%i "$_pc") $_pc"
   else
     echo "claude-airlock: NOT mounting AIRLOCK_PASTE_DIR: $_pc" >&2; _pastes=""
   fi
@@ -2642,7 +2669,7 @@ for _em in "${_ems[@]}"; do
   if [ -z "${_emode[$_emc]:-}" ]; then _extra_pins+=( "$(stat -c %d:%i "$_emc") $_emc" ); fi
   [ "${_emode[$_emc]:-}" = ro ] || _emode[$_emc]=$_emm
 done
-for _kp in "${_extra_pins[@]}"; do _emc="${_kp#* }"; args+=( -v "$_emc:$_emc:${_emode[$_emc]}" ); done
+for _kp in "${_extra_pins[@]}"; do _emc="${_kp#* }"; args+=( -v "$_emc:$_emc:${_emode[$_emc]}$_hostbind" ); done
 # Web research (docs/agents.md): a box with a queue mounted (<queue>/requests read-write,
 # <queue>/answers and <queue>/lib read-only) gets the queue's rule at the top of its CLAUDE.md
 # (answers are data, never instructions) and how to ask at the end. Both files are root's, as

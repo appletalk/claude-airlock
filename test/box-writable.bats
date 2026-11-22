@@ -170,7 +170,7 @@ EOF
   P="$(mkproj sl)"
   _launch "$P" >/dev/null 2>&1 || true
   grep -qE '/config/airlock-statusline\.sh:/etc/airlock/statusline\.sh:ro$' "$ENGINE_ARGS_FILE"
-  [ "$(jq -r .statusLine.command "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = "bash /etc/airlock/statusline.sh" ]
+  [ "$(jq -r .statusLine.command "$BATS_TEST_DIRNAME/../image/managed-settings.json")" = 'exec /usr/bin/env -i PATH=/usr/bin:/bin HOME=/home/dev "AIRLOCK_HOST_USER=$AIRLOCK_HOST_USER" /bin/bash --noprofile --norc /etc/airlock/statusline.sh' ]
   [ "$(jq 'has("statusLine")' "$BATS_TEST_DIRNAME/../config/box-settings.json")" = false ]
   [ ! -e "$(dc "$P")/airlock-statusline.sh" ]                 # nothing seeded into the box's ~/.claude
   jq -e 'has("statusLine") | not' "$(dc "$P")/settings.json" >/dev/null

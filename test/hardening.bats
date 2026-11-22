@@ -285,11 +285,11 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
 # run at start) must not keep it into the next launch; its other keys stay.
 @test "command-running keys the box wrote into its settings.json are removed at launch, with a notice" {
   p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
-  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch /tmp/x"}]}]},"apiKeyHelper":"/tmp/k","awsAuthRefresh":"x","awsCredentialExport":"x","otelHeadersHelper":"x","theme":"dark"}' > "$sd/dot-claude/settings.json"
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch /tmp/x"}]}]},"apiKeyHelper":"/tmp/k","awsAuthRefresh":"x","awsCredentialExport":"x","otelHeadersHelper":"x","gcpAuthRefresh":"x","proxyAuthHelper":"x","fileSuggestion":{"type":"command","command":"x"},"theme":"dark"}' > "$sd/dot-claude/settings.json"
   run _launch "$p"
-  [[ "$output" == *"removed apiKeyHelper awsAuthRefresh awsCredentialExport hooks otelHeadersHelper from the box's settings.json"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"removed apiKeyHelper awsAuthRefresh awsCredentialExport fileSuggestion gcpAuthRefresh hooks otelHeadersHelper proxyAuthHelper from the box's settings.json"* ]] || { echo "$output"; false; }
   out="$(_box_settings "$p")"
-  for k in hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper; do
+  for k in hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion; do
     [ "$(jq --arg k "$k" 'has($k)' <<<"$out")" = false ] || { echo "$k kept: $out"; false; }
   done
   [ "$(jq -r .theme <<<"$out")" = dark ]
@@ -297,6 +297,42 @@ _box_settings() { cat "$(state_dir "$1")/dot-claude/settings.json" 2>/dev/null; 
   # and nothing to remove: no notice
   run _launch "$p"
   [[ "$output" != *"removed "*"from the box's settings.json"* ]]
+}
+
+# env reaches every command Claude starts (the status line runs before the first prompt), so a
+# name the box planted there (BASH_ENV, PATH, LD_PRELOAD) must not survive a launch. The
+# baseline's names stay, with the baseline's values; a name that isn't plain text is counted,
+# never printed on the host terminal.
+@test "env names the box wrote into its settings.json are removed at launch, the airlock's kept" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
+  jq -n '{env: {BASH_ENV: "/home/dev/x.sh", LD_PRELOAD: "/home/dev/x.so", PATH: "/home/dev/bin", "\u001b]0;x\u0007": "1",
+               CLAUDE_CODE_SCROLL_SPEED: "99", DISABLE_TELEMETRY: "0"}, theme: "dark"}' > "$sd/dot-claude/settings.json"
+  run _launch "$p"
+  [[ "$output" == *"removed env BASH_ENV LD_PRELOAD PATH and 1 other name(s) from the box's settings.json"* ]] || { echo "$output"; false; }
+  [[ "$output" != *$'\e]0;'* ]]
+  out="$(_box_settings "$p")"
+  [ "$(jq -c '.env | keys' <<<"$out")" = "$(jq -c '[(.env | keys[]), "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING"] | unique' "$BATS_TEST_DIRNAME/../config/box-settings.json")" ] || { echo "$out"; false; }
+  [ "$(jq -r .env.CLAUDE_CODE_SCROLL_SPEED <<<"$out")" = "$(jq -r .env.CLAUDE_CODE_SCROLL_SPEED "$BATS_TEST_DIRNAME/../config/box-settings.json")" ]
+  [ "$(jq -r .env.DISABLE_TELEMETRY <<<"$out")" = 1 ]
+  [ "$(jq -r .theme <<<"$out")" = dark ]
+  run _launch "$p"
+  [[ "$output" != *"removed env"* ]]
+}
+
+# The managed status line starts from an empty environment: env from any settings file (the
+# workspace's .claude/ too, which the launcher doesn't touch) can't steer bash or its PATH.
+@test "the managed status line ignores BASH_ENV and PATH from the environment" {
+  command -v jq >/dev/null && command -v git >/dev/null || skip "needs jq and git"
+  d="$(mktemp -d)"; mkdir "$d/bin"
+  printf '#!/bin/sh\necho HIJACK\n' > "$d/bin/jq"; chmod +x "$d/bin/jq"
+  printf 'touch %s/ran\n' "$d" > "$d/be.sh"
+  cmd="$(jq -r .statusLine.command "$BATS_TEST_DIRNAME/../image/managed-settings.json")"
+  cmd="${cmd//\/etc\/airlock\/statusline.sh/$BATS_TEST_DIRNAME/../config/airlock-statusline.sh}"
+  out="$(echo '{"workspace":{"current_dir":"/"},"model":{"display_name":"M"}}' \
+    | env BASH_ENV="$d/be.sh" PATH="$d/bin:/usr/bin:/bin" AIRLOCK_HOST_USER=alice sh -c "$cmd")"
+  [ ! -e "$d/ran" ]
+  [[ "$out" != *HIJACK* ]] && [[ "$out" == alice* ]] && [[ "$out" == *M* ]] || { echo "$out"; false; }
+  rm -rf "$d"
 }
 
 # The box can write its settings.json. Valid JSON that is not an object used to make every
