@@ -77,7 +77,8 @@ _plant_tmp_links() {
   P="$(mkproj keep)"; mkdir -p "$(dc "$P")"
   printf '{"model":"box-choice","env":{"FOO":"bar"}}\n' > "$(dc "$P")/settings.json"
   _launch "$P" >/dev/null 2>&1 || true
-  jq -e '.model == "box-choice" and .env.FOO == "bar" and .env.DISABLE_TELEMETRY == "1"' "$(dc "$P")/settings.json" >/dev/null
+  # the box's own keys stay; its own env names don't (hardening.bats: env allowlist)
+  jq -e '.model == "box-choice" and (.env | has("FOO") | not) and .env.DISABLE_TELEMETRY == "1"' "$(dc "$P")/settings.json" >/dev/null
 }
 
 @test "no launcher write in dot-claude/ goes through a name of its own making" {
