@@ -99,12 +99,48 @@ share_rw = shr"
   done
 }
 
-@test "an exec'd command gets an init as PID 1 (signals reach it, the box stops with its unit); claude doesn't" {
+@test "an image with its own init: no engine --init for any box (exec, -p, shell, claude)" {
   p="$(mkproj exinit)"
+  for cmd in "exec -- true" "-p hi" "shell" ""; do
+    : > "$ENGINE_ARGS_FILE"
+    # shellcheck disable=SC2086  # word splitting of the subcommand is the point
+    _launch "$p" $cmd >/dev/null 2>&1 </dev/null || true
+    engine_args | grep -q '^ENGINE_INVOKED=' || { echo "$cmd: not launched"; return 1; }
+    if engine_args | grep -qx -- --init; then echo "$cmd: got --init"; return 1; fi
+    # and says so out loud, so a host default (containers.conf init = true) can't add one
+    engine_args | grep -qx -- --init=false || { echo "$cmd: no --init=false"; return 1; }
+  done
+}
+
+@test "an init label that doesn't name dumb-init counts as none (the gate fails closed)" {
+  p="$(mkproj exinitodd)"
+  for v in "<no value>" "dumb_init" "1"; do
+    : > "$ENGINE_ARGS_FILE"
+    STUB_IMAGE_INIT="$v" _launch "$p" exec -- true >/dev/null 2>&1 || true
+    engine_args | grep -qx -- --init || { echo "label '$v': exec got no --init"; return 1; }
+    if engine_args | grep -qx -- --init=false; then echo "label '$v': got --init=false"; return 1; fi
+  done
+}
+
+@test "an image without the init label: the engine's init for an exec'd command only (signals reach it, the box stops with its unit)" {
+  p="$(mkproj exinit0)"
+  export STUB_IMAGE_INIT=""
   _launch "$p" exec -- true >/dev/null 2>&1
   engine_args | grep -qx -- --init
   : > "$ENGINE_ARGS_FILE"; _launch "$p" -p hi >/dev/null 2>&1
   if engine_args | grep -qx -- --init; then echo "claude got --init"; return 1; fi
+}
+
+@test "the entrypoint runs the command under dumb-init after the drop, with its DUMB_INIT_* cleared" {
+  ep="$BATS_TEST_DIRNAME/../image/entrypoint.sh"
+  [ "$(grep -v '^[[:space:]]*#' "$ep" | grep -v '^[[:space:]]*$' | tail -1)" = 'exec /usr/sbin/gosu dev /usr/bin/dumb-init -- "$@"' ]
+  grep -qx 'while IFS= read -r _v; do unset "$_v"; done < <(compgen -e DUMB_INIT_ || true)' "$ep"
+  # The clearing comes before the exec, and nothing else execs the command.
+  [ "$(grep -c '^exec ' "$ep")" = 1 ]
+}
+
+@test "the base image carries the init label (its package: install.bats)" {
+  grep -qx 'LABEL org.claude-airlock.init="dumb-init"' "$BATS_TEST_DIRNAME/../image/Dockerfile"
 }
 
 @test "a live peer session: a headless claude -p --continue is refused without reading its input" {

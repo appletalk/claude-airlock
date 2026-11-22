@@ -307,6 +307,28 @@ setup() { setup_airlock_env; }
 # resolv.conf, so the doctor would be testing (and warning about) a box that never runs.
 _doctor_net_dns() { grep -E '^(--network=|--dns=|AIRLOCK_HOST_DNS=)' "$ENGINE_ARGS_FILE" | sort; }
 
+# The image smoke test runs three boxes (the init checks in the firewall and the proxy posture,
+# then the validators): each with a network must get the same network and resolvers (the proxy
+# one has none: --network=none, skipped here). Prints the first set, then any run that differs
+# (and says so when fewer than two boxes ran), so a comparison against one box fails on any
+# difference.
+_smoke_net_dns() {
+  local line first="" run="" is_run="" s sets=()
+  while IFS= read -r line; do
+    if [ -z "$first" ]; then first=1; [ "$line" != run ] || is_run=1; fi
+    case "$line" in
+      --network=none) is_run="" ;;
+      ENGINE_INVOKED=*)
+        [ -z "$is_run" ] || sets+=( "$(printf '%s' "$run" | sort)" )
+        first="" run="" is_run="" ;;
+      --network=*|--dns=*|AIRLOCK_HOST_DNS=*) run+="$line"$'\n' ;;
+    esac
+  done < "$ENGINE_ARGS_FILE"
+  [ "${#sets[@]}" -ge 2 ] || printf 'ONLY %s SMOKE BOX(ES)\n' "${#sets[@]}"
+  printf '%s\n' "${sets[0]-}"
+  for s in "${sets[@]}"; do [ "$s" = "${sets[0]}" ] || printf 'A RUN DIFFERS:\n%s\n' "$s"; done
+}
+
 # Run the doctor for engine $1 hermetically, passing only the environment `make doctor`
 # and install.sh do (plus any VAR=value arguments).
 _doctor() {
@@ -374,11 +396,41 @@ _doctor_out() {
       AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
       ${old:+STUB_PASTA_OLD=1 STUB_PODMAN_VERSION=4.9.3} AIRLOCK_PODMAN_NETWORK="$net" AIRLOCK_DNS="$dns" \
       bash "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh" >/dev/null 2>&1 || true
-    smoke="$(_doctor_net_dns)"
+    smoke="$(_smoke_net_dns)"
     [ -n "$launched" ] || { echo "$c: launcher recorded nothing"; false; }
     [ "$smoke" = "$launched" ] \
       || { printf '%s\nlauncher:\n%s\nsmoke:\n%s\n' "$c" "$launched" "$smoke"; false; }
   done
+}
+
+# The smoke test's init boxes are only a proof if they start the way the launcher's do.
+@test "the image smoke test's init boxes: both postures, started as root under keep-id, the proxy one without a network or firewall caps" {
+  printf 'nameserver ::1\nnameserver 127.0.0.1\n' > "$BATS_TEST_TMPDIR/resolv.loop"
+  : > "$ENGINE_ARGS_FILE"
+  env -i PATH="$STUBBIN:/usr/bin:/usr/sbin:/bin" HOME="$AIRLOCK_HOME" USER=airlock-test \
+    ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE=podman AIRLOCK_IMAGE=claude-airlock:dev \
+    AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
+    bash "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh" >/dev/null 2>&1 || true
+  # split the record into one file per engine call that ran init-checks
+  awk -v d="$BATS_TEST_TMPDIR" '/^ENGINE_INVOKED=/ { n++; next } { print > (d "/call" n) }' "$ENGINE_ARGS_FILE"
+  local f inits=() fw="" px=""
+  for f in "$BATS_TEST_TMPDIR"/call*; do
+    grep -qx /usr/local/bin/init-checks "$f" || continue
+    inits+=( "$f" )
+    if grep -qx -- --network=none "$f"; then px="$f"; else fw="$f"; fi
+  done
+  [ "${#inits[@]}" = 2 ] || { echo "init boxes: ${#inits[@]}"; false; }
+  [ -n "$fw" ] && [ -n "$px" ]
+  for f in "$fw" "$px"; do
+    grep -qx -- --userns=keep-id:uid=1000,gid=1000 "$f" || { echo "$f: no keep-id"; false; }
+    grep -qx -- --user=0:0 "$f" || { echo "$f: no --user=0:0"; false; }
+    grep -qx -- --security-opt=no-new-privileges "$f"
+    grep -qx -- --cap-drop=ALL "$f"
+    if grep -q -- '--entrypoint' "$f"; then echo "$f: bypasses the entrypoint"; false; fi
+  done
+  grep -qx -- --cap-add=NET_ADMIN "$fw"
+  if grep -qx -- --cap-add=NET_ADMIN "$px"; then echo "proxy box has NET_ADMIN"; false; fi
+  grep -q '^AIRLOCK_EGRESS_PROXY=' "$px"
 }
 
 @test "the image smoke test takes the network and resolvers from the host config" {
@@ -390,7 +442,7 @@ _doctor_out() {
     ENGINE_ARGS_FILE="$ENGINE_ARGS_FILE" AIRLOCK_ENGINE=podman AIRLOCK_IMAGE=claude-airlock:dev \
     AIRLOCK_HOST_RESOLV_FILES="$BATS_TEST_TMPDIR/resolv.loop" \
     bash "$BATS_TEST_DIRNAME/../scripts/image-smoke.sh" >/dev/null 2>&1 || true
-  smoke="$(_doctor_net_dns)"
+  smoke="$(_smoke_net_dns)"
   [[ "$smoke" == *"--dns=192.0.2.53"*"--dns=2001:db8::53"*"--network=slirp4netns"* ]] || { echo "smoke: $smoke"; false; }
   : > "$ENGINE_ARGS_FILE"
   _doctor podman

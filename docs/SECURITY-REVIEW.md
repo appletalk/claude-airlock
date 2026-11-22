@@ -89,7 +89,7 @@ Stated plainly so the findings below sit in context.
 - Outbound network is default-DROP on IPv4 and IPv6; only allowlisted destinations on
   TCP/443 (plus SSH/22 to GitHub and DNS/53 to the configured resolvers) leave the box.
   The firewall runs as root before the agent starts, the agent runs as non-root `dev`
-  with no capabilities and `no-new-privileges`, and the firewall self-verifies both
+  with no usable capability and `no-new-privileges`, and the firewall self-verifies both
   directions on every family the box can use.
 - The host's `~/.claude` credentials, the container/engine socket, and other projects are
   not mounted. Grants live host-side and the box cannot approve its own.

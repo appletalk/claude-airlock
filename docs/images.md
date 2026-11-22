@@ -65,7 +65,9 @@ only that valid input passes would not catch a validator that has quietly stoppe
 validating. It also covers the offline halves of the infra clients (`kubectl kustomize`,
 `helm lint|template`, `sops filestatus`), plus node, pwsh, Go (`go test`, a short fuzz
 run, `go vet`, and `GOTOOLCHAIN=local` refusing to download a newer toolchain) and
-`airlock-pg-start`.
+`airlock-pg-start`. First, through the image's real entrypoint, it checks the box's init
+(`scripts/init-checks.sh`): PID 1 is dumb-init as `dev`, no process runs as root or holds a
+capability, and an orphaned process is reaped.
 
 ## What is pinned
 

@@ -65,16 +65,16 @@ active_at() { find -P "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name "$u
 # How the chat ends. The kernel sends a hangup (the tmux server going at stop or at the backstop)
 # only to this shell, the pane's session leader; the box is in this shell's process group, so the
 # handler passes the hangup on to the group, as a session leader's exit would. The launcher waits
-# for podman before it acts on a hangup, and Claude as the container's PID 1 may ignore it, so a
-# box still there after $grace seconds is stopped by its container (found by the session id it
-# was given), then killed. Then this shell writes the record. The box runs in the background and
-# is waited for, so the handler runs at once (bash runs a trap only after a foreground command
-# has finished); it starts with no signal ignored (a background job inherits INT and QUIT
-# ignored) and the pane's terminal as its stdin. This shell ignores Ctrl-C itself (a prompt of
-# the launcher's, in cooked mode, would otherwise end it and lose the record). The box gets
-# INT and QUIT back through env --default-signal: bash 5.3 keeps INT ignored in the subshell
-# despite its `trap - INT` (this shell's own `trap '' INT`), so the launcher would start deaf to
-# Ctrl-C.
+# for podman before it acts on a hangup, and a box on an image without its own init runs Claude as
+# the container's PID 1, which may ignore it, so a box still there after $grace seconds is stopped
+# by its container (found by the session id it was given), then killed. Then this shell writes the
+# record. The box runs in the background and is waited for, so the handler runs at once (bash runs
+# a trap only after a foreground command has finished); it starts with no signal ignored (a
+# background job inherits INT and QUIT ignored) and the pane's terminal as its stdin. This shell
+# ignores Ctrl-C itself (a prompt of the launcher's, in cooked mode, would otherwise end it and
+# lose the record). The box gets INT and QUIT back through env --default-signal: bash 5.3 keeps
+# INT ignored in the subshell despite its `trap - INT` (this shell's own `trap '' INT`), so the
+# launcher would start deaf to Ctrl-C.
 grace="${AGENTS_WEB_STOP_GRACE:-15}"
 why='exit' hup=0
 trap 'why=${why/exit/stop}; hup=1; trap "" HUP; kill -HUP 0 2>/dev/null' HUP

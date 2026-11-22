@@ -29,8 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG APT_REFRESH=unkeyed
 LABEL org.claude-airlock.apt-refresh="$APT_REFRESH"
 # Only what running Claude Code and the airlock machinery needs: the firewall
-# (iptables, ipset, iproute2, dnsutils, aggregate, curl, jq), the privilege drop (gosu)
-# and the proxy bridge (socat). Developer tools (git, gh, make, less, vim, neovim, zsh, ripgrep)
+# (iptables, ipset, iproute2, dnsutils, aggregate, curl, jq), the privilege drop (gosu),
+# the box's init (dumb-init) and the proxy bridge (socat). Developer tools (git, gh, make, less, vim, neovim, zsh, ripgrep)
 # live in the dev image; Claude Code ships its own ripgrep. python3 (the bare
 # interpreter, no pip or venv) is here so helper scripts can run in a base-only box;
 # they run it isolated (`python3 -I`).
@@ -38,6 +38,10 @@ LABEL org.claude-airlock.apt-refresh="$APT_REFRESH"
 # socat bridges a loopback port to a host proxy's Unix socket: Claude Code's HTTPS_PROXY
 # must be an http:// URL, so a box with no network reaches the proxy through it. It is a
 # general relay, but curl and bash already give a box as much.
+#
+# dumb-init is PID 1 once the entrypoint has dropped to the agent user (see entrypoint.sh):
+# it reaps orphaned processes, which otherwise stay zombies until the box ends and count
+# against its pid limit, and it passes signals on to the command.
 RUN echo "apt refresh key: ${APT_REFRESH}" \
     && apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
@@ -51,6 +55,7 @@ RUN echo "apt refresh key: ${APT_REFRESH}" \
       dnsutils \
       aggregate \
       gosu \
+      dumb-init \
       socat \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -90,6 +95,10 @@ COPY entrypoint.sh /usr/local/bin/airlock-entrypoint
 # This entrypoint can run a box with no network through a host proxy socket (`airlock
 # egress proxy`); the launcher refuses that posture on images without this label.
 LABEL org.claude-airlock.egress-proxy="1"
+# This entrypoint runs the command under its own init (dumb-init, as the agent user); the
+# launcher then passes no engine --init. An image without the label gets the engine's init
+# for an exec'd command, as before.
+LABEL org.claude-airlock.init="dumb-init"
 # Claude Code's managed (policy) settings: telemetry, error reporting, the auto-updater and
 # claude.ai connectors off. Policy settings are applied after user, project and local
 # settings, so no settings file the box can write (its ~/.claude, or the workspace's
@@ -103,7 +112,7 @@ RUN chmod 0444 /etc/airlock/firewall.conf /etc/claude-code/managed-settings.json
 ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
 
 # Container starts as root so the entrypoint can raise the firewall, then drops
-# to the agent user before exec'ing Claude.
+# to the agent user and exec's Claude under dumb-init.
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/airlock-entrypoint"]
 CMD ["claude"]

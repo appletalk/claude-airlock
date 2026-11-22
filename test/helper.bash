@@ -45,12 +45,13 @@ if [ "\${1:-}" = info ] && [[ "\$*" == *Host.Pasta.Executable* ]]; then
   echo "Copyright Red Hat"
   exit 0
 fi
-# The launcher's image check (installed? proxy posture label?): answered, not recorded.
-# STUB_IMAGE_EGRESS_PROXY is the label value (default 1, an image that has it; empty for one
-# that predates it); STUB_IMAGE_MISSING=1 is an image this account does not have.
+# The launcher's image check (installed? proxy posture label? own init?): answered, not
+# recorded, as the engine prints the two labels: "<egress-proxy>|<init>". STUB_IMAGE_EGRESS_PROXY
+# and STUB_IMAGE_INIT are the label values (defaults 1 and dumb-init, an image that has both;
+# empty for one that predates them); STUB_IMAGE_MISSING=1 is an image this account does not have.
 if [ "\${1:-}" = image ] && [ "\${2:-}" = inspect ] && [[ "\$*" == *org.claude-airlock.egress-proxy* ]]; then
   [ -z "\${STUB_IMAGE_MISSING:-}" ] || exit 125
-  echo "\${STUB_IMAGE_EGRESS_PROXY-1}"
+  echo "\${STUB_IMAGE_EGRESS_PROXY-1}|\${STUB_IMAGE_INIT-dumb-init}"
   exit 0
 fi
 # The launcher's box-name check (is the name taken?): answered, not recorded. STUB_TAKEN_NAMES
@@ -171,6 +172,7 @@ _launch_env() {
     ${FAKE_OWNERS:+FAKE_OWNERS="$FAKE_OWNERS"}
     ${FAKE_FSTYPE:+FAKE_FSTYPE="$FAKE_FSTYPE"}
     ${STUB_IMAGE_EGRESS_PROXY+STUB_IMAGE_EGRESS_PROXY="$STUB_IMAGE_EGRESS_PROXY"}
+    ${STUB_IMAGE_INIT+STUB_IMAGE_INIT="$STUB_IMAGE_INIT"}
     ${STUB_IMAGE_MISSING:+STUB_IMAGE_MISSING="$STUB_IMAGE_MISSING"}
     ${STUB_RUN_EXIT:+STUB_RUN_EXIT="$STUB_RUN_EXIT"}
     ${STUB_TAKEN_NAMES:+STUB_TAKEN_NAMES="$STUB_TAKEN_NAMES"}

@@ -294,18 +294,19 @@ assert_proxy_box() {
   refute launched
 }
 
-@test "secrets cannot set AIRLOCK_*, *_PROXY, shell, loader or libc variables, and stored ones are skipped" {
+@test "secrets cannot set AIRLOCK_*, *_PROXY, DUMB_INIT_*, shell, loader or libc variables, and stored ones are skipped" {
   p="$(mkproj psec)"
-  for k in AIRLOCK_EGRESS_PROXY HTTPS_PROXY https_proxy NO_PROXY AIRLOCK_EXTRA_EGRESS BASH_ENV ENV BASHOPTS SHELLOPTS UID EUID HOME LD_PRELOAD LD_LIBRARY_PATH GCONV_PATH GLIBC_TUNABLES LOCPATH NLSPATH HOSTALIASES RES_OPTIONS LOCALDOMAIN TMPDIR TZDIR GETCONF_DIR MALLOC_TRACE NIS_PATH RESOLV_HOST_CONF; do
+  for k in AIRLOCK_EGRESS_PROXY HTTPS_PROXY https_proxy NO_PROXY AIRLOCK_EXTRA_EGRESS DUMB_INIT_SETSID DUMB_INIT_DEBUG BASH_ENV ENV BASHOPTS SHELLOPTS UID EUID HOME LD_PRELOAD LD_LIBRARY_PATH GCONV_PATH GLIBC_TUNABLES LOCPATH NLSPATH HOSTALIASES RES_OPTIONS LOCALDOMAIN TMPDIR TZDIR GETCONF_DIR MALLOC_TRACE NIS_PATH RESOLV_HOST_CONF; do
     run _launch "$p" secret set "$k" x
     [ "$status" -ne 0 ] || { echo "$k accepted"; false; }
     [[ "$output" == *"is reserved"* ]]
   done
   _launch "$p" secret set OK_KEY fine
-  printf 'AIRLOCK_EGRESS_PROXY=/x.sock\nHTTPS_PROXY=http://evil:1\nBASH_ENV=/tmp/x\nLD_PRELOAD=/tmp/x.so\nUID=0\n' >> "$(state_dir "$p")/secrets"
+  printf 'AIRLOCK_EGRESS_PROXY=/x.sock\nHTTPS_PROXY=http://evil:1\nBASH_ENV=/tmp/x\nLD_PRELOAD=/tmp/x.so\nUID=0\nDUMB_INIT_SETSID=0\n' >> "$(state_dir "$p")/secrets"
   run _launch "$p"
   [[ "$output" == *"ignoring secret AIRLOCK_EGRESS_PROXY"* ]]
   [[ "$output" == *"ignoring secret HTTPS_PROXY"* ]]
+  [[ "$output" == *"ignoring secret DUMB_INIT_SETSID"* ]]
   [[ "$output" == *"ignoring secret BASH_ENV"* ]]
   [[ "$output" == *"ignoring secret LD_PRELOAD"* ]]
   [[ "$output" == *"ignoring secret UID"* ]]

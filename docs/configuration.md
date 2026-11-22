@@ -359,8 +359,14 @@ preferences, not sandbox facts, and now live in the personal example: copy it to
 
 A box asks the engine for a terminal only when the launcher has one (on stdin and stdout), so
 `airlock -p` and `airlock exec` work from a script or a service unit. The box's stdout is the
-command's own; the firewall logs to stderr. An `exec` box runs its command under the engine's
-init (catatonit under podman), so stopping a unit that runs one stops the box.
+command's own; the firewall logs to stderr. Every box runs its command (Claude, `airlock shell`
+or an `exec`'d command) under the image's init, dumb-init, started as `dev` after the firewall:
+it reaps orphaned processes, so zombies do not pile up against the pid limit, and passes signals
+on, so stopping a unit that runs a box stops it. The command's exit status is the box's; a
+command that does not exist exits 2 with dumb-init's message (it was 1 with gosu's). An image
+built before the init (no `org.claude-airlock.init` label) gets the engine's init (catatonit
+under podman) for an `exec` box instead, as before; rebuild it (`make install-airlock`) to
+drop that root-owned init.
 
 **Prompts need a terminal.** The launcher asks its questions (a share or egress grant the
 project's config requests, a second session on the project) only of a terminal. Without one on

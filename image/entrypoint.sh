@@ -90,4 +90,14 @@ fi
 
 export HOME=/home/dev
 export PATH="$AGENT_PATH"
-exec /usr/sbin/gosu dev "$@"
+# The command runs under an init, started after the drop, so it runs as dev with no
+# usable capability and no root process outlives this script. Without one the command itself
+# is PID 1: it reaps nothing, so every orphan stays a zombie until the box ends and counts
+# against the pid limit, and a signal it has no handler for is ignored. dumb-init reaps,
+# passes signals on and exits with the command's status. Its default mode makes the
+# command a session leader that keeps the terminal, the place the command had as PID 1,
+# so the terminal behaves as before (job control in `airlock shell` included).
+# DUMB_INIT_SETSID=0 would switch that mode off and DUMB_INIT_DEBUG would write to the
+# terminal: the box's environment (secrets included) does not configure its init.
+while IFS= read -r _v; do unset "$_v"; done < <(compgen -e DUMB_INIT_ || true)
+exec /usr/sbin/gosu dev /usr/bin/dumb-init -- "$@"

@@ -258,7 +258,7 @@ make hooks       # install the git hooks (lint + tests, and no site details: see
 make lint        # shellcheck the launcher, firewall and helper scripts (+ zsh -n on the integration)
 make test        # run the bats suite against both engines (podman + docker)
 make check       # lint + test (what the hook runs)
-make image-smoke # prove the dev image's validators work offline (needs a built :dev)
+make image-smoke # prove the dev image's init and validators (offline; needs a built :dev)
 make doctor      # live containment test on this host
 ```
 

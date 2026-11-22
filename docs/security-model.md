@@ -97,6 +97,11 @@ write, and widening anything always prompts on the host.
   `GCONV_PATH`, `GLIBC_TUNABLES`, `LOCPATH`, `NLSPATH`, `HOSTALIASES`, `RES_OPTIONS`,
   `LOCALDOMAIN`, and the rest of glibc's secure-execution list) cannot be set by a secret,
   and the entrypoint's interpreter is `/bin/bash` by path, never looked up in the box's PATH.
+- No root process outlives the start: the entrypoint raises the firewall as root, then
+  drops to `dev` and execs the box's init (dumb-init) in its own place, so PID 1 is `dev`
+  with no usable capability. The engine's `--init` would run as root for the box's whole
+  life; the launcher passes `--init=false` to images that carry the init, and `--init` only
+  for an `exec` box on an image built before it.
 - A process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork bomb.
 - An optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
 

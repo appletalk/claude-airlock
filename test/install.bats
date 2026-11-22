@@ -96,7 +96,7 @@ EOF
   apt_pkgs() { awk '/apt-get install/{f=1} f{print} /apt-get clean/{f=0}' "$1"; }
   base_pkgs="$(apt_pkgs "$base")"
   dev_pkgs="$(apt_pkgs "$dev")"
-  for p in ca-certificates curl jq python3 iptables ipset iproute2 dnsutils aggregate gosu socat; do
+  for p in ca-certificates curl jq python3 iptables ipset iproute2 dnsutils aggregate gosu dumb-init socat; do
     grep -qE "^[[:space:]]+$p \\\\\$" <<<"$base_pkgs" || { echo "base lacks $p"; false; }
   done
   for p in git gh make less vim neovim zsh ripgrep xxd file tree sqlite3 moreutils zstd shfmt; do

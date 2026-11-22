@@ -756,10 +756,11 @@ fi
 # GCONV_PATH, GLIBC_TUNABLES, LOCPATH, NLSPATH, HOSTALIASES, RES_OPTIONS, LOCALDOMAIN and the
 # rest of glibc's secure-execution list (TMPDIR, TZDIR, GETCONF_DIR, MALLOC_*, NIS_PATH,
 # RESOLV_HOST_CONF). PATH stays allowed: the entrypoint resets it for root (its interpreter is
-# /bin/bash, not looked up) and hands it to the command.
+# /bin/bash, not looked up) and hands it to the command. And the box init's DUMB_INIT_* (the
+# entrypoint clears them too: the init is not configurable from the box's environment).
 _airlock_secret_reserved() {
   case "$1" in
-    AIRLOCK_*|*_PROXY|*_proxy) return 0 ;;
+    AIRLOCK_*|*_PROXY|*_proxy|DUMB_INIT_*) return 0 ;;
     BASH_ENV|ENV|BASHOPTS|SHELLOPTS|UID|EUID|HOME|LD_*) return 0 ;;
     GCONV_PATH|GLIBC_TUNABLES|LOCPATH|NLSPATH|HOSTALIASES|RES_OPTIONS|LOCALDOMAIN) return 0 ;;
     TMPDIR|TZDIR|GETCONF_DIR|MALLOC_*|NIS_PATH|RESOLV_HOST_CONF) return 0 ;;
@@ -776,7 +777,7 @@ if [ "${1:-}" = "secret" ]; then
       _sk="${3:?usage: airlock secret set KEY VALUE|pass:PATH}"
       case "$_sk" in ''|*[!A-Za-z0-9_]*) echo "airlock: invalid key '$_sk' (A-Z 0-9 _ only)" >&2; exit 1 ;; esac
       if _airlock_secret_reserved "$_sk"; then
-        echo "airlock: '$_sk' is reserved: AIRLOCK_* and *_PROXY are set by the launcher, and shell, loader and libc variables (BASH_ENV, UID, HOME, LD_*, GLIBC_TUNABLES, ...) are never taken from a secret" >&2; exit 1
+        echo "airlock: '$_sk' is reserved: AIRLOCK_*, *_PROXY and DUMB_INIT_* are set by the launcher or the image, and shell, loader and libc variables (BASH_ENV, UID, HOME, LD_*, GLIBC_TUNABLES, ...) are never taken from a secret" >&2; exit 1
       fi
       shift 3; _sv="$*"
       [ -n "$_sv" ] || { echo "airlock: no value given for $_sk" >&2; exit 1; }
@@ -3122,7 +3123,7 @@ if [ -f "$SECRETS_FILE" ]; then
     _skey="$(printf '%s' "${_sline%%=*}" | tr -d '[:space:]')"
     case "$_skey" in ''|*[!A-Za-z0-9_]*) continue ;; esac
     if _airlock_secret_reserved "$_skey"; then
-      echo "claude-airlock: ignoring secret $_skey: a reserved name (launcher, shell, loader or libc variable; airlock secret rm $_skey)" >&2
+      echo "claude-airlock: ignoring secret $_skey: a reserved name (launcher, image, shell, loader or libc variable; airlock secret rm $_skey)" >&2
       continue
     fi
     _sval="$(printf '%s' "${_sline#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -3294,10 +3295,6 @@ fi
 # out. The output still reaches the caller (the terminal, or the stdout and stderr of
 # `airlock -p` and `airlock exec`); only the engine's own log (`podman logs`) stays empty.
 args+=( --log-driver none )
-# An exec'd command is the box's PID 1, where a signal with no handler is ignored: stopping
-# the unit that ran it would wait out its timeout and leave the box running. An init (the
-# engine's own: catatonit under podman, docker-init under docker) passes signals on and reaps.
-[ ${#AIRLOCK_EXEC[@]} -eq 0 ] || args+=( --init )
 
 # --- Network and DNS (shared with the doctor's box: lib/host-dns.sh) ---------------
 # Assembled here, after every prompt and guard, because it asks podman and pasta what
@@ -3307,12 +3304,33 @@ args+=( --log-driver none )
 source "$_repo/lib/host-dns.sh"
 # The image must be installed for this account: an account can hold base without dev (a
 # bundle reader on base loads no dev). Left to the run, a missing image becomes a registry
-# pull, refused or opaque. The same query answers the proxy posture's label check below.
-if ! _img_proxy="$("$AIRLOCK_ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}' "$AIRLOCK_IMAGE" 2>/dev/null)"; then
+# pull, refused or opaque. The same query answers the proxy posture's label check below and
+# whether the image brings its own init.
+if ! _img_labels="$("$AIRLOCK_ENGINE" image inspect --format '{{index .Config.Labels "org.claude-airlock.egress-proxy"}}|{{index .Config.Labels "org.claude-airlock.init"}}' "$AIRLOCK_IMAGE" 2>/dev/null)"; then
   echo "claude-airlock: $AIRLOCK_IMAGE is not installed for this account." >&2
   echo "  Install it (make install-airlock, or from a bundle: set AIRLOCK_IMAGE to it in this account's" >&2
   echo "  config and run install-bundle.sh again), or run another image." >&2
   exit 1
+fi
+_img_proxy="${_img_labels%%|*}"
+_img_init=""
+case "$_img_labels" in *'|'*) _img_init="${_img_labels#*|}" ;; esac
+# An image with the init label runs every command under its own init, started after the
+# privilege drop (image/entrypoint.sh): PID 1 is the agent user, and orphans are reaped.
+# An older image (a project's config can still select one) has none, so an exec'd command
+# would be the box's PID 1, where a signal with no handler is ignored: stopping the unit
+# that ran it would wait out its timeout and leave the box running. It gets the engine's
+# init (catatonit under podman, docker-init under docker), which passes signals on and
+# reaps, but runs as the box's root for the box's whole life: kept to exec boxes on old
+# images only. Claude and `airlock shell` on an old image run without one, as before.
+# The label must name the init exactly: anything else (a typo, an engine's "<no value>")
+# is an image without one. An image with it says --init=false out loud, so a host default
+# (containers.conf `init = true`, docker's daemon.json "init": true) cannot put a root init
+# above it.
+if [ "$_img_init" = dumb-init ]; then
+  args+=( --init=false )
+elif [ ${#AIRLOCK_EXEC[@]} -gt 0 ]; then
+  args+=( --init )
 fi
 if [ -n "$EGRESS_PROXY" ]; then
   # No interfaces but loopback, and no resolver: the proxy socket is the only way out.

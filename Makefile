@@ -20,7 +20,7 @@ SHELL_SCRIPTS := bin/claude-airlock bin/install.sh bin/bundle.sh bin/install-bun
                  hooks/pre-commit hooks/pre-merge-commit hooks/commit-msg scripts/private-names-check test/private-names-check-test.sh \
                  scripts/bootstrap-tools.sh \
                  scripts/airlock-doctor.sh lib/host-dns.sh lib/clipboard-image.sh \
-                 scripts/image-smoke.sh scripts/validator-checks.sh scripts/bench-runtime.sh \
+                 scripts/image-smoke.sh scripts/init-checks.sh scripts/validator-checks.sh scripts/bench-runtime.sh \
                  scripts/run-tests.sh \
                  agents/install.sh agents/airlock-agents-apply agents/operator agents/share/completion.bash \
                  agents/lib/session-run agents/lib/session-stop agents/lib/web-session-run \
@@ -91,7 +91,7 @@ test: ## run the bats suite against BOTH engines (podman + docker)
 doctor: ## verify THIS host can actually contain a box (live containment test)
 	@bash scripts/airlock-doctor.sh
 
-image-smoke: ## prove the dev image's validators work offline (needs a built :dev)
+image-smoke: ## prove the dev image's init and validators (offline; needs a built :dev)
 	@bash scripts/image-smoke.sh
 
 bench-runtime: ## time box work under crun and gVisor on this host (docs/gvisor.md; ARGS=--quick)
