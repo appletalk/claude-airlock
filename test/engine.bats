@@ -86,6 +86,30 @@ setup() { setup_airlock_env; }
   [ "$vars" = "AIRLOCK_EGRESS_GROUPS AIRLOCK_EXTRA_EGRESS AIRLOCK_HOST_DNS " ] || { echo "firewall reads: $vars"; false; }
 }
 
+@test "the root scripts use a fixed interpreter (env would look bash up in the box's PATH)" {
+  for f in entrypoint.sh init-firewall.sh; do
+    [ "$(head -1 "$BATS_TEST_DIRNAME/../image/$f")" = '#!/bin/bash' ] || { echo "$f: $(head -1 "$BATS_TEST_DIRNAME/../image/$f")"; false; }
+  done
+}
+
+@test "every gosu in the entrypoint is /usr/sbin/gosu (the proxy bridge, the drop check, the exec)" {
+  e="$BATS_TEST_DIRNAME/../image/entrypoint.sh"
+  [ "$(grep -v '^[[:space:]]*#' "$e" | grep -c 'gosu dev')" -ge 3 ]
+  if grep -v '^[[:space:]]*#' "$e" | grep 'gosu dev' | grep -v '/usr/sbin/gosu dev'; then false; fi
+}
+
+@test "the firewall's environment keeps an empty setting apart from an unset one" {
+  e="$BATS_TEST_DIRNAME/../image/entrypoint.sh"
+  # the loop that builds fw_env, run on its own, with a stub that prints what it was given
+  loop="$(sed -n '/^  fw_env=( PATH=/,/^  done$/p' "$e")"
+  [ -n "$loop" ]
+  stub="$BATS_TEST_TMPDIR/fw-stub"
+  printf '%s\n' '#!/bin/bash' 'for v in AIRLOCK_EGRESS_GROUPS AIRLOCK_EXTRA_EGRESS AIRLOCK_HOST_DNS; do printf "%s=%s\n" "$v" "${!v-UNSET}"; done' > "$stub"
+  chmod +x "$stub"
+  out="$(env -i PATH=/usr/bin:/bin AIRLOCK_HOST_DNS= AIRLOCK_EGRESS_GROUPS=github bash -c "$loop"$'\n'"env -i \"\${fw_env[@]}\" '$stub'")"
+  [ "$out" = $'AIRLOCK_EGRESS_GROUPS=github\nAIRLOCK_EXTRA_EGRESS=UNSET\nAIRLOCK_HOST_DNS=' ] || { echo "$out"; false; }
+}
+
 @test "docker does NOT get --userns=keep-id (it would be an error)" {
   p="$(mkproj engnokeepid)"
   AIRLOCK_ENGINE_OVERRIDE=docker _launch "$p" >/dev/null 2>&1 || true

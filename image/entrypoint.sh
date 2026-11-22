@@ -1,4 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
+#
+# A fixed interpreter, not `/usr/bin/env bash`: this runs as root with the environment the box was
+# started with, and env would look bash up in that environment's PATH (a secret can set PATH).
 #
 # Runs as root: raise the egress firewall, then drop to the unprivileged agent
 # user before exec'ing the requested command (Claude by default).

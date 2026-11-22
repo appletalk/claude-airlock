@@ -95,7 +95,8 @@ write, and widening anything always prompts on the host.
   variables that act on the root entrypoint itself before any of that (bash's `BASH_ENV`,
   `ENV`, `BASHOPTS`, `SHELLOPTS`, `UID`, `EUID`, `HOME`; the loader's `LD_*`; libc's
   `GCONV_PATH`, `GLIBC_TUNABLES`, `LOCPATH`, `NLSPATH`, `HOSTALIASES`, `RES_OPTIONS`,
-  `LOCALDOMAIN`) cannot be set by a secret.
+  `LOCALDOMAIN`, and the rest of glibc's secure-execution list) cannot be set by a secret,
+  and the entrypoint's interpreter is `/bin/bash` by path, never looked up in the box's PATH.
 - A process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork bomb.
 - An optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
 

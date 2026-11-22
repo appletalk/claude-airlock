@@ -753,12 +753,16 @@ fi
 # the variables that would run code or change how bash, the loader and libc behave in the root
 # entrypoint, which the engine starts with the box's whole environment before anything else
 # runs: bash's BASH_ENV, ENV, BASHOPTS, SHELLOPTS, UID, EUID and HOME; the loader's LD_*; libc's
-# GCONV_PATH, GLIBC_TUNABLES, LOCPATH, NLSPATH, HOSTALIASES, RES_OPTIONS and LOCALDOMAIN.
+# GCONV_PATH, GLIBC_TUNABLES, LOCPATH, NLSPATH, HOSTALIASES, RES_OPTIONS, LOCALDOMAIN and the
+# rest of glibc's secure-execution list (TMPDIR, TZDIR, GETCONF_DIR, MALLOC_*, NIS_PATH,
+# RESOLV_HOST_CONF). PATH stays allowed: the entrypoint resets it for root (its interpreter is
+# /bin/bash, not looked up) and hands it to the command.
 _airlock_secret_reserved() {
   case "$1" in
     AIRLOCK_*|*_PROXY|*_proxy) return 0 ;;
     BASH_ENV|ENV|BASHOPTS|SHELLOPTS|UID|EUID|HOME|LD_*) return 0 ;;
     GCONV_PATH|GLIBC_TUNABLES|LOCPATH|NLSPATH|HOSTALIASES|RES_OPTIONS|LOCALDOMAIN) return 0 ;;
+    TMPDIR|TZDIR|GETCONF_DIR|MALLOC_*|NIS_PATH|RESOLV_HOST_CONF) return 0 ;;
   esac
   return 1
 }
