@@ -36,6 +36,56 @@ setup() { setup_airlock_env; }
   [[ "$(engine_args)" == *"--userns=keep-id:uid=1000,gid=1000"* ]]
 }
 
+@test "podman starts the entrypoint as root (keep-id would otherwise start it as dev, keeping the added caps)" {
+  p="$(mkproj engkeepidroot)"
+  AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--user=0:0'
+  # and no later --user overrides it
+  [ "$(engine_args | grep -c -E -- '^(--user|-u)(=|$)')" = 1 ]
+}
+
+@test "an exec box under podman starts its entrypoint as root too" {
+  p="$(mkproj engkeepidrootexec)"
+  AIRLOCK_ENGINE_OVERRIDE=podman _launch "$p" exec -- true >/dev/null 2>&1 || true
+  engine_args | grep -qx -- '--user=0:0'
+}
+
+@test "the entrypoint refuses to start as anyone but root (the drop would keep the engine's caps)" {
+  [ "$(id -u)" != 0 ] || skip "runs as root here: the refusal needs a non-root caller"
+  run env -i PATH=/usr/bin:/bin bash "$BATS_TEST_DIRNAME/../image/entrypoint.sh" true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must start as root"* ]]
+  # bash takes UID and EUID from the environment: the guard must not
+  run env -i PATH=/usr/bin:/bin UID=0 EUID=0 bash "$BATS_TEST_DIRNAME/../image/entrypoint.sh" true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must start as root"* ]]
+}
+
+@test "the entrypoint proves the drop: four empty cap sets and no_new_privs, before the exec, with the exec's gosu" {
+  e="$BATS_TEST_DIRNAME/../image/entrypoint.sh"
+  # the awk program, run against made-up status files: only a clean one prints nothing
+  prog="$(sed -n "/^held=\"\$(\/usr\/sbin\/gosu dev awk '/,/' \/proc\/self\/status)\"/p" "$e" | sed "1s/^held=\"\$(\/usr\/sbin\/gosu dev awk '//; \$s/' \/proc\/self\/status)\"\$//")"
+  [ -n "$prog" ]
+  st() { printf 'CapInh:\t%s\nCapPrm:\t%s\nCapEff:\t%s\nCapBnd:\t00000000000000c0\nCapAmb:\t%s\nNoNewPrivs:\t%s\n' "$@"; }
+  Z=0000000000000000
+  [ -z "$(st $Z $Z $Z $Z 1 | awk "$prog")" ]
+  [ -n "$(st $Z $Z $Z 00000000000000c0 1 | awk "$prog")" ]
+  [ -n "$(st $Z $Z $Z $Z 0 | awk "$prog")" ]
+  [ -n "$(st $Z $Z $Z $Z 1 | grep -v CapAmb | awk "$prog")" ]
+  [ -n "$(st $Z $Z $Z $Z 1 | grep -v NoNewPrivs | awk "$prog")" ]
+  # it runs before the exec it guards, and both use the same gosu
+  [ "$(grep -n '^held=' "$e" | cut -d: -f1)" -lt "$(grep -n '^exec /usr/sbin/gosu dev' "$e" | cut -d: -f1)" ]
+}
+
+@test "the firewall runs with its own environment: no secret or engine -e reaches it" {
+  e="$BATS_TEST_DIRNAME/../image/entrypoint.sh"
+  grep -q 'fw_env=( PATH="$PATH" HOME=/root )' "$e"
+  grep -q 'for v in AIRLOCK_EGRESS_GROUPS AIRLOCK_EXTRA_EGRESS AIRLOCK_HOST_DNS; do' "$e"
+  # and those three are all it reads from its environment
+  vars="$(grep -o '\${[A-Z_][A-Z0-9_]*' "$BATS_TEST_DIRNAME/../image/init-firewall.sh" | tr -d '${' | grep '^AIRLOCK_' | sort -u | tr '\n' ' ')"
+  [ "$vars" = "AIRLOCK_EGRESS_GROUPS AIRLOCK_EXTRA_EGRESS AIRLOCK_HOST_DNS " ] || { echo "firewall reads: $vars"; false; }
+}
+
 @test "docker does NOT get --userns=keep-id (it would be an error)" {
   p="$(mkproj engnokeepid)"
   AIRLOCK_ENGINE_OVERRIDE=docker _launch "$p" >/dev/null 2>&1 || true

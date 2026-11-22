@@ -80,6 +80,22 @@ write, and widening anything always prompts on the host.
 
 - All Linux capabilities are dropped except the few the firewall and privilege drop need.
 - The agent runs as the non-root user `dev`, with `--security-opt=no-new-privileges`.
+  Those capabilities belong to the entrypoint, which starts as root and drops to `dev`;
+  the change from uid 0 clears the permitted, effective and ambient sets (inheritable is
+  empty), so `dev` holds no usable capability. The bounding set still lists them, and with
+  no_new_privs nothing can raise one from it. Under podman the launcher passes `--user=0:0`
+  explicitly: with `--userns=keep-id`, podman otherwise starts the box as the mapped uid,
+  hands the added capabilities to it in the ambient set, and `dev` keeps them (enough to
+  `setuid(0)`). The entrypoint refuses to start unless the kernel reports all four of its
+  uids as 0 (bash's own `$UID`/`$EUID` can be set from the environment), and before the
+  exec it checks that `dev` would show four empty inheritable, permitted, effective and
+  ambient sets and no_new_privs, refusing if any line is missing.
+- The firewall runs as root with an environment of its own (the system PATH, `HOME=/root`
+  and the three settings it reads), so nothing the box was started with reaches it. The
+  variables that act on the root entrypoint itself before any of that (bash's `BASH_ENV`,
+  `ENV`, `BASHOPTS`, `SHELLOPTS`, `UID`, `EUID`, `HOME`; the loader's `LD_*`; libc's
+  `GCONV_PATH`, `GLIBC_TUNABLES`, `LOCPATH`, `NLSPATH`, `HOSTALIASES`, `RES_OPTIONS`,
+  `LOCALDOMAIN`) cannot be set by a secret.
 - A process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork bomb.
 - An optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
 

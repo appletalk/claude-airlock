@@ -241,7 +241,7 @@ box() {  # box <variant> <run args...> -- <command...>: a box as the launcher st
   "$ENGINE" $(runtime_args "$v") run --rm \
     --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID \
     --security-opt=no-new-privileges --security-opt "seccomp=$REPO_DIR/image/seccomp.json" \
-    --userns=keep-id:uid=1000,gid=1000 --network=none --pids-limit 4096 \
+    --userns=keep-id:uid=1000,gid=1000 --user=0:0 --network=none --pids-limit 4096 \
     -v "$sock:$sock:ro" -e "AIRLOCK_EGRESS_PROXY=$sock" \
     -v "$W:$W:rw" -w "$W" "$@"
 }

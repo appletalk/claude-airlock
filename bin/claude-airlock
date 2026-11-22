@@ -749,9 +749,17 @@ fi
 # so they stay encrypted at rest). The store lives in STATE_DIR, never mounted
 # into the box, so the sandbox can neither read it nor choose its own secrets.
 # Keys a secret may not set: the launcher's own AIRLOCK_* variables (AIRLOCK_EGRESS_PROXY
-# picks the entrypoint's no-firewall branch) and the proxy variables the proxy posture owns.
+# picks the entrypoint's no-firewall branch), the proxy variables the proxy posture owns, and
+# the variables that would run code or change how bash, the loader and libc behave in the root
+# entrypoint, which the engine starts with the box's whole environment before anything else
+# runs: bash's BASH_ENV, ENV, BASHOPTS, SHELLOPTS, UID, EUID and HOME; the loader's LD_*; libc's
+# GCONV_PATH, GLIBC_TUNABLES, LOCPATH, NLSPATH, HOSTALIASES, RES_OPTIONS and LOCALDOMAIN.
 _airlock_secret_reserved() {
-  case "$1" in AIRLOCK_*|*_PROXY|*_proxy) return 0 ;; esac
+  case "$1" in
+    AIRLOCK_*|*_PROXY|*_proxy) return 0 ;;
+    BASH_ENV|ENV|BASHOPTS|SHELLOPTS|UID|EUID|HOME|LD_*) return 0 ;;
+    GCONV_PATH|GLIBC_TUNABLES|LOCPATH|NLSPATH|HOSTALIASES|RES_OPTIONS|LOCALDOMAIN) return 0 ;;
+  esac
   return 1
 }
 
@@ -764,7 +772,7 @@ if [ "${1:-}" = "secret" ]; then
       _sk="${3:?usage: airlock secret set KEY VALUE|pass:PATH}"
       case "$_sk" in ''|*[!A-Za-z0-9_]*) echo "airlock: invalid key '$_sk' (A-Z 0-9 _ only)" >&2; exit 1 ;; esac
       if _airlock_secret_reserved "$_sk"; then
-        echo "airlock: '$_sk' is reserved: AIRLOCK_* and *_PROXY variables are set by the launcher, never by a secret" >&2; exit 1
+        echo "airlock: '$_sk' is reserved: AIRLOCK_* and *_PROXY are set by the launcher, and shell, loader and libc variables (BASH_ENV, UID, HOME, LD_*, GLIBC_TUNABLES, ...) are never taken from a secret" >&2; exit 1
       fi
       shift 3; _sv="$*"
       [ -n "$_sv" ] || { echo "airlock: no value given for $_sk" >&2; exit 1; }
@@ -2456,6 +2464,13 @@ if [ "$AIRLOCK_ENGINE" = podman ]; then
   # Container root still maps into the subuid range, so the entrypoint can still raise
   # the firewall before dropping to `dev`.
   args+=( "--userns=keep-id:uid=1000,gid=1000" )
+  # keep-id also makes the mapped uid the box's user when no --user is given, over the
+  # image's USER root (seen with podman 6.2). The entrypoint then starts as dev, podman
+  # hands the added capabilities (SETUID, SETGID, and NET_ADMIN/NET_RAW for the firewall)
+  # to that non-root user in the ambient set, `gosu dev` drops nothing, and every process
+  # in the box keeps them: dev could setuid(0). Start the entrypoint as root, as the image
+  # says, so the drop to dev clears them all (a change from uid 0 clears the ambient set).
+  args+=( --user=0:0 )
 fi
 
 # The current project: read-write, at its REAL host path, so the session
@@ -3103,7 +3118,7 @@ if [ -f "$SECRETS_FILE" ]; then
     _skey="$(printf '%s' "${_sline%%=*}" | tr -d '[:space:]')"
     case "$_skey" in ''|*[!A-Za-z0-9_]*) continue ;; esac
     if _airlock_secret_reserved "$_skey"; then
-      echo "claude-airlock: ignoring secret $_skey: AIRLOCK_* and *_PROXY are reserved (airlock secret rm $_skey)" >&2
+      echo "claude-airlock: ignoring secret $_skey: a reserved name (launcher, shell, loader or libc variable; airlock secret rm $_skey)" >&2
       continue
     fi
     _sval="$(printf '%s' "${_sline#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"

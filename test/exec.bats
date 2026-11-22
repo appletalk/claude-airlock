@@ -71,7 +71,7 @@ box_cmd() { engine_args | sed -n '/^claude-airlock:dev$/,/^ENGINE_INVOKED=/p' | 
 }
 
 @test "the firewall's log goes to stderr in the image (the box's stdout is the command's)" {
-  grep -qx '  /usr/local/bin/init-firewall.sh >&2' "$BATS_TEST_DIRNAME/../image/entrypoint.sh"
+  grep -qxF '  env -i "${fw_env[@]}" /usr/local/bin/init-firewall.sh >&2' "$BATS_TEST_DIRNAME/../image/entrypoint.sh"
 }
 
 @test "a terminal on stdin but output to a file: no -t (it would put CR and escapes in the output)" {
