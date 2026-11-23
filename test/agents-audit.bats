@@ -32,6 +32,16 @@ EOF
     export PATH="$T/bin:$PATH"
     : > "$T/rows"; : > "$T/connects"
 }
+
+# Whatever a test started (the relay, the fake store) goes when it ends, failed or not: a test
+# that stops early must never leave them holding bats' output (the file would hang to its
+# timeout). The relay's output is printed, which bats shows only for a failed test.
+teardown() {
+    [ -z "${UI:-}" ] || kill "$UI" 2>/dev/null || true
+    [ -z "${STORE:-}" ] || kill "$STORE" 2>/dev/null || true
+    wait 2>/dev/null || true
+    [ ! -f "$T/ui.out" ] || sed 's/^/ui.out: /' "$T/ui.out"
+}
 row() { printf '%s\n' "$1" >> "$T/rows"; }
 denies() { run "$OP" audit denies "$@"; }
 
@@ -435,20 +445,25 @@ class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 S(sys.argv[1], H).serve_forever()
 PY
     python3 "$T/store.py" "$AGENTS_AUDIT_SOCK" & STORE=$!
-    PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+    PORT=0   # the relay picks a free one; ui_wait reads it back (no port taken in between)
     for _ in $(seq 50); do [ -S "$AGENTS_AUDIT_SOCK" ] && break; sleep 0.1; done
 }
-ui_start() {  # ui_start <uid|off> [idle most]; TOKEN: this run's, from the printed URL
-    python3 -I "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" "$PORT" "$@" > "$T/ui.out" 2>&1 & UI=$!
-    for _ in $(seq 50); do
+ui_wait() {  # the relay started as UI: wait for its line; PORT, TOKEN, NAME from the printed URL
+    for _ in $(seq 150); do
         if grep -q 'audit store' "$T/ui.out" 2>/dev/null; then
             TOKEN="$(sed -n 's|.*/select/vmui/?token=\([A-Za-z0-9_-]*\).*|\1|p' "$T/ui.out" | head -1)"
             NAME="$(sed -n 's|.*UI: http://\([^:/]*\):.*|\1|p' "$T/ui.out" | head -1)"
-            [ -n "$TOKEN" ] && return 0
+            PORT="$(sed -n 's|.*UI: http://[^:/]*:\([0-9]*\)/.*|\1|p' "$T/ui.out" | head -1)"
+            [ -n "$TOKEN" ] && [ -n "$PORT" ] && return 0
         fi
+        kill -0 "$UI" 2>/dev/null || break
         sleep 0.1
     done
-    cat "$T/ui.out"; return 1
+    echo "the relay didn't start:"; cat "$T/ui.out"; return 1
+}
+ui_start() {  # ui_start <uid|off> [idle most]: the relay on a free port; PORT, TOKEN, NAME set
+    python3 -I "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" 0 "$@" > "$T/ui.out" 2>&1 & UI=$!
+    ui_wait
 }
 ucurl() { /usr/bin/curl --noproxy "*" -b "audit_ui_$PORT=$TOKEN" "$@"; }   # with this run's cookie
 ui_teardown() { kill "$UI" "$STORE" 2>/dev/null || true; wait 2>/dev/null || true; }
@@ -651,9 +666,8 @@ socket.socket.bind = bind
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 PY
-    python3 -I "$T/noipv6.py" "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" "$PORT" "$(id -u)" > "$T/ui.out" 2>&1 & UI=$!
-    for _ in $(seq 50); do grep -q 'audit store' "$T/ui.out" 2>/dev/null && break; sleep 0.1; done
-    TOKEN="$(sed -n 's|.*/select/vmui/?token=\([A-Za-z0-9_-]*\).*|\1|p' "$T/ui.out" | head -1)"
+    python3 -I "$T/noipv6.py" "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" 0 "$(id -u)" > "$T/ui.out" 2>&1 & UI=$!
+    ui_wait
     c="$(ucurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/")"
     up=0; kill -0 "$UI" 2>/dev/null && up=1
     ui_teardown
@@ -672,9 +686,8 @@ socket.socket = NoV6
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 PY
-    python3 -I "$T/noaf6.py" "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" "$PORT" "$(id -u)" > "$T/ui.out" 2>&1 & UI=$!
-    for _ in $(seq 50); do grep -q 'audit store' "$T/ui.out" 2>/dev/null && break; sleep 0.1; done
-    TOKEN="$(sed -n 's|.*/select/vmui/?token=\([A-Za-z0-9_-]*\).*|\1|p' "$T/ui.out" | head -1)"
+    python3 -I "$T/noaf6.py" "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" 0 "$(id -u)" > "$T/ui.out" 2>&1 & UI=$!
+    ui_wait
     c="$(ucurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/")"
     ui_teardown
     [ "$c" = 200 ] || { echo "no-AF_INET6 code=$c"; cat "$T/ui.out"; return 1; }
@@ -701,8 +714,8 @@ PY
 }
 
 @test "audit ui: port 0 picks a free port, the same on 127.0.0.1 and ::1, and prints it" {
-    ui_setup; PORT0="$PORT"; PORT=0; ui_start off; PORT="$PORT0"
-    p="$(sed -n 's|.*UI: http://[^:]*:\([0-9]*\)/.*|\1|p' "$T/ui.out" | head -1)"
+    ui_setup; ui_start off
+    p="$PORT"
     c="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -b "audit_ui_$p=$TOKEN" -H "Host: $NAME:$p" "http://127.0.0.1:$p/select/vmui/")"
     c6=skip
     if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0))' 2>/dev/null; then
