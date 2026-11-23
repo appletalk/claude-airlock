@@ -817,3 +817,23 @@ for l in sys.stdin.read().splitlines():
     l.encode("utf-8")' <<< "$output" || return 1
     grep -q 'éééé' <<< "$output" && grep -q '字字字' <<< "$output"
 }
+
+# A connection that sends nothing frees its slot within seconds (the request line and headers have
+# 5 s), so idle connections can't hold the cap for long; a slow answer still streams.
+@test "audit ui: an idle connection is closed within seconds; with the slots full, a request gets through soon after" {
+    ui_setup; ui_start off
+    python3 -c '
+import socket, sys, time
+port = int(sys.argv[1])
+held = [socket.create_connection(("127.0.0.1", port)) for _ in range(256)]
+t = time.monotonic()
+held[0].settimeout(15)
+gone = held[0].recv(1) == b""
+print("closed-after=%.1f" % (time.monotonic() - t) if gone else "still-open")' "$PORT" > "$T/idle.out"
+    sleep 1
+    c="$(ucurl -s -o /dev/null -w '%{http_code}' -H "Host: $NAME:$PORT" "http://127.0.0.1:$PORT/select/vmui/")"
+    ui_teardown
+    s="$(sed -n 's/closed-after=//p' "$T/idle.out")"
+    [ -n "$s" ] && python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "$s" || { cat "$T/idle.out"; return 1; }
+    [ "$c" = 200 ] || { echo "after the flood: $c"; return 1; }
+}

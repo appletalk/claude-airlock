@@ -91,7 +91,8 @@ class Store(http.client.HTTPConnection):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"   # one request per connection: each is checked from the start
-    timeout = 60                    # a client that stops sending (a short body) frees its thread
+    timeout = 5                     # the request line and headers: an idle connection frees its slot
+    # fast, so a flood of them can't hold every slot (MAX_CONN) for long
     def version_string(self):
         return "audit-ui"
 
@@ -124,6 +125,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def relay(self):
         global LAST
+        try:   # headers read: the body and the answer (a live tail streams) get longer
+            self.connection.settimeout(60)
+        except OSError:
+            self.close_connection = True
+            return
         if self.headers.get("Host", "") not in HOSTS:
             return self.refuse(421, "audit-ui: only the address `audit ui` printed")
         origin, site = self.headers.get("Origin"), self.headers.get("Sec-Fetch-Site")
