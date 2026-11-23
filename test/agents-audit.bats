@@ -414,6 +414,8 @@ import http.server, json, os, socket, socketserver, sys, time
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        with open(sys.argv[1] + ".paths", "a") as f:   # what reached the store, one path a line
+            f.write(self.path + "\n")
         if self.path.startswith("/stream"):  # three chunks, a second apart; /stream-stall stops after one
             self.send_response(200); self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
             for i in range(3):
@@ -855,4 +857,23 @@ except OSError:
     print("cut %.1f" % (time.monotonic() - t))' "$PORT")"
     ui_teardown
     case "$r" in "cut "*) python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "${r#cut }" ;; *) echo "$r"; false ;; esac
+}
+
+# A request the deadline cut mid-headers is never forwarded, even with the cookie in it.
+@test "audit ui: a request cut at the header deadline never reaches the store" {
+    ui_setup; ui_start "$(id -u)"
+    python3 -c '
+import socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s.sendall(("GET /cutprobe HTTP/1.0\r\nHost: 127.0.0.1:%s\r\nCookie: audit_ui_%s=%s\r\nX-Slow: " % (sys.argv[1], sys.argv[1], sys.argv[2])).encode())
+try:
+    for _ in range(12):
+        s.sendall(b"a"); time.sleep(1)
+except OSError:
+    pass' "$PORT" "$TOKEN"
+    ok="$(ucurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/")"
+    ui_teardown
+    [ "$ok" = 200 ] || { echo "after: $ok"; return 1; }
+    ! grep -q cutprobe "$AGENTS_AUDIT_SOCK.paths" || { echo "a cut request reached the store"; return 1; }
+    grep -q '^/select/vmui/$' "$AGENTS_AUDIT_SOCK.paths"
 }

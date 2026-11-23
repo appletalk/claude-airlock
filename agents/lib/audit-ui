@@ -127,8 +127,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def relay(self):
         global LAST
         cut = self.server.deadlines.pop(id(self.connection), None)
-        if cut is not None:   # the headers are in: the deadline no longer applies
-            cut.cancel()
+        if cut is None:   # the deadline fired: what was read is a cut request, never forwarded
+            self.close_connection = True
+            return
+        cut.cancel()      # the headers are in: the deadline no longer applies
         try:   # headers read: the body and the answer (a live tail streams) get longer
             self.connection.settimeout(60)
         except OSError:
@@ -237,6 +239,7 @@ class Server(http.server.ThreadingHTTPServer):
             print(f"audit-ui: a request failed ({type(err).__name__})", file=sys.stderr, flush=True)
 
     refused = set()
+    request_queue_size = 128   # a burst of connections waits in the kernel, not in TCP retries
     slots = threading.BoundedSemaphore(MAX_CONN)
     deadlines = {}   # id(connection) -> its header deadline timer (dict ops are atomic in CPython)
 
@@ -253,7 +256,7 @@ class Server(http.server.ThreadingHTTPServer):
     def process_request_thread(self, request, client_address):
         # A deadline for the whole request line and headers: the socket timeout restarts with
         # every byte, so a client sending one now and then could hold a slot for ever.
-        cut = threading.Timer(HEAD_DEADLINE, self.cut, (request,))
+        cut = threading.Timer(HEAD_DEADLINE, self.cut, (request, id(request)))
         cut.daemon = True
         self.deadlines[id(request)] = cut
         cut.start()
@@ -264,8 +267,9 @@ class Server(http.server.ThreadingHTTPServer):
             self.deadlines.pop(id(request), None)
             self.slots.release()
 
-    @staticmethod
-    def cut(request):
+    def cut(self, request, key):   # the entry goes first, so relay() knows the request was cut
+        if self.deadlines.pop(key, None) is None:
+            return   # relay() took it first: the headers made it in time
         try:
             request.shutdown(socket.SHUT_RDWR)
         except OSError:
