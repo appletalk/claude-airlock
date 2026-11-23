@@ -57,8 +57,9 @@
 #                                       10000 lines read), each row's reason (which site file line
 #                                       would change it) once below as a numbered note; --full:
 #                                       the reason under every row instead
-#   <command> audit ui [--port <n>]     the store's web UI on http://127.0.0.1:9429/select/vmui/,
-#                                       for you alone, until Ctrl-C (or 30 min idle, 4 h at most)
+#   <command> audit ui [--port <n>]     the store's web UI on http://audit.localhost:9429/select/vmui/,
+#                                       behind this run's token, until Ctrl-C (or 30 min
+#                                       idle, 4 h at most)
 #   <command> audit events [--severity high|medium|low|info] [--kind <kind>] [--agent <name>]
 #                          [--since <n>d|<n>h|YYYY-MM-DD] [--limit <n>] [--full]
 #                                       what the store rated, at that severity and above (default
@@ -1398,8 +1399,9 @@ print(f"\n(kept as {reports}/{fn})")
 PY
     } | clean
 }
-# audit ui: the store's web UI (vmui) on a loopback port, served to the operator's uid alone and
-# only under its own Host (lib/audit-ui), until Ctrl-C.
+# audit ui: the store's web UI (vmui) on a loopback port, behind this run's token, served to the
+# operator's uid alone (unless agents.conf turns that check off: ui-uid-check off) and only under
+# its own Host (lib/audit-ui), until Ctrl-C.
 audit_ui() {
     local port=9429
     case "${1:-}" in
@@ -1409,7 +1411,9 @@ audit_ui() {
         *) die "usage: $CMD audit ui [--port <n>]" ;;
     esac
     audit_ready
-    exec python3 -I "${AGENTS_AUDIT_UI:-$AGENTS_LIB/audit-ui}" "$AUDIT_SOCK" "$port" "$(id -u)"
+    local who; who="$(id -u)"
+    [ "${AGENTS_AUDIT_UI_UID_CHECK:-on}" != off ] || who=off
+    exec python3 -I "${AGENTS_AUDIT_UI:-$AGENTS_LIB/audit-ui}" "$AUDIT_SOCK" "$port" "$who"
 }
 # audit events: the lines the store rated (audit.severity, set at ingest), at a severity and
 # above, newest first, from one fixed query: kind and agent are checked against their shape

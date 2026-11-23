@@ -71,7 +71,7 @@ site="${site:-$ROOT$ETC/agents.conf}"
 # ---- parse ------------------------------------------------------------------------------------
 
 OPERATOR="" COMMAND="" INBOX="" QUEUE="" DAILY_CAP=40 CLIPBOARD=off RUNSC=on OP_UID="" OP_GID=""
-AUDIT=off AUDIT_RETENTION=90d AUDIT_MAX_DISK=5G AUDIT_PREFIXES=()
+AUDIT=off AUDIT_RETENTION=90d AUDIT_MAX_DISK=5G AUDIT_UI_UID_CHECK=on AUDIT_PREFIXES=()
 # The first systemd whose ProtectControlGroups=private works for user@.service (render_manager).
 CGNS_SYSTEMD=258
 ROLES=()
@@ -105,8 +105,10 @@ while IFS= read -r line || [ -n "$line" ]; do
             RUNSC=${w[1]} ;;
         audit)
             # on: the audit store (docs/agents.md, Audit). Options: retention <n>d (default 90d),
-            # max-disk <n>G (default 5G: VictoriaLogs drops the oldest days past it).
-            [ "${#w[@]}" -ge 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: audit on|off [retention <n>d] [max-disk <n>G]"
+            # max-disk <n>G (default 5G: VictoriaLogs drops the oldest days past it), ui-uid-check
+            # on|off (default on; off where the browser isn't a Linux process, as under WSL: the
+            # `audit ui` token alone then guards it).
+            [ "${#w[@]}" -ge 2 ] && [[ "${w[1]}" =~ ^(on|off)$ ]] || die "$where: want: audit on|off [retention <n>d] [max-disk <n>G] [ui-uid-check on|off]"
             AUDIT=${w[1]}
             i=2
             while [ "$i" -lt "${#w[@]}" ]; do
@@ -115,7 +117,8 @@ while IFS= read -r line || [ -n "$line" ]; do
                 case "$k" in
                     retention) [[ "$v" =~ ^[1-9][0-9]{0,3}d$ ]] || die "$where: bad retention '$v' (like 90d)"; AUDIT_RETENTION=$v ;;
                     max-disk) [[ "$v" =~ ^[1-9][0-9]{0,4}G$ ]] || die "$where: bad max-disk '$v' (like 2G)"; AUDIT_MAX_DISK=$v ;;
-                    *) die "$where: unknown audit option '$k' (retention, max-disk)" ;;
+                    ui-uid-check) [[ "$v" =~ ^(on|off)$ ]] || die "$where: ui-uid-check takes on or off"; AUDIT_UI_UID_CHECK=$v ;;
+                    *) die "$where: unknown audit option '$k' (retention, max-disk, ui-uid-check)" ;;
                 esac
                 i=$((i + 2))
             done ;;
@@ -266,6 +269,7 @@ AGENTS_DAILY_CAP=$DAILY_CAP
 AGENTS_EXTERNAL="${!EXTERNAL[*]}"
 AGENTS_RUNSC=$RUNSC
 AGENTS_AUDIT=$AUDIT
+AGENTS_AUDIT_UI_UID_CHECK=$AUDIT_UI_UID_CHECK
 AGENTS_AUDITOR=$AUDITOR
 AGENTS_AUDITOR_UID=${UID_OF[auditor]:-}
 AGENTS_AUDIT_REPORTS=$AUDIT_REPORTS

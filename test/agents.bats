@@ -3412,6 +3412,20 @@ audit_render() { rm -rf "$T/ar"; "$P" --render "$T/ar" >/dev/null; }
     grep -q '^AGENTS_AUDIT=on' <("$P" --env) || return 1
 }
 
+@test "audit options: ui-uid-check on by default, off when set; any other value refused" {
+    audit_site
+    run "$P" --env
+    [ "$status" -eq 0 ] && [[ "$output" == *"AGENTS_AUDIT_UI_UID_CHECK=on"* ]] || { echo "$output"; return 1; }
+    audit_site; sed -i 's/^audit on$/audit on ui-uid-check off/' "$E/agents.conf"
+    run "$P" --env
+    [ "$status" -eq 0 ] && [[ "$output" == *"AGENTS_AUDIT_UI_UID_CHECK=off"* ]] || { echo "$output"; return 1; }
+    for bad in "audit on ui-uid-check no" "audit on ui-uid-check"; do
+        site_file 1G 1G 1G; echo "$bad" >> "$E/agents.conf"
+        run "$P" --env
+        [ "$status" -ne 0 ] || { echo "accepted: $bad"; return 1; }
+    done
+}
+
 @test "audit options: retention and max-disk; bad values, unknown options and stray lines refused" {
     audit_site; sed -i 's/^audit on$/audit on retention 180d max-disk 5G/' "$E/agents.conf"; audit_render
     grep -q -- '-retentionPeriod=180d -retention.maxDiskSpaceUsageBytes=5368709120 ' "$T/ar/etc/systemd/system/airlock-audit-vl.service" || return 1

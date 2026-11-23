@@ -409,17 +409,32 @@ machine (nothing leaves it):
   checked against their shape before they go into the fixed query, and matched exactly (`--agent
   agent` is not also `agent-web`). Lines stored before the store
   rated them don't show (a reset reads them in again).
-- **Browsing it:** `claude-agent audit ui` serves the store's web UI (VictoriaLogs' vmui) at
-  `http://127.0.0.1:9429/select/vmui/` until Ctrl-C (`--port <n>` for another), and closes by
-  itself after 30 minutes without a request or 4 hours in all, so it isn't left open. A loopback port
-  is open to every process on the host, so each connection's owner is looked up in the kernel's
-  socket table and only yours is served (it names any other uid it refused, once each). A web
-  page in your own browser runs as you, so the UI serves only itself: a `Host` of
-  `127.0.0.1:<port>` or `localhost:<port>` (no name pointed at 127.0.0.1), no request another
-  site started (an `Origin` or `Sec-Fetch-Site` that isn't this one's is refused before anything
-  reaches the store), and no CORS (VictoriaLogs allows any origin; those headers are dropped).
-  A browser too old to send either header can still send a blind query, but can't read the
-  answer. Refused requests don't count as use. The store's door still allows only queries.
+- **Browsing it:** `claude-agent audit ui` serves the store's web UI (VictoriaLogs' vmui) and
+  prints its address, `http://audit.localhost:9429/select/vmui/?token=...`, until Ctrl-C
+  (`--port <n>` for another). It closes by itself after 30 minutes without a request or 4 hours in
+  all, so it isn't left open. It listens on loopback only: 127.0.0.1, and `::1` where the host has
+  it (a host without IPv6 is served on 127.0.0.1 alone). Browsers resolve any `*.localhost` name to
+  loopback themselves, with no DNS or hosts file.
+  - **The token:** each run makes a new one. Opening the printed address sets a cookie (host-only
+    for `audit.localhost`, `HttpOnly`, `SameSite=Strict`, for the session) and redirects to the
+    same page without the token; every other request needs that cookie, and the cookie is never
+    passed to the store. A cookie for `audit.localhost` goes to no other name, so another service
+    you browse at `localhost` or `127.0.0.1` never sees it (cookies don't separate ports; names
+    do). `127.0.0.1` and `localhost` still work with the token, but their cookie would reach other
+    local services on those names, so use the printed name.
+  - **Your sockets only:** a loopback port is open to every process on the host, so each
+    connection's owner is also looked up in the kernel's socket table and only yours is served
+    (it names any other uid it refused, once each). Under WSL a browser on Windows owns no socket
+    in the Linux kernel, so this check refuses it ("uid (unknown)"): there, set `ui-uid-check off`
+    on the `audit` line of `agents.conf` (then `sudo airlock-agents-apply --confirm`), and the
+    token alone guards the UI.
+  - **Only itself:** a web page in your own browser runs as you, so the UI serves only itself: a
+    `Host` of `audit.localhost:<port>`, `127.0.0.1:<port>` or `localhost:<port>` (no other name
+    pointed at loopback), no request another site started (an `Origin` or `Sec-Fetch-Site` that
+    isn't this one's is refused before anything reaches the store), and no CORS (VictoriaLogs
+    allows any origin; those headers are dropped). A browser too old to send either header can
+    still send a blind query, but can't read the answer. Refused requests don't count as use. The
+    store's door still allows only queries.
 - **The auditor (optional):** an agent user of its own that reads the store for you, so a
   look back doesn't mean reading lines yourself. Add it to `agents.conf` like the others, with
   `audit on`: `auditor claude-audit uid 1103 subuid 1400000 home 10G`. It gets the same
