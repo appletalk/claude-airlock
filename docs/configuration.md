@@ -153,6 +153,34 @@ registry group widens the CDN co-tenancy gap; see
 
 The proxy posture is covered in [egress-proxy.md](egress-proxy.md).
 
+## MCP servers and settings: from the host only
+
+MCP servers come only from the host, per project; a box adds none of its own.
+
+```
+airlock mcp-servers set FILE   # this project's MCP servers, from an .mcp.json-shaped file
+airlock mcp-servers show       # names and kinds (stdio command or URL), no credentials
+airlock mcp-servers rm
+```
+
+`FILE` holds `{"mcpServers": {...}}`, as a project `.mcp.json` would. A copy is stored with
+the project's secrets, on the host, and each launch mounts it read-only as the box's managed
+MCP config, which has exclusive control: nothing the box adds (`claude mcp add`, a
+`.mcp.json`, a plugin) starts a server. A project with nothing set has no MCP server, so
+other projects and agents don't inherit one. Put credentials in `airlock secret` and write
+`${NAME}` in the file. The Playwright image adds its own MCP to every project.
+
+`set` copies the file once, so you can delete the original; it prints each server's command
+or URL (never env, headers or URL credentials) and says so when the file came from the
+project, which the box can write: check the servers are yours.
+
+Settings for every box of this account go in `~/.config/claude-airlock/settings.json` (a JSON
+object, at most 1 MiB). Claude gets it read-only through `--settings` (in sessions and `claude
+agents`), above the box's own `settings.json`; the managed settings still win (hooks stay
+managed-only). The workspace's `.claude/settings.json` and `.claude/settings.local.json` are
+still read in the box, and the box can write them: each launch names any that exist, so check
+changes to them.
+
 ## Secrets: `airlock secret`
 
 ```
@@ -162,9 +190,9 @@ airlock secret list
 airlock secret rm KEY
 ```
 
-A secret is injected as an environment variable into this project's box. Your committed
-`.mcp.json` or configs reference it by name (e.g. `${MCP_HUB_TOKEN}`). Keep injected
-credentials read-only and scoped.
+A secret is injected as an environment variable into this project's box. Configs, and the
+project's MCP servers (`airlock mcp-servers`, below), reference it by name (e.g.
+`${MCP_HUB_TOKEN}`). Keep injected credentials read-only and scoped.
 
 **Prefer `pass:PATH`** (`airlock secret set KEY pass:mcp/foo`). A literal value is stored
 in plaintext in the host state dir (mode 600) and lands in your shell history when you type

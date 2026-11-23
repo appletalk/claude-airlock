@@ -12,5 +12,6 @@
   },
   "crossSessionInbound": "refuse",
   "allowManagedHooksOnly": true,
-  "disableCommandPluginSources": true
+  "disableCommandPluginSources": true,
+  "disableSkillShellExecution": true
 }

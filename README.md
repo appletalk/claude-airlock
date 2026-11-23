@@ -200,6 +200,9 @@ airlock egress proxy [SOCKET]   no network at all; everything through a host pro
 airlock secret set KEY VALUE|pass:PATH   give this project's box an env secret
 airlock secret list | rm KEY             (pass:PATH is resolved with `pass` at launch)
 
+airlock mcp-servers set FILE    this project's MCP servers (the box reads none of its own)
+airlock mcp-servers show | rm
+
 airlock share list              review approved folder shares (ro/rw)
 airlock share rm RELPATH        revoke a share approval
 

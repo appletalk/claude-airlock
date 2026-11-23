@@ -125,10 +125,24 @@ write, and widening anything always prompts on the host.
   so `BASH_ENV` or a `PATH` from any settings file can't steer it. The `/bin/sh` and `env` that
   start it still load the dynamic loader's `LD_*` variables from `env`, which matters for the
   workspace's settings (below).
-- Not covered: the workspace's `.claude/settings*.json` (`env`, `apiKeyHelper`) and
-  `.mcp.json`, MCP servers the box adds to its `~/.claude.json`, plugins and skills the box
-  installs, and MCP servers declared in its `~/.claude/agents/*.md`. The launcher doesn't
-  rewrite project files; review them like the rest of a touched workspace (below).
+- Settings you want in every box go in the host's `~/.config/claude-airlock/settings.json`,
+  which reaches Claude read-only through `--settings` in sessions and `claude agents`; the box
+  can't change it. An argument you pass yourself (`airlock --settings X`) takes its place.
+- MCP servers come only from the host. Each box's managed MCP config
+  (`/etc/claude-code/managed-mcp.json`, read-only) holds what `airlock mcp-servers set` stored
+  for that project, plus Playwright on the Playwright image, and nothing else. Claude Code gives
+  that file exclusive control, so the box's `~/.claude.json`, the workspace's `.mcp.json`,
+  plugins, agents' `mcpServers` and `--mcp-config` start no server, and an empty or unreadable
+  one still blocks them. A project with none set has no MCP server. Side effects: `claude mcp
+  add` and `--strict-mcp-config` are refused in the box, and Claude in Chrome is off.
+- Not covered: the workspace's `.claude/settings.json` and `.claude/settings.local.json` are
+  read in the box and the box can write them, so one it leaves there acts in later sessions
+  (`env`, `apiKeyHelper`, `permissions`); each launch names any that exist. The box's own
+  `settings.json` keeps keys other than commands and `env` (`permissions`, `enabledPlugins`,
+  `model`, ...). Skills, agents, slash commands, `CLAUDE.md` and memory, in the workspace and in
+  the box's `~/.claude`, are instructions the box can leave for later sessions; their inline
+  shell is refused (`disableSkillShellExecution`), and an agent's hooks fall under the
+  managed-hooks rule.
 - A process-count cap (`AIRLOCK_PIDS_LIMIT`, default 4096) guards against a fork bomb.
 - An optional RAM ceiling (`AIRLOCK_MEMORY`) can be set per host.
 

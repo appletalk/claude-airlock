@@ -196,15 +196,18 @@ _airlock_release_artifacts() {
 # gives a resumed conversation a new id). The name is --name/-n's, so a later
 # `--resume <name>` is matched too. Short flags may be clustered (-cp, -pr <id>, -r<id>), as
 # claude's option parser allows: the first letter that takes a value takes the rest.
+_airlock_is_subcmd() {  # $1 = claude's first argument: one of its subcommands (no session)?
+  case "${1:-}" in
+    agents|attach|auth|auto-mode|config|doctor|gateway|import|install|kill|logs|mcp|migrate-installer|\
+    plugin|plugins|purge|remote-control|respawn|rm|setup-token|stop|ultrareview|update|upgrade) return 0 ;;
+  esac
+  return 1
+}
 _airlock_conv_of() {
   local a v prev="" conv="" name="" fork=0 cont=0 i ch
   # claude's subcommands are no session; a prompt word ahead of the options is (claude reads
   # options after positionals). Nothing after `--` is claude's.
-  case "${1:-}" in
-    agents|attach|auth|auto-mode|config|doctor|gateway|import|install|kill|logs|mcp|migrate-installer|\
-    plugin|plugins|purge|remote-control|respawn|rm|setup-token|stop|ultrareview|update|upgrade)
-      printf '%s %s' - -; return 0 ;;
-  esac
+  if _airlock_is_subcmd "${1:-}"; then printf '%s %s' - -; return 0; fi
   for a in "$@"; do
     [ "$a" != -- ] || break
     v=""
@@ -807,6 +810,68 @@ if [ "${1:-}" = "secret" ]; then
       if [ -f "$_sstore" ] && grep -q "^${_sk}=" "$_sstore"; then sed -i "/^${_sk}=/d" "$_sstore"; echo "airlock: removed $_sk"
       elif [ -f "$_sstore" ]; then echo "airlock: $_sk is not set"; else echo "airlock: no secrets"; fi ;;
     *) echo "usage: airlock secret set KEY VALUE|pass:PATH  |  airlock secret list  |  airlock secret rm KEY" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+# This project's MCP servers, from the host: `airlock mcp-servers set FILE` stores a copy of an
+# .mcp.json-shaped file ({"mcpServers": {...}}) next to the project's secrets, where the box
+# can't write. A launch mounts it read-only as the box's managed MCP config, which has
+# exclusive control: the box's own ~/.claude.json, the workspace's .mcp.json, plugins and
+# --mcp-config add no server. A project with none set gets no MCP server at all.
+# Credentials stay out of the file: reference an `airlock secret` as ${NAME}.
+_airlock_mcp_valid() {  # <file>: one JSON object, its mcpServers an object of objects, at most 64 KiB
+  [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %s "$1")" -le 65536 ] \
+    && [ "$(jq -s 'length == 1 and (.[0] | type == "object" and (.mcpServers | type) == "object"
+                    and all(.mcpServers[]; type == "object"))' "$1" 2>/dev/null)" = true ]
+}
+_airlock_mcp_valid_doc() {  # <file>: one JSON document (before compacting; any size up to the read cap)
+  [ "$(jq -s 'length == 1' "$1" 2>/dev/null)" = true ]
+}
+# One line per server: name, kind, and its command or URL host and path; never env, headers,
+# arguments, URL userinfo, query or fragment, which may hold a credential. Every printed field
+# loses control characters (C0, DEL, C1), so a name can't forge a line or a terminal escape.
+_airlock_mcp_list() {  # <file>
+  jq -r '
+    def clean: tostring | gsub("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"; "?");
+    def where: if .command then .command
+               elif .url then (.url | tostring | sub("^(?<s>[A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@"; "\(.s)") | sub("[?#].*$"; ""))
+               else "" end;
+    .mcpServers | to_entries[]
+    | "  \(.key | clean): \((.value.type // (if .value.command then "stdio" else "?" end)) | clean)\(if (.value | where) != "" then " (" + (.value | where | clean) + ")" else "" end)"' "$1"
+}
+if [ "${1:-}" = "mcp-servers" ]; then
+  command -v jq >/dev/null 2>&1 || { echo "airlock: mcp-servers needs jq" >&2; exit 1; }
+  _mslug="$(printf '%s' "$WORKSPACE" | sed 's#[^a-zA-Z0-9]#-#g; s#^-*##')"
+  _mstore="$HOME/.config/claude-airlock/state/$_mslug/mcp.json"
+  mkdir -p "$(dirname "$_mstore")"
+  case "${2:-show}" in
+    set)
+      _mf="${3:?usage: airlock mcp-servers set FILE}"
+      # Read once, into a private file, and judge only that copy: FILE may sit in the workspace,
+      # where the box could swap it for a link to another file between a check and a read.
+      _mt="$(mktemp "$_mstore.tmp.XXXXXX")"
+      # cp -P copies a link swapped in after the test as a link (refused below), never its target.
+      if [ -L "$_mf" ] || [ ! -f "$_mf" ] || ! timeout 10 cp -P -- "$_mf" "$_mt.in" 2>/dev/null \
+         || [ -L "$_mt.in" ] || [ ! -f "$_mt.in" ] || [ "$(stat -c %s "$_mt.in")" -gt 1048576 ] || ! _airlock_mcp_valid_doc "$_mt.in" \
+         || ! jq -c . "$_mt.in" > "$_mt" 2>/dev/null || ! _airlock_mcp_valid "$_mt"; then
+        rm -f "$_mt" "$_mt.in"
+        echo "airlock: $_mf is not a regular file holding {\"mcpServers\": {...}} (at most 64 KiB)" >&2; exit 1
+      fi
+      rm -f "$_mt.in"
+      if ! { chmod 600 "$_mt" && mv -f "$_mt" "$_mstore"; }; then rm -f "$_mt"; echo "airlock: could not store $_mf" >&2; exit 1; fi
+      echo "airlock: MCP servers for $(basename "$WORKSPACE") (from the next launch):"
+      _airlock_mcp_list "$_mstore"
+      case "$(readlink -f -- "$_mf" 2>/dev/null)" in
+        "$WORKSPACE"/*) echo "airlock: $_mf is in the project, which the box can write: check the servers above are yours" ;;
+      esac ;;
+    show)
+      if [ -f "$_mstore" ]; then _airlock_mcp_list "$_mstore"
+      else echo "  (none: this project's box has no MCP servers)"; fi ;;
+    rm)
+      if [ -f "$_mstore" ]; then rm -f "$_mstore"; echo "airlock: removed this project's MCP servers (from the next launch)"
+      else echo "airlock: no MCP servers set"; fi ;;
+    *) echo "usage: airlock mcp-servers set FILE  |  airlock mcp-servers show  |  airlock mcp-servers rm" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -2168,22 +2233,72 @@ if command -v jq >/dev/null 2>&1; then
   fi
 fi
 
-# On the Playwright image, give the box Claude the Playwright MCP (browser tools),
-# baked into the image — box-only, so the host never consumes it (unlike a project
-# .mcp.json, which both sides would read). Removed on other images so a leftover
-# config never points at a missing server.
+# MCP servers come only from the host: the box's managed MCP config (exclusive control in
+# Claude Code: ~/.claude.json, the workspace's .mcp.json, plugins and --mcp-config add none)
+# holds this project's `airlock mcp-servers set` file, plus the Playwright MCP baked into the
+# Playwright image. Nothing set: an empty one, so the box has no MCP server. Written per
+# session into BOX_CFG (host-side, removed at exit) and mounted read-only. An old launch's
+# Playwright entry in the box's ~/.claude.json is dropped (it would only be ignored now).
 if command -v jq >/dev/null 2>&1; then
-  if [[ "$AIRLOCK_IMAGE" == *playwright* ]]; then
-    _mcp='.mcpServers.playwright = {command:"playwright-mcp", args:["--headless","--no-sandbox"]}'
-  else
-    _mcp='if has("mcpServers") then .mcpServers |= del(.playwright) else . end'
-  fi
-  if jq "$_mcp" "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
+  if jq 'if has("mcpServers") then .mcpServers |= del(.playwright) else . end' "$STATE_DIR/claude.json" > "$STATE_DIR/claude.json.tmp.$$" 2>/dev/null; then
     mv "$STATE_DIR/claude.json.tmp.$$" "$STATE_DIR/claude.json"
   else
     rm -f "$STATE_DIR/claude.json.tmp.$$"
   fi
 fi
+(umask 077; mkdir -p "$BOX_CFG")
+_mcp_file="$BOX_CFG/managed-mcp.json"
+_mcp_store="$STATE_DIR/mcp.json"
+_mcp_proj='{}'
+if [ -e "$_mcp_store" ] || [ -L "$_mcp_store" ]; then
+  if command -v jq >/dev/null 2>&1 && _airlock_mcp_valid "$_mcp_store"; then
+    _mcp_proj="$(jq -c '.mcpServers' "$_mcp_store")"
+  else
+    echo "airlock: WARNING: this project's MCP servers ($_mcp_store) are not valid (airlock mcp-servers set FILE again); the box gets none" >&2
+  fi
+fi
+_mcp_pw='{}'
+if [[ "$AIRLOCK_IMAGE" == *playwright* ]]; then
+  _mcp_pw='{"playwright":{"command":"playwright-mcp","args":["--headless","--no-sandbox"]}}'
+fi
+if ! { command -v jq >/dev/null 2>&1 \
+       && jq -n --argjson p "$_mcp_proj" --argjson w "$_mcp_pw" '{mcpServers: ($p + $w)}' > "$_mcp_file" 2>/dev/null; }; then
+  printf '%s\n' '{"mcpServers":{}}' > "$_mcp_file"
+  echo "airlock: WARNING: could not compose the box's MCP config; the box gets no MCP server" >&2
+fi
+
+# Settings the box can't change: the host's ~/.config/claude-airlock/settings.json (yours, for
+# every project of this account) reaches Claude through --settings, read-only, above the
+# box's own settings.json. Managed settings still win (hooks stay managed-only). Copied per
+# session so a later edit doesn't change a running box.
+_host_settings=""
+_hs_src="$HOME/.config/claude-airlock/settings.json"
+if [ -e "$_hs_src" ] || [ -L "$_hs_src" ]; then
+  if [ -f "$_hs_src" ] && [ ! -L "$_hs_src" ] && [ "$(stat -c %s "$_hs_src")" -le 1048576 ] \
+     && command -v jq >/dev/null 2>&1 && jq -e 'type == "object"' "$_hs_src" >/dev/null 2>&1 \
+     && jq . "$_hs_src" > "$BOX_CFG/settings.json" 2>/dev/null; then
+    _host_settings="$BOX_CFG/settings.json"
+  else
+    echo "airlock: WARNING: $_hs_src is not a JSON object in a regular file of at most 1 MiB; not used" >&2
+  fi
+fi
+
+# The workspace's own Claude settings files are still read in the box, and the box can write
+# them: one it leaves there acts in later sessions (env, apiKeyHelper, permissions), as its
+# CLAUDE.md, skills and memory do. Named at each launch so a new one doesn't go unseen. A
+# .mcp.json there starts no server (MCP comes from the host, above).
+_ws_read="" _ws_ign=""
+for _wf in .claude/settings.json .claude/settings.local.json; do
+  if [ -e "$WORKSPACE/$_wf" ] || [ -L "$WORKSPACE/$_wf" ]; then _ws_read="$_ws_read $_wf"; fi
+done
+if [ -e "$WORKSPACE/.mcp.json" ] || [ -L "$WORKSPACE/.mcp.json" ]; then _ws_ign=" .mcp.json"; fi
+if [ -n "$_ws_read" ]; then
+  echo "airlock: read in the box:$_ws_read (project settings the box can write: check changes to them)" >&2
+fi
+if [ -n "$_ws_ign" ]; then
+  echo "airlock: ignored in the box:$_ws_ign (MCP servers come from the host: airlock mcp-servers)" >&2
+fi
+unset _wf _ws_read _ws_ign
 
 # Prime the box with airlock conventions (empty shadow venv/node_modules are
 # expected — provision them; blocked egress is the firewall; etc.) so Claude
@@ -2501,6 +2616,8 @@ args=(
   # the directory with an empty read-only one. (An empty bind, not a tmpfs: podman copies
   # the image's files into a tmpfs by default.)
   -v "$STATE_DIR/managed-settings.d:/etc/claude-code/managed-settings.d:ro"
+  # This project's MCP servers (airlock mcp-servers), composed above: exclusive, read-only.
+  -v "$_mcp_file:/etc/claude-code/managed-mcp.json:ro"
   --env-file "$ENV_FILE"                         # OAuth token + secrets (0600, off the process table)
   -w "$WORKSPACE"
   -v "$STATE_DIR/dot-claude:/home/dev/.claude:rw"
@@ -3359,6 +3476,13 @@ case "${1:-}" in
 esac
 if [ -n "$PERMISSION_MODE" ]; then
   claude_args+=( --permission-mode "$PERMISSION_MODE" )
+fi
+# The host's settings.json, for a session (a prompt word first is one too) and for `agents`,
+# which hands --settings to the sessions it starts; any other subcommand would take the flag
+# for a stray argument.
+if [ -n "$_host_settings" ] && { [ "${1:-}" = agents ] || ! _airlock_is_subcmd "${1:-}"; }; then
+  args+=( -v "$_host_settings:/etc/airlock-box/settings.json:ro" )
+  claude_args+=( --settings /etc/airlock-box/settings.json )
 fi
 
 # A terminal only when there is one: a run from a script or a service unit (`claude -p`,
