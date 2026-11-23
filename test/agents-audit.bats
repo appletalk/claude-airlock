@@ -919,9 +919,9 @@ s.bind(("::1", int(sys.argv[1]))); s.listen()
 open(sys.argv[2], "w").close()
 time.sleep(30)' "$p" "$T/held.ready" > "$T/hold.out" 2>&1 3>&- & HOLD=$!
         for _ in $(seq 50); do [ -e "$T/held.ready" ] && break; sleep 0.1; done
-        [ -e "$T/held.ready" ] || { echo "couldn't hold [::1]:$p"; cat "$T/hold.out"; kill "$HOLD" 2>/dev/null; return 1; }
+        [ -e "$T/held.ready" ] || { echo "couldn't hold [::1]:$p"; cat "$T/hold.out"; kill "$HOLD" 2>/dev/null || true; return 1; }
         set +e; timeout 10 python3 -I "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" "$p" "$(id -u)" > "$T/held.out" 2>&1 3>&-; rc=$?; set -e
-        kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null || true
+        kill "$HOLD" 2>/dev/null || true; wait "$HOLD" 2>/dev/null || true
         [ "$rc" = 1 ] && grep -q "can't listen on \[::1\]:$p" "$T/held.out" || { echo "rc=$rc"; cat "$T/held.out"; return 1; }
     fi
     ui_teardown
