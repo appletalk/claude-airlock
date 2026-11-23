@@ -304,12 +304,12 @@ ENV CHECKPOINT_DISABLE=1
 
 # vector: the musl static build, so the binary carries its own libc and stays
 # decoupled from the Debian base.
-ARG VECTOR_VERSION=0.61.0
+ARG VECTOR_VERSION=0.62.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) varch=x86_64;  sha=e1609b8a55ef1c1fc4fd88633e2bc6366e9a4022f6f1ae846cadd27af5237621 ;; \
-      arm64) varch=aarch64; sha=12d7e91db2e447003558c955c4f510b17ed1d77340757f3e591e5222e464675c ;; \
+      amd64) varch=x86_64;  sha=41fd728f007bbac1f5d12e9fcea569879d1fb8819f3b55f62c54173b3bc0a6f9 ;; \
+      arm64) varch=aarch64; sha=88e7ad408362b8be4b38883422cedebe11cb3de92589320cfd5aeee6d8f381b9 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/vectordotdev/vector/releases/download/v${VECTOR_VERSION}/vector-${VECTOR_VERSION}-${varch}-unknown-linux-musl.tar.gz" -o /tmp/vector.tgz; \
