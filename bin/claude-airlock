@@ -828,14 +828,18 @@ _airlock_mcp_valid() {  # <file>: one JSON object, its mcpServers an object of o
 _airlock_mcp_valid_doc() {  # <file>: one JSON document (before compacting; any size up to the read cap)
   [ "$(jq -s 'length == 1' "$1" 2>/dev/null)" = true ]
 }
-# One line per server: name, kind, and its command or URL host and path; never env, headers,
-# arguments, URL userinfo, query or fragment, which may hold a credential. Every printed field
+# One line per server: name, kind, and its command (the program only) or URL (scheme and host
+# only); never env, headers, arguments, or a URL's userinfo, path, query or fragment, any of
+# which may hold a credential. Every printed field
 # loses control characters (C0, DEL, C1), so a name can't forge a line or a terminal escape.
 _airlock_mcp_list() {  # <file>
   jq -r '
     def clean: tostring | gsub("[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"; "?");
-    def where: if .command then .command
-               elif .url then (.url | tostring | sub("^(?<s>[A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@"; "\(.s)") | sub("[?#].*$"; ""))
+    def where: if .command then (.command | tostring | split(" ")[0])
+               elif .url then (.url | tostring
+                 | if test("^[A-Za-z][A-Za-z0-9+.-]*:") then
+                     capture("^(?<s>[A-Za-z][A-Za-z0-9+.-]*:[/\\\\]*)(?:[^/\\\\@?#]*@)?(?<h>[^/\\\\?#@]*)") | "\(.s)\(.h)"
+                   else "?" end)
                else "" end;
     .mcpServers | to_entries[]
     | "  \(.key | clean): \((.value.type // (if .value.command then "stdio" else "?" end)) | clean)\(if (.value | where) != "" then " (" + (.value | where | clean) + ")" else "" end)"' "$1"
@@ -848,21 +852,27 @@ if [ "${1:-}" = "mcp-servers" ]; then
   case "${2:-show}" in
     set)
       _mf="${3:?usage: airlock mcp-servers set FILE}"
-      # Read once, into a private file, and judge only that copy: FILE may sit in the workspace,
-      # where the box could swap it for a link to another file between a check and a read.
+      # FILE may sit in the workspace, where the box could swap it, or a folder on its path, for a
+      # link to another of your files. So no part of the path may be a link, and the file is
+      # opened once and read from that descriptor (checked to be the same regular file), into a
+      # private copy that alone is judged.
+      _mfa="$(realpath -ms -- "$_mf")"
+      _mfr="$(realpath -e -- "$_mf" 2>/dev/null)" || _mfr=""
+      if [ -z "$_mfr" ] || [ "$_mfa" != "$_mfr" ] || [ ! -f "$_mfr" ]; then
+        echo "airlock: $_mf is not a regular file, or a part of its path is a link; give the real path" >&2; exit 1
+      fi
       _mt="$(mktemp "$_mstore.tmp.XXXXXX")"
-      # cp -P copies a link swapped in after the test as a link (refused below), never its target.
-      if [ -L "$_mf" ] || [ ! -f "$_mf" ] || ! timeout 10 cp -P -- "$_mf" "$_mt.in" 2>/dev/null \
-         || [ -L "$_mt.in" ] || [ ! -f "$_mt.in" ] || [ "$(stat -c %s "$_mt.in")" -gt 1048576 ] || ! _airlock_mcp_valid_doc "$_mt.in" \
+      if ! exec 3< "$_mfr" || [ "$(readlink /proc/self/fd/3)" != "$_mfr" ] || [ ! -f /proc/self/fd/3 ] \
+         || ! head -c 1048577 <&3 > "$_mt.in" || [ "$(stat -c %s "$_mt.in")" -gt 1048576 ] || ! _airlock_mcp_valid_doc "$_mt.in" \
          || ! jq -c . "$_mt.in" > "$_mt" 2>/dev/null || ! _airlock_mcp_valid "$_mt"; then
-        rm -f "$_mt" "$_mt.in"
+        exec 3<&-; rm -f "$_mt" "$_mt.in"
         echo "airlock: $_mf is not a regular file holding {\"mcpServers\": {...}} (at most 64 KiB)" >&2; exit 1
       fi
-      rm -f "$_mt.in"
+      exec 3<&-; rm -f "$_mt.in"
       if ! { chmod 600 "$_mt" && mv -f "$_mt" "$_mstore"; }; then rm -f "$_mt"; echo "airlock: could not store $_mf" >&2; exit 1; fi
       echo "airlock: MCP servers for $(basename "$WORKSPACE") (from the next launch):"
       _airlock_mcp_list "$_mstore"
-      case "$(readlink -f -- "$_mf" 2>/dev/null)" in
+      case "$_mfa" in
         "$WORKSPACE"/*) echo "airlock: $_mf is in the project, which the box can write: check the servers above are yours" ;;
       esac ;;
     show)
@@ -2279,7 +2289,11 @@ if [ -e "$_hs_src" ] || [ -L "$_hs_src" ]; then
      && jq . "$_hs_src" > "$BOX_CFG/settings.json" 2>/dev/null; then
     _host_settings="$BOX_CFG/settings.json"
   else
-    echo "airlock: WARNING: $_hs_src is not a JSON object in a regular file of at most 1 MiB; not used" >&2
+    if command -v jq >/dev/null 2>&1; then
+      echo "airlock: WARNING: $_hs_src is not a JSON object in a regular file of at most 1 MiB; not used" >&2
+    else
+      echo "airlock: WARNING: jq not found, so $_hs_src can't be checked; not used" >&2
+    fi
   fi
 fi
 
@@ -3701,5 +3715,14 @@ if [ ${#AIRLOCK_EXEC[@]} -gt 0 ]; then
 elif [ "$AIRLOCK_SHELL" = 1 ]; then
   "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" bash -l
 else
-  "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" claude "${claude_args[@]}" "$@"
+  # --strict-mcp-config ("only --mcp-config servers") is what the managed MCP config already
+  # enforces, and Claude refuses the flag while that config is present: dropped (before any
+  # `--`), so callers that pass it (the agents' workers) keep working.
+  _cl=(); _dd=0
+  for _a in "$@"; do
+    if [ "$_dd" = 0 ] && [ "$_a" = --strict-mcp-config ]; then continue; fi
+    [ "$_a" != -- ] || _dd=1
+    _cl+=( "$_a" )
+  done
+  "$AIRLOCK_ENGINE" run "${args[@]}" "$AIRLOCK_IMAGE" claude "${claude_args[@]}" ${_cl[@]+"${_cl[@]}"}
 fi

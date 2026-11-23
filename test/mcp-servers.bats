@@ -49,12 +49,12 @@ claude_argv() { engine_args | sed -n '/^claude$/,$p' | sed '1d'; }
   f="$BATS_TEST_TMPDIR/m.json"
   printf '%s\n' '{"mcpServers":{"hub":{"type":"http","url":"https://hub.example.org/mcp?k=secret","headers":{"Authorization":"Bearer ${HUB_TOKEN}"}},"local":{"command":"hub-mcp","args":["--x"],"env":{"T":"literal-secret"}}}}' > "$f"
   run _launch "$p" mcp-servers set "$f"
-  [ "$status" -eq 0 ] && [[ "$output" == *"hub: http (https://hub.example.org/mcp)"* ]] && [[ "$output" == *"local: stdio (hub-mcp)"* ]] || { echo "$output"; false; }
+  [ "$status" -eq 0 ] && [[ "$output" == *"hub: http (https://hub.example.org)"* ]] && [[ "$output" == *"local: stdio (hub-mcp)"* ]] || { echo "$output"; false; }
   [[ "$output" != *secret* ]] && [[ "$output" != *"in the project"* ]]
   st="$(state_dir "$p")/mcp.json"
   [ "$(stat -c %a "$st")" = 600 ]
   run _launch "$p" mcp-servers show
-  [[ "$output" == *"hub: http (https://hub.example.org/mcp)"* ]] && [[ "$output" == *"local: stdio (hub-mcp)"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"hub: http (https://hub.example.org)"* ]] && [[ "$output" == *"local: stdio (hub-mcp)"* ]] || { echo "$output"; false; }
   [[ "$output" != *secret* ]] && [[ "$output" != *Bearer* ]]
   _launch "$p" >/dev/null 2>&1
   [ "$(jq -c '.mcpServers | keys' <<<"$(box_mcp)")" = '["hub","local"]' ]
@@ -132,7 +132,7 @@ claude_argv() { engine_args | sed -n '/^claude$/,$p' | sed '1d'; }
   run _launch "$p" mcp-servers show
   [ "${#lines[@]}" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" != *pw* ]] && [[ "$output" != *frag* ]] && [[ "$output" != *$'\e'* ]]
-  [[ "$output" == *"h: http (https://h.example.org/mcp)"* ]]
+  [[ "$output" == *"h: http (https://h.example.org)"* ]]
 }
 
 @test "a claude subcommand doesn't get --settings" {
@@ -141,7 +141,7 @@ claude_argv() { engine_args | sed -n '/^claude$/,$p' | sed '1d'; }
   : > "$ENGINE_ARGS_FILE"
   _launch "$p" remote-control >/dev/null 2>&1
   [[ "$(claude_argv)" == *remote-control* ]]
-  ! claude_argv | grep -qx -- --settings
+  ! claude_argv | grep -qx -- --settings || false
 }
 
 @test "the host's settings.json reaches the session read-only through --settings; a bad one is skipped" {
@@ -157,13 +157,13 @@ claude_argv() { engine_args | sed -n '/^claude$/,$p' | sed '1d'; }
     : > "$ENGINE_ARGS_FILE"
     run _launch "$p"
     [[ "$output" == *"settings.json is not a JSON object"* ]] || { echo "$output"; false; }
-    ! claude_argv | grep -qx -- --settings
+    ! claude_argv | grep -qx -- --settings || false
   done
   rm -f "$hs"; ln -s /etc/hostname "$hs"
   : > "$ENGINE_ARGS_FILE"
   run _launch "$p"
   [[ "$output" == *"settings.json is not a JSON object"* ]]
-  ! claude_argv | grep -qx -- --settings
+  ! claude_argv | grep -qx -- --settings || false
 }
 
 @test "the managed settings refuse inline shell in skills" {
@@ -198,4 +198,34 @@ claude_argv() { engine_args | sed -n '/^claude$/,$p' | sed '1d'; }
   rm -rf "$p/.claude" "$p/.mcp.json"
   run _launch "$p"
   [[ "$output" != *"in the box:"* ]]
+}
+
+@test "mcp-servers set refuses a path with a link in it (a box-made folder link to your files)" {
+  p="$(mkproj)"; h="$BATS_TEST_TMPDIR/hostcfg"; mkdir -p "$h"
+  echo '{"mcpServers":{"gh":{"command":"gh-mcp","env":{"GH_TOKEN":"fake"}}}}' > "$h/mcp.json"
+  ln -s "$h" "$p/cfg"
+  run _launch "$p" mcp-servers set "$p/cfg/mcp.json"
+  [ "$status" -ne 0 ] && [[ "$output" == *"a part of its path is a link"* ]] || { echo "$output"; false; }
+  [ ! -e "$(state_dir "$p")/mcp.json" ]
+}
+
+@test "mcp-servers show: a URL prints as scheme and host, a command as its program" {
+  p="$(mkproj)"
+  printf '%s' '{"mcpServers":{"a":{"type":"http","url":"https:\\\\u:pw2@h.example.org/x"},"c":{"type":"sse","url":"https://mcp.example.org/s/sk_live_TOK/sse"},"d":{"command":"/bin/sh -c TOKEN=sec"}}}' > "$BATS_TEST_TMPDIR/u.json"
+  _launch "$p" mcp-servers set "$BATS_TEST_TMPDIR/u.json"
+  run _launch "$p" mcp-servers show
+  [[ "$output" != *pw2* ]] && [[ "$output" != *sk_live* ]] && [[ "$output" != *TOKEN* ]] || { echo "$output"; false; }
+  [[ "$output" == *"c: sse (https://mcp.example.org)"* ]] && [[ "$output" == *"d: stdio (/bin/sh)"* ]] || { echo "$output"; false; }
+}
+
+# Claude refuses --strict-mcp-config while a managed MCP config is present, and the agents'
+# workers pass it: the launcher drops it (the managed config enforces the same thing).
+@test "--strict-mcp-config is dropped from claude's arguments; one after -- is left" {
+  p="$(mkproj)"
+  _launch "$p" -p hi --restricted --strict-mcp-config --tools "" >/dev/null 2>&1
+  ! claude_argv | grep -qx -- --strict-mcp-config || false
+  claude_argv | grep -qx -- --restricted && claude_argv | grep -qx -- --tools
+  : > "$ENGINE_ARGS_FILE"
+  _launch "$p" -p -- --strict-mcp-config >/dev/null 2>&1
+  claude_argv | grep -qx -- --strict-mcp-config
 }
