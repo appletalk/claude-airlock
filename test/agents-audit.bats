@@ -837,3 +837,22 @@ print("closed-after=%.1f" % (time.monotonic() - t) if gone else "still-open")' "
     [ -n "$s" ] && python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "$s" || { cat "$T/idle.out"; return 1; }
     [ "$c" = 200 ] || { echo "after the flood: $c"; return 1; }
 }
+
+# The header deadline is the whole request line and headers, not each read: a client that sends
+# a byte every few seconds is cut at 5 s all the same.
+@test "audit ui: a client trickling its headers a byte at a time is cut at the deadline" {
+    ui_setup; ui_start "$(id -u)"
+    r="$(python3 -c '
+import socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+t = time.monotonic()
+try:
+    for b in b"GET /select/vmui/ HTTP/1.0\r\nX-Slow: " + b"a" * 30:
+        s.sendall(bytes([b])); time.sleep(2)
+        if time.monotonic() - t > 20: break
+    print("held %.0f" % (time.monotonic() - t))
+except OSError:
+    print("cut %.1f" % (time.monotonic() - t))' "$PORT")"
+    ui_teardown
+    case "$r" in "cut "*) python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < 10 else 1)' "${r#cut }" ;; *) echo "$r"; false ;; esac
+}

@@ -54,6 +54,7 @@ NAME = "audit.localhost" if UID is not None else f"{secrets.token_hex(10)}.audit
 TOKEN = secrets.token_urlsafe(32)
 HOSTS = ORIGINS = COOKIE = None   # set in main(), once the port is known
 MAX_CONN = 256   # connections at once: unauthenticated ones can't take more threads than this
+HEAD_DEADLINE = 5   # seconds for the whole request line and headers, however slowly they come
 PASS = ("Accept", "Accept-Encoding", "Accept-Language", "Content-Type", "If-None-Match", "If-Modified-Since")
 MAX_BODY = 1 << 20
 
@@ -125,6 +126,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def relay(self):
         global LAST
+        cut = self.server.deadlines.pop(id(self.connection), None)
+        if cut is not None:   # the headers are in: the deadline no longer applies
+            cut.cancel()
         try:   # headers read: the body and the answer (a live tail streams) get longer
             self.connection.settimeout(60)
         except OSError:
@@ -234,6 +238,7 @@ class Server(http.server.ThreadingHTTPServer):
 
     refused = set()
     slots = threading.BoundedSemaphore(MAX_CONN)
+    deadlines = {}   # id(connection) -> its header deadline timer (dict ops are atomic in CPython)
 
     def process_request(self, request, client_address):   # at most MAX_CONN at once; more are closed
         if not self.slots.acquire(blocking=False):
@@ -246,10 +251,25 @@ class Server(http.server.ThreadingHTTPServer):
             raise
 
     def process_request_thread(self, request, client_address):
+        # A deadline for the whole request line and headers: the socket timeout restarts with
+        # every byte, so a client sending one now and then could hold a slot for ever.
+        cut = threading.Timer(HEAD_DEADLINE, self.cut, (request,))
+        cut.daemon = True
+        self.deadlines[id(request)] = cut
+        cut.start()
         try:
             super().process_request_thread(request, client_address)
         finally:
+            cut.cancel()
+            self.deadlines.pop(id(request), None)
             self.slots.release()
+
+    @staticmethod
+    def cut(request):
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def verify_request(self, request, client_address):
         if UID is None:   # the uid check is off: the token alone
