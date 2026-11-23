@@ -428,13 +428,22 @@ machine (nothing leaves it):
     in the Linux kernel, so this check refuses it ("uid (unknown)"): there, set `ui-uid-check off`
     on the `audit` line of `agents.conf` (then `sudo airlock-agents-apply --confirm`), and the
     token alone guards the UI.
+  - **With the check off, the name and port are secret too:** each run serves a new random name,
+    `<20 hex>.audit.localhost`, on a free port (unless `--port` names one), and answers no other
+    name, not even `127.0.0.1` or `localhost`. Cookies don't separate ports, so a cookie for a
+    known name would reach a program listening on another port of that name (any web page can
+    send your browser there, and the program would replay it); one for a name nobody else knows
+    goes nowhere. What it can't cover: under WSL a Windows program already listening on the
+    chosen port gets the browser's first request, token included, and the relay can't see Windows
+    sockets. A port chosen fresh each run makes that a guess, not a setup.
   - **Only itself:** a web page in your own browser runs as you, so the UI serves only itself: a
     `Host` of `audit.localhost:<port>`, `127.0.0.1:<port>` or `localhost:<port>` (no other name
     pointed at loopback), no request another site started (an `Origin` or `Sec-Fetch-Site` that
     isn't this one's is refused before anything reaches the store), and no CORS (VictoriaLogs
-    allows any origin; those headers are dropped). A browser too old to send either header can
-    still send a blind query, but can't read the answer. Refused requests don't count as use. The
-    store's door still allows only queries.
+    allows any origin; those headers are dropped). A request from another site carries no cookie
+    (`SameSite=Strict`), so it gets 403 whatever headers it sends. Refused requests don't count as
+    use, and at most 256 connections are served at once. The store's door still allows only
+    queries.
 - **The auditor (optional):** an agent user of its own that reads the store for you, so a
   look back doesn't mean reading lines yourself. Add it to `agents.conf` like the others, with
   `audit on`: `auditor claude-audit uid 1103 subuid 1400000 home 10G`. It gets the same

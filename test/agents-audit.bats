@@ -441,6 +441,7 @@ ui_start() {  # ui_start <uid|off> [idle most]; TOKEN: this run's, from the prin
     for _ in $(seq 50); do
         if grep -q 'audit store' "$T/ui.out" 2>/dev/null; then
             TOKEN="$(sed -n 's|.*/select/vmui/?token=\([A-Za-z0-9_-]*\).*|\1|p' "$T/ui.out" | head -1)"
+            NAME="$(sed -n 's|.*UI: http://\([^:/]*\):.*|\1|p' "$T/ui.out" | head -1)"
             [ -n "$TOKEN" ] && return 0
         fi
         sleep 0.1
@@ -583,6 +584,8 @@ time.sleep(0.3); s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("
     echo AGENTS_AUDIT_UI_UID_CHECK=off >> "$AIRLOCK_AGENTS_ENV"
     AGENTS_AUDIT_UI="$T/fake-ui" run "$OP" audit ui --port 9500
     [ "$output" = "$AGENTS_AUDIT_SOCK 9500 off" ] || { echo "$output"; return 1; }
+    AGENTS_AUDIT_UI="$T/fake-ui" run "$OP" audit ui   # no --port: a free one each run (0)
+    [ "$output" = "$AGENTS_AUDIT_SOCK 0 off" ] || { echo "$output"; return 1; }
 }
 
 @test "audit ui: the token: no cookie or a wrong token is 403; the printed URL sets the cookie and redirects without it" {
@@ -654,18 +657,68 @@ PY
     ui_teardown
     [ "$up" = 1 ] && [ "$c" = 200 ] || { echo "up=$up code=$c"; cat "$T/ui.out"; return 1; }
     ! grep -q -i 'error\|traceback' "$T/ui.out" || { cat "$T/ui.out"; return 1; }
+    # and a kernel without IPv6: the socket itself refused (EAFNOSUPPORT)
+    ui_setup
+    cat > "$T/noaf6.py" <<'PY'
+import errno, runpy, socket, sys
+class NoV6(socket.socket):
+    def __init__(self, family=-1, *a, **k):
+        if family == socket.AF_INET6:
+            raise OSError(errno.EAFNOSUPPORT, "Address family not supported by protocol")
+        super().__init__(family, *a, **k)
+socket.socket = NoV6
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+PY
+    python3 -I "$T/noaf6.py" "$REPO/agents/lib/audit-ui" "$AGENTS_AUDIT_SOCK" "$PORT" "$(id -u)" > "$T/ui.out" 2>&1 & UI=$!
+    for _ in $(seq 50); do grep -q 'audit store' "$T/ui.out" 2>/dev/null && break; sleep 0.1; done
+    TOKEN="$(sed -n 's|.*/select/vmui/?token=\([A-Za-z0-9_-]*\).*|\1|p' "$T/ui.out" | head -1)"
+    c="$(ucurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/")"
+    ui_teardown
+    [ "$c" = 200 ] || { echo "no-AF_INET6 code=$c"; cat "$T/ui.out"; return 1; }
 }
 
-@test "audit ui: with the uid check off another uid is served (the token alone); with it on, refused" {
+@test "audit ui: with the uid check off: the token alone, a random name per run and only that Host" {
     ui_setup; ui_start off
     grep -q 'with its token alone (the uid check is off)' "$T/ui.out" || { cat "$T/ui.out"; ui_teardown; return 1; }
-    off="$(ucurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/")"
-    nocookie="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/")"
+    n1="$NAME"
+    [[ "$n1" =~ ^[0-9a-f]{20}\.audit\.localhost$ ]] || { echo "name $n1"; ui_teardown; return 1; }
+    ok="$(ucurl -s -o /dev/null -w '%{http_code}' -H "Host: $n1:$PORT" "http://127.0.0.1:$PORT/select/vmui/")"
+    nocookie="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H "Host: $n1:$PORT" "http://127.0.0.1:$PORT/select/vmui/")"
+    known="$(ucurl -s -o /dev/null -w '%{http_code}' -H "Host: audit.localhost:$PORT" "http://127.0.0.1:$PORT/select/vmui/")"
+    ip="$(ucurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/?token=$TOKEN")"
     ui_teardown
+    ui_start off; n2="$NAME"; ui_teardown
+    [ "$ok" = 200 ] && [ "$nocookie" = 403 ] && [ "$known" = 421 ] && [ "$ip" = 421 ] || { echo "$ok $nocookie $known $ip"; return 1; }
+    [ "$n1" != "$n2" ] || { echo "same name twice: $n1"; return 1; }
+    # with the check on, the same cookie from another uid is refused at the connection
     ui_start "$(( $(id -u) + 1 ))"
     on="$(ucurl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/select/vmui/" || true)"
     ui_teardown
-    [ "$off" = 200 ] && [ "$nocookie" = 403 ] && [ "$on" = 000 ] || { echo "$off $nocookie $on"; return 1; }
+    [ "$on" = 000 ] || { echo "on: $on"; return 1; }
+}
+
+@test "audit ui: port 0 picks a free port, the same on 127.0.0.1 and ::1, and prints it" {
+    ui_setup; PORT0="$PORT"; PORT=0; ui_start off; PORT="$PORT0"
+    p="$(sed -n 's|.*UI: http://[^:]*:\([0-9]*\)/.*|\1|p' "$T/ui.out" | head -1)"
+    c="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -b "audit_ui_$p=$TOKEN" -H "Host: $NAME:$p" "http://127.0.0.1:$p/select/vmui/")"
+    c6=skip
+    if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0))' 2>/dev/null; then
+        c6="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -b "audit_ui_$p=$TOKEN" -H "Host: $NAME:$p" "http://[::1]:$p/select/vmui/")"
+    fi
+    ui_teardown
+    [ -n "$p" ] && [ "$p" != 0 ] && [ "$c" = 200 ] && { [ "$c6" = 200 ] || [ "$c6" = skip ]; } || { echo "port $p code $c v6 $c6"; cat "$T/ui.out"; return 1; }
+}
+
+@test "audit ui: an odd cookie from another service doesn't hide this run's; a redirect never leaves the UI" {
+    ui_setup; ui_start "$(id -u)"
+    odd="$(/usr/bin/curl --noproxy "*" -s -o /dev/null -w '%{http_code}' -H "Cookie: a=\"x; x[]=1; y=a\\b; audit_ui_$PORT=$TOKEN" "http://127.0.0.1:$PORT/select/vmui/")"
+    loc1="$(/usr/bin/curl --noproxy "*" -s -D - -o /dev/null --path-as-is "http://127.0.0.1:$PORT/\\evil.example.org/?token=$TOKEN" | sed -n 's/^Location: //p' | tr -d '\r')"
+    loc2="$(/usr/bin/curl --noproxy "*" -s -D - -o /dev/null "http://127.0.0.1:$PORT/select/vmui/?flag&q=a%26b+c&token=$TOKEN&x=%FF" | sed -n 's/^Location: //p' | tr -d '\r')"
+    ui_teardown
+    [ "$odd" = 200 ] || { echo "odd cookie: $odd"; return 1; }
+    [ "$loc1" = "/select/vmui/" ] || { echo "loc1: $loc1"; return 1; }
+    [ "$loc2" = "/select/vmui/?flag&q=a%26b+c&x=%FF" ] || { echo "loc2: $loc2"; return 1; }
 }
 
 # ---- audit events ----------------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 # audit-ui <store socket> <port> <uid|off>: the audit store's web UI (VictoriaLogs' vmui) on
 # http://audit.localhost:<port>/ (loopback only: 127.0.0.1, and ::1 where the host has it) for one
-# user, until Ctrl-C (the operator's `audit ui`, docs/agents.md).
+# user, until Ctrl-C (the operator's `audit ui`, docs/agents.md). Port 0: a free one, picked here.
 # It closes by itself after 30 minutes without a request, and after 4 hours whatever happens, so
 # a forgotten terminal doesn't keep the store open. (Three more arguments, idle, most and the
 # store's read timeout in seconds, are for the tests; the operator command never passes them.)
@@ -15,7 +15,11 @@
 # - each connection's owner, looked up in the kernel's socket table (/proc/net/tcp, tcp6: the uid
 #   that made the client socket): only <uid> is served. `off` turns this check off, for a host
 #   whose browser isn't a Linux process (WSL: a browser on Windows owns no socket here), leaving
-#   the token alone.
+#   the token alone. Then the name is secret too, a new random <label>.audit.localhost each run
+#   and the only Host served: cookies don't separate ports, so a cookie for a known name would go
+#   to any listener on another port of that name (a page there would read it and replay it);
+#   one for a name nobody else knows goes nowhere else. (With the check on, a replayed cookie
+#   from another uid is refused anyway.)
 # That user's browser can still be steered by a web page, so the UI is served to itself alone:
 # - only a Host of audit.localhost:<port>, 127.0.0.1:<port> or localhost:<port> (a rebound name,
 #   one that resolves to loopback so the page could read the answers, gets 421);
@@ -28,9 +32,9 @@
 # client), one request per connection; a path or header with a control byte is refused. The
 # store's door (vmauth) still decides what is a query; this adds no path rules of its own.
 # Refused requests don't count as use: they never hold off the idle limit.
+import errno
 import hmac
 import http.client
-import http.cookies
 import http.server
 import secrets
 import socket
@@ -40,17 +44,16 @@ import threading
 import time
 import urllib.parse
 
-SOCK, PORT = sys.argv[1], int(sys.argv[2])
+SOCK, PORT = sys.argv[1], int(sys.argv[2])   # PORT 0: a free one, set in main()
 UID = None if sys.argv[3] == "off" else int(sys.argv[3])
 IDLE = int(sys.argv[4]) if len(sys.argv) > 4 else 30 * 60
 MOST = int(sys.argv[5]) if len(sys.argv) > 5 else 4 * 3600
 STORE_TIMEOUT = int(sys.argv[6]) if len(sys.argv) > 6 else 120
 STARTED = LAST = time.monotonic()
-NAME = "audit.localhost"
-HOSTS = {f"{NAME}:{PORT}", f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+NAME = "audit.localhost" if UID is not None else f"{secrets.token_hex(10)}.audit.localhost"
 TOKEN = secrets.token_urlsafe(32)
-COOKIE = f"audit_ui_{PORT}"
-ORIGINS = {"http://" + h for h in HOSTS}
+HOSTS = ORIGINS = COOKIE = None   # set in main(), once the port is known
+MAX_CONN = 256   # connections at once: unauthenticated ones can't take more threads than this
 PASS = ("Accept", "Accept-Encoding", "Accept-Language", "Content-Type", "If-None-Match", "If-Modified-Since")
 MAX_BODY = 1 << 20
 
@@ -99,14 +102,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         super().end_headers()
 
-    def has_cookie(self):  # this run's cookie among the request's Cookie headers
-        c = http.cookies.SimpleCookie()
-        try:
-            c.load("; ".join(self.headers.get_all("Cookie") or []))
-        except http.cookies.CookieError:
-            return False
-        m = c.get(COOKIE)
-        return m is not None and hmac.compare_digest(m.value.encode(), TOKEN.encode())
+    def has_cookie(self):  # this run's cookie among the request's Cookie headers (parsed by hand:
+        # another service on the name can set an odd cookie a strict parser would stop at)
+        ok = False
+        for h in self.headers.get_all("Cookie") or []:
+            for part in h.split(";"):
+                k, eq, v = part.strip().partition("=")
+                if eq and k == COOKIE and hmac.compare_digest(v.strip().encode(), TOKEN.encode()):
+                    ok = True
+        return ok
 
     def refuse(self, code, why):
         try:
@@ -121,7 +125,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def relay(self):
         global LAST
         if self.headers.get("Host", "") not in HOSTS:
-            return self.refuse(421, "audit-ui: only http://127.0.0.1:%d/ (or localhost)" % PORT)
+            return self.refuse(421, "audit-ui: only the address `audit ui` printed")
         origin, site = self.headers.get("Origin"), self.headers.get("Sec-Fetch-Site")
         if (origin is not None and origin not in ORIGINS) or (site is not None and site not in ("same-origin", "none")):
             return self.refuse(403, "audit-ui: only the UI itself, not another site")
@@ -139,12 +143,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # The token: the printed URL's ?token= gets the cookie and a redirect to the same path
         # without it (never forwarded); everything else needs the cookie.
         path, _, query = self.path.partition("?")
-        params = urllib.parse.parse_qsl(query, keep_blank_values=True)
-        given = [v for k, v in params if k == "token"]
+        pairs = query.split("&") if query else []
+        given = [urllib.parse.unquote_plus(x.partition("=")[2]) for x in pairs
+                 if urllib.parse.unquote_plus(x.partition("=")[0]) == "token"]
         if given:
             if len(given) != 1 or not hmac.compare_digest(given[0].encode(), TOKEN.encode()):
                 return self.refuse(403, "audit-ui: not this run's token (open the URL it printed)")
-            rest = urllib.parse.urlencode([(k, v) for k, v in params if k != "token"])
+            # Back to the same page, the rest of the query as it came; a path that a browser could
+            # read as another host (//x, /\x) goes to the UI's own page instead.
+            rest = "&".join(x for x in pairs if urllib.parse.unquote_plus(x.partition("=")[0]) != "token")
+            if path.startswith("//") or "\\" in path:
+                path = "/select/vmui/"
             try:
                 self.send_response(303)
                 self.send_header("Location", path + ("?" + rest if rest else ""))
@@ -218,6 +227,23 @@ class Server(http.server.ThreadingHTTPServer):
             print(f"audit-ui: a request failed ({type(err).__name__})", file=sys.stderr, flush=True)
 
     refused = set()
+    slots = threading.BoundedSemaphore(MAX_CONN)
+
+    def process_request(self, request, client_address):   # at most MAX_CONN at once; more are closed
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
     def verify_request(self, request, client_address):
         if UID is None:   # the uid check is off: the token alone
@@ -243,22 +269,41 @@ class Server6(Server):
         super().server_bind()
 
 
-def main():
-    try:
-        srv = Server(("127.0.0.1", PORT), Handler)
-    except OSError as e:
-        print(f"audit-ui: can't listen on 127.0.0.1:{PORT}: {e.strerror} (another port: --port <n>)", file=sys.stderr)
-        return 1
-    # ::1 too where the host has it (browsers try it first for audit.localhost); a host without
-    # IPv6 (or without ::1) is served on 127.0.0.1 alone. Nothing but loopback is ever bound.
-    srvs = [srv]
-    try:
-        srvs.append(Server6(("::1", PORT), Handler))
-    except OSError as e:
-        if e.errno == 98:   # EADDRINUSE: ::1 has the port taken by something else
+def listen():  # (servers, port): 127.0.0.1, and ::1 on the same port where the host has it
+    # (browsers try ::1 first for *.localhost); a host without IPv6 (or without ::1) is served on
+    # 127.0.0.1 alone. Nothing but loopback is ever bound. Port 0: a free one on both (a few
+    # tries, in case ::1 has the one 127.0.0.1 got).
+    for _ in range(20 if PORT == 0 else 1):
+        try:
+            srv = Server(("127.0.0.1", PORT), Handler)
+        except OSError as e:
+            print(f"audit-ui: can't listen on 127.0.0.1:{PORT}: {e.strerror} (another port: --port <n>)", file=sys.stderr)
+            return None, None
+        port = srv.server_address[1]
+        try:
+            return [srv, Server6(("::1", port), Handler)], port
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                return [srv], port
             srv.server_close()
-            print(f"audit-ui: can't listen on [::1]:{PORT}: {e.strerror} (another port: --port <n>)", file=sys.stderr)
-            return 1
+            if PORT != 0:   # ::1 has the port taken by something else, which the browser could reach first
+                print(f"audit-ui: can't listen on [::1]:{port}: {e.strerror} (another port: --port <n>)", file=sys.stderr)
+                return None, None
+    print("audit-ui: found no port free on both 127.0.0.1 and ::1", file=sys.stderr)
+    return None, None
+
+
+def main():
+    global HOSTS, ORIGINS, COOKIE
+    srvs, port = listen()
+    if srvs is None:
+        return 1
+    srv = srvs[0]
+    # The Hosts served: the name (the random one alone with the uid check off), and with the check
+    # on also 127.0.0.1 and localhost (tools that don't resolve *.localhost).
+    HOSTS = {f"{NAME}:{port}"} | (set() if UID is None else {f"127.0.0.1:{port}", f"localhost:{port}"})
+    ORIGINS = {"http://" + h for h in HOSTS}
+    COOKIE = f"audit_ui_{port}"
     why = ["closed (Ctrl-C)"]
 
     def expire():  # the two limits, checked every second
@@ -276,7 +321,7 @@ def main():
             return
 
     who = "with its token alone (the uid check is off)" if UID is None else "for you alone"
-    print(f"the audit store's UI: http://{NAME}:{PORT}/select/vmui/?token={TOKEN}\n"
+    print(f"the audit store's UI: http://{NAME}:{port}/select/vmui/?token={TOKEN}\n"
           f"  ({who}; Ctrl-C to close; closes after {IDLE // 60} min idle, {MOST // 60} min at most; "
           f"the token is this run's only)", flush=True)
     threading.Thread(target=expire, daemon=True).start()

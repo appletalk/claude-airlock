@@ -1412,7 +1412,9 @@ audit_ui() {
     esac
     audit_ready
     local who; who="$(id -u)"
-    [ "${AGENTS_AUDIT_UI_UID_CHECK:-on}" != off ] || who=off
+    # With the uid check off the port is a free one each run (unless --port names one), like the
+    # name: nothing to squat in advance.
+    if [ "${AGENTS_AUDIT_UI_UID_CHECK:-on}" = off ]; then who=off; [ -n "${1:-}" ] || port=0; fi
     exec python3 -I "${AGENTS_AUDIT_UI:-$AGENTS_LIB/audit-ui}" "$AUDIT_SOCK" "$port" "$who"
 }
 # audit events: the lines the store rated (audit.severity, set at ingest), at a severity and
