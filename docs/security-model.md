@@ -112,7 +112,9 @@ write, and widening anything always prompts on the host.
   settings or the workspace's `.claude/` runs) and refuse command-sourced plugins. Each launch
   removes `hooks` and the command settings (`apiKeyHelper`, `awsAuthRefresh`,
   `awsCredentialExport`, `otelHeadersHelper`, `gcpAuthRefresh`, `proxyAuthHelper`,
-  `fileSuggestion`, `processWrapper`, `subagentStatusLine`) from that file, and every `env` name
+  `fileSuggestion`, `processWrapper`, `subagentStatusLine`), the plugin keys (`enabledPlugins`,
+  `extraKnownMarketplaces`: a plugin brings monitors, LSP servers and binaries) and the
+  sandbox's command fields from that file, and every `env` name
   but the airlock's own (Claude passes `env` to every command it starts, so `BASH_ENV`, `PATH`
   or `LD_PRELOAD` there would run the box's code), with a notice; if a filter fails, the box
   starts from the airlock baseline. Without `jq` on the host or the install's

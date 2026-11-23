@@ -588,3 +588,26 @@ STUB
   jq -e 'has("apiKeyHelper") or has("model") or (.env | has("LD_PRELOAD")) | not' <<<"$out" >/dev/null || { echo "$out"; false; }
   [ "$(jq -r .env.DISABLE_TELEMETRY <<<"$out")" = 1 ]
 }
+
+# A plugin the box wrote into its ~/.claude and enabled brings its monitors, LSP servers and
+# binaries into later sessions; the sandbox's command fields name programs to run.
+@test "plugin keys and the sandbox's command fields are removed at launch; the rest of sandbox stays" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
+  printf '%s\n' '{"enabledPlugins":{"x@m":true},"extraKnownMarketplaces":{"m":{"source":{"source":"directory","path":"/home/dev/.claude/m"}}},"sandbox":{"enabled":true,"ripgrep":{"command":"/home/dev/.claude/x"},"bwrapPath":"/x","socatPath":"/y"},"theme":"dark"}' > "$sd/dot-claude/settings.json"
+  run _launch "$p"
+  [[ "$output" == *"removed enabledPlugins extraKnownMarketplaces from the box's settings.json"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"removed the sandbox's command settings"* ]] || { echo "$output"; false; }
+  out="$(_box_settings "$p")"
+  jq -e '(has("enabledPlugins") or has("extraKnownMarketplaces") | not) and .sandbox == {enabled: true} and .theme == "dark"' <<<"$out" >/dev/null || { echo "$out"; false; }
+}
+
+# A box file the baseline can't merge into (permissions not an object) starts from the baseline.
+@test "a box settings.json the baseline can't merge into is replaced by the baseline" {
+  p="$(mkproj)"; sd="$(state_dir "$p")"; mkdir -p "$sd/dot-claude"
+  printf '%s\n' '{"permissions":"x","env":{"CLAUDE_CODE_SCROLL_SPEED":"99"},"theme":"dark"}' > "$sd/dot-claude/settings.json"
+  run _launch "$p"
+  [[ "$output" == *"could not merge the baseline"*"start from the airlock baseline"* ]] || { echo "$output"; false; }
+  out="$(_box_settings "$p")"
+  [ "$(jq -r .env.CLAUDE_CODE_SCROLL_SPEED <<<"$out")" = "$(jq -r .env.CLAUDE_CODE_SCROLL_SPEED "$BATS_TEST_DIRNAME/../config/box-settings.json")" ]
+  [ "$(jq -r .env.DISABLE_TELEMETRY <<<"$out")" = 1 ]
+}

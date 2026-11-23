@@ -2237,6 +2237,12 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
      || ! jq -e 'type == "object"' "$_bsd/in" >/dev/null 2>&1; then
     rm -f "$_bsd/in"; echo '{}' > "$_bsd/in"
   fi
+  # If a filter fails, the box starts from the baseline alone: never from the unfiltered file.
+  _bsfallback() {
+    if cp -- "$_repo/config/box-settings.json" "$_bsd/fallback" 2>/dev/null; then _bscur="$_bsd/fallback"
+    else echo '{}' > "$_bsd/fallback"; _bscur="$_bsd/fallback"; fi
+    echo "airlock: WARNING: could not $1 in $_bs; the box's settings start from the airlock baseline" >&2
+  }
   _bscur="$_bsd/in"
   if jq -s '
     .[0] as $e | .[1] as $d
@@ -2246,7 +2252,7 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   ' "$_bscur" "$_repo/config/box-settings.json" > "$_bsd/merged" 2>/dev/null; then
     _bscur="$_bsd/merged"
   else
-    echo "airlock: WARNING: could not merge the settings baseline into $_bs (malformed?); the box runs without it" >&2
+    _bsfallback "merge the baseline"
   fi
 
   # Telemetry and error reporting are asserted OFF here every launch, after the baseline
@@ -2258,14 +2264,11 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   # session of this project. Hooks are refused anyway (allowManagedHooksOnly in the managed
   # settings); the helpers have no managed switch, so they are dropped here each launch. The
   # list follows Claude Code's own list of settings that hold a command (2.1.330), less
-  # statusLine (the managed one wins) and policyHelpers (honoured only from admin sources).
-  # If a filter fails, the box starts from the baseline alone: never from the unfiltered file.
-  _bsfallback() {
-    if cp -- "$_repo/config/box-settings.json" "$_bsd/fallback" 2>/dev/null; then _bscur="$_bsd/fallback"
-    else echo '{}' > "$_bsd/fallback"; _bscur="$_bsd/fallback"; fi
-    echo "airlock: WARNING: could not $1 in $_bs; the box's settings start from the airlock baseline" >&2
-  }
-  _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion processWrapper subagentStatusLine'
+  # statusLine (the managed one wins) and policyHelpers (honoured only from admin sources), plus
+  # the plugin keys: a plugin the box wrote into its ~/.claude and enabled here would bring its
+  # monitors, LSP servers and binaries (commands) into every later session. The sandbox's
+  # command fields (ripgrep, bwrapPath, socatPath) are removed with them.
+  _cmdkeys='hooks apiKeyHelper awsAuthRefresh awsCredentialExport otelHeadersHelper gcpAuthRefresh proxyAuthHelper fileSuggestion processWrapper subagentStatusLine enabledPlugins extraKnownMarketplaces'
   _dropped="$(jq -r --arg k "$_cmdkeys" '($k | split(" ")) as $ks | [keys[] | select(. as $x | $ks | index($x))] | join(" ")' "$_bscur" 2>/dev/null)" || { _dropped=""; _bsfallback "list the command settings"; }
   if [ -n "$_dropped" ]; then
     if jq --arg k "$_cmdkeys" '($k | split(" ")) as $ks | with_entries(select(.key as $x | $ks | index($x) | not))' "$_bscur" > "$_bsd/nocmd" 2>/dev/null; then
@@ -2273,6 +2276,14 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
       echo "airlock: removed $_dropped from the box's settings.json (a setting that runs a command; the box may not keep one)" >&2
     else
       _bsfallback "remove $_dropped"
+    fi
+  fi
+  if jq -e '(.sandbox | type) == "object" and (.sandbox | has("ripgrep") or has("bwrapPath") or has("socatPath"))' "$_bscur" >/dev/null 2>&1; then
+    if jq '.sandbox |= del(.ripgrep, .bwrapPath, .socatPath)' "$_bscur" > "$_bsd/nosbx" 2>/dev/null; then
+      _bscur="$_bsd/nosbx"
+      echo "airlock: removed the sandbox's command settings from the box's settings.json" >&2
+    else
+      _bsfallback "remove the sandbox's command settings"
     fi
   fi
   # `env` runs a command too: Claude passes it to everything it starts (the status line, the
@@ -2323,6 +2334,8 @@ else
     fi
     _airlock_place "$_bst" "$STATE_DIR/dot-claude/settings.json"
     echo "airlock: WARNING: $_why; the box's settings.json was reset to the airlock baseline (it can't be checked)" >&2
+  else
+    echo "claude-airlock: could not reset the box's settings.json (no private temp file); not starting" >&2; exit 1
   fi
   unset _bst _why
 fi
