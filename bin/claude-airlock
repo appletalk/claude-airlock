@@ -2311,10 +2311,20 @@ if [ -f "$_repo/config/box-settings.json" ] && command -v jq >/dev/null 2>&1; th
   fi
   _airlock_place "$_bscur" "$_bs"
   rm -rf "$_bsd"
-elif ! command -v jq >/dev/null 2>&1; then
-  echo "airlock: WARNING: jq not found; the box's settings.json was not checked (the mounted managed settings still apply)" >&2
 else
-  echo "airlock: WARNING: $_repo/config/box-settings.json is missing; the box's settings.json was not checked (the mounted managed settings still apply)" >&2
+  # Without jq or the baseline the box's file can't be filtered, so it isn't kept: it is
+  # replaced by the baseline as it ships (a copy needs no jq), or {} with no baseline. The
+  # managed settings keep telemetry off either way.
+  if _bst="$(_airlock_private_tmp)"; then
+    if [ -f "$_repo/config/box-settings.json" ] && cp -- "$_repo/config/box-settings.json" "$_bst" 2>/dev/null; then
+      _why="jq not found"
+    else
+      printf '{}\n' > "$_bst"; _why="$_repo/config/box-settings.json is missing"
+    fi
+    _airlock_place "$_bst" "$STATE_DIR/dot-claude/settings.json"
+    echo "airlock: WARNING: $_why; the box's settings.json was reset to the airlock baseline (it can't be checked)" >&2
+  fi
+  unset _bst _why
 fi
 
 # --- Concurrent-session guard: two sessions on ONE conversation ---

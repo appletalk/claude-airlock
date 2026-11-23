@@ -115,8 +115,9 @@ write, and widening anything always prompts on the host.
   `fileSuggestion`, `processWrapper`, `subagentStatusLine`) from that file, and every `env` name
   but the airlock's own (Claude passes `env` to every command it starts, so `BASH_ENV`, `PATH`
   or `LD_PRELOAD` there would run the box's code), with a notice; if a filter fails, the box
-  starts from the airlock baseline. This needs `jq` on the host and the install's
-  `config/box-settings.json`: without either the launcher warns and leaves the file as it is. A setting written during a session can still act in that
+  starts from the airlock baseline. Without `jq` on the host or the install's
+  `config/box-settings.json` the file can't be checked, so it is reset to the baseline (or
+  `{}`), with a warning. A setting written during a session can still act in that
   session until the box ends.
 - The managed status line's bash starts from an empty environment (`env -i`, a fixed `PATH`),
   so `BASH_ENV` or a `PATH` from any settings file can't steer it. The `/bin/sh` and `env` that
