@@ -222,12 +222,20 @@ git_roundtrip() { command -v git >/dev/null || return 127
                   git -C "$r" init -q \
                     && git -C "$r" -c user.name=smoke -c user.email=smoke@example.invalid commit -q --allow-empty -m smoke \
                     && [ "$(git -C "$r" rev-list --count HEAD)" = 1 ]; }
-hdr "developer tools (git, rg, gh, make)"
+# Same for rsync: a local tree copy, checked byte for byte.
+# shellcheck disable=SC2317,SC2329
+rsync_roundtrip() { command -v rsync >/dev/null || return 127
+                    local t rc; t="$(mktemp -d)" || return 1
+                    mkdir -p "$t/src/sub" && printf 'x\n' > "$t/src/sub/f" \
+                      && rsync -a "$t/src/" "$t/dst/" && cmp -s "$t/src/sub/f" "$t/dst/sub/f"
+                    rc=$?; rm -rf "$t"; return "$rc"; }
+hdr "developer tools (git, rg, gh, make, rsync)"
 expect_ok   "git commits in a fresh repo"                   git_roundtrip
 expect_ok   "rg finds a pattern"                            rg -q -F 'printf' shell/good.sh
 expect_fail "rg reports no match"                           rg -q -F 'no-such-string-in-this-file' shell/good.sh
 expect_ok   "gh runs"                                       gh --version
 expect_ok   "make runs"                                     make --version
+expect_ok   "rsync copies a tree"                           rsync_roundtrip
 
 hdr "runtimes (node, pwsh)"
 expect_ok   "node runs a script"                            node node/good.js
