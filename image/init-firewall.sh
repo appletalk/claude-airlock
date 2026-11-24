@@ -82,7 +82,9 @@ classify_entry() {
 # is fine (nothing to contain); we still install the v6 DROP policy defensively in case
 # an address appears later.
 HAVE_V6_ADDR=0
-ip -6 addr show scope global 2>/dev/null | grep -q inet6 && HAVE_V6_ADDR=1
+# Captured, not piped into grep -q: under pipefail grep -q's early exit can kill ip with SIGPIPE,
+# and the failed pipeline would then read as "no IPv6" (fail-open).
+case "$(ip -6 addr show scope global 2>/dev/null)" in *inet6*) HAVE_V6_ADDR=1 ;; esac
 HAVE_IP6TABLES=0
 if command -v ip6tables >/dev/null 2>&1 && ip6tables -L -n >/dev/null 2>&1; then
   HAVE_IP6TABLES=1

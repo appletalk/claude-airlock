@@ -73,7 +73,9 @@ is "$nnp" 0 "every process runs with no_new_privs" "$nnp process(es) without no_
 # The command's session: field 6 of stat, counted after the ") " that ends the comm field.
 sid="$(sed 's/^.*) //' "$PROC/$SELF/stat" 2>/dev/null | awk '{ print $4 }')"
 is "$sid" "$SELF" "the command is a session leader" "the command's session is '${sid:-?}', not its own ($SELF)"
-if env | grep -q '^DUMB_INIT_'; then bad "the command sees DUMB_INIT_* variables"; else pass "no DUMB_INIT_* in the command's environment"; fi
+# compgen, not `env | grep -q`: under pipefail grep -q's early exit can kill env with SIGPIPE
+# (a large environment, a loaded host), and the failed pipeline then reads as "none seen".
+if compgen -e DUMB_INIT_ >/dev/null; then bad "the command sees DUMB_INIT_* variables"; else pass "no DUMB_INIT_* in the command's environment"; fi
 
 # setuid/setgid: the root filesystem only (-xdev), so the workspace and other host mounts are not
 # searched. find exits non-zero on directories dev can't read (/root and the like); a file in one
