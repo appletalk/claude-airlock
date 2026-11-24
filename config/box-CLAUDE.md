@@ -42,8 +42,8 @@ guidance.
 - **Tools:** Python 3.13, Node 24, PowerShell 7, bash (not zsh); if a project pins another
   version, flag it rather than force it. Offline linters for config: `promtool check`/`test
   rules`, `terraform fmt -check`, `tflint`, `ansible-lint`, `vector validate --no-environment`,
-  `Invoke-ScriptAnalyzer` (for Windows PowerShell 5.1, its `PSUseCompatibleSyntax` and
-  `PSUseCompatibleCommands` against
+  `otelcol-contrib validate --config`, `Invoke-ScriptAnalyzer` (for Windows PowerShell 5.1, its
+  `PSUseCompatibleSyntax` and `PSUseCompatibleCommands` against
   `win-48_x64_10.0.17763.0_5.1.17763.316_x64_4.0.30319.42000_framework`), `shellcheck`, `bats`;
   `magick` and Pillow to verify an image you made. Anything that downloads a dependency graph
   first (`terraform init`/`validate`, `tflint --init`, `ansible-galaxy collection install`,

@@ -32,6 +32,7 @@ provider downloads, no collection resolution, no plugin fetches. Syntax and lint
 | `ansible-playbook --syntax-check`, `ansible-doc` with `ansible.windows` | the one baked-in collection: Windows playbooks' `win_*` module names resolve offline, and `ansible-doc` shows their options. Arguments are not checked: ansible-lint's `args` rule skips PowerShell modules. pywinrm is not included (a box cannot reach a Windows host) |
 | `vector validate --no-environment` | config parse and topology, no component or health checks |
 | `alloy fmt -t`, `alloy validate` | Alloy syntax and formatting, component references and argument schemas |
+| `otelcol-contrib validate --config` | OpenTelemetry Collector (contrib distribution) config: loads it, runs every component's own validation and builds the pipeline graph, without starting a component. File, `env:` and `yaml:` config sources only; validate with the version you deploy |
 | `envoy --mode validate -c` | Envoy config schema, references and filters, no listener opened. The binary also runs a whole proxy against local upstreams (`--disable-hot-restart`), to test a config end to end |
 | `luajit` | Lua 5.1 as Envoy's Lua filter runs it, for unit tests of filter code outside Envoy |
 | `Invoke-ScriptAnalyzer` (pwsh) | PowerShell lint. Bundles the Windows PowerShell 5.1 **compatibility profiles**, so `PSUseCompatibleSyntax` / `PSUseCompatibleCommands` can catch 7.x-only syntax that would fail on a 5.1 guest. |
@@ -41,8 +42,9 @@ provider downloads, no collection resolution, no plugin fetches. Syntax and lint
 
 **Deliberately out of scope**, because they need the network and would otherwise degrade to
 a no-op in a box: `terraform init` / `validate`, `tflint --init` (external rulesets),
-`ansible-galaxy collection install`, bare `vector validate`, and `alloy run` (which starts
-the components and reports usage upstream). They fail rather than lie. A project that
+`ansible-galaxy collection install`, bare `vector validate`, `alloy run` (which starts
+the components and reports usage upstream), and running `otelcol-contrib` itself or with a remote
+config source (`http:`, `s3:`). They fail rather than lie. A project that
 really needs one opens a narrow `egress =` in `.airlock/config` for a one-time fetch, and
 caches the result with `artifact_dirs` (e.g. `.terraform`), which persists across sessions.
 `ansible.windows` is the one collection the image carries itself: ansible-core has no

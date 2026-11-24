@@ -241,6 +241,7 @@ ENV GOTOOLCHAIN=local \
 #   ansible-playbook --syntax-check  with ansible.windows: win_* module names (not arguments)
 #   vector validate --no-environment config parse + topology, no component/health checks
 #   alloy fmt -t / alloy validate    Alloy syntax + component/argument schema check
+#   otelcol-contrib validate         Collector config load, component Validate(), pipeline graph; never Start
 #   Invoke-ScriptAnalyzer            PowerShell script lint
 #
 # OUT OF SCOPE - these need the network and are expected to FAIL LOUDLY in a box:
@@ -249,6 +250,7 @@ ENV GOTOOLCHAIN=local \
 #   ansible-galaxy collection install pulls from galaxy.ansible.com
 #   vector validate (no flag)        opens sinks and runs health checks
 #   alloy run                        starts the components and reports usage upstream
+#   otelcol-contrib (no subcommand)  starts receivers/exporters; remote config providers (http:, s3:) too
 # A project that needs those opens a narrow `egress =` in .airlock/config for a
 # one-time fetch and caches the result via `artifact_dirs` (e.g. `.terraform`),
 # which persists across sessions. It is not this image's job to guess a provider
@@ -343,6 +345,29 @@ RUN set -eux; \
     install -m 0555 "/tmp/alloy-linux-${arch}" /usr/local/bin/alloy; \
     rm -f /tmp/alloy.zip "/tmp/alloy-linux-${arch}"; \
     alloy --version
+
+# OpenTelemetry Collector, contrib distribution: `validate` only. It loads the config
+# (file:, env: and yaml: sources), runs every component's own Validate() and builds the
+# pipeline graph without calling Start, so no port is bound and no exporter connects;
+# it completes at minimal egress. Running the collector, or a config from a remote
+# provider (http:, s3:), is the out-of-scope half. A CGO-free Go build (no libc
+# dependency); like Alloy a large binary, since every contrib component is linked in.
+# Upstream publishes one .sha256 per artifact (no combined checksums file).
+ARG OTELCOL_CONTRIB_VERSION=0.165.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha=bd6e73d94bf3359ad6fac25529a8ee308adb9b0b8a0e8af034ed3891fbe5aa33 ;; \
+      arm64) sha=376420729c862230807bc89811d07d10031eaeca3f6481fe371a2bdcefd2c8fa ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_CONTRIB_VERSION}/otelcol-contrib_${OTELCOL_CONTRIB_VERSION}_linux_${arch}.tar.gz" -o /tmp/otelcol.tgz; \
+    echo "${sha}  /tmp/otelcol.tgz" | sha256sum -c -; \
+    mkdir -p /tmp/otelcol-x; \
+    tar -xzf /tmp/otelcol.tgz -C /tmp/otelcol-x --no-same-owner; \
+    install -m 0555 "$(find /tmp/otelcol-x -type f -name otelcol-contrib -perm -u+x | head -1)" /usr/local/bin/otelcol-contrib; \
+    rm -rf /tmp/otelcol.tgz /tmp/otelcol-x; \
+    otelcol-contrib --version
 
 # Envoy: `envoy --mode validate -c <config>` checks a config (schema, references, filters)
 # without opening a listener or an upstream connection. The binary also runs a whole proxy
