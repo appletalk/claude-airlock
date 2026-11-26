@@ -7,14 +7,20 @@ whole product. We want to hear about weaknesses in it.
 
 **Report privately. Do not open a public issue for a security bug.**
 
-- Use GitHub's private vulnerability reporting: the repository's **Security** tab, then
-  **Report a vulnerability**. (If the tab is not visible, the maintainer needs to enable
-  "Private vulnerability reporting" in the repo settings; ask them to.)
+- Use GitHub's private vulnerability reporting: the repository's **Security** tab (shown as
+  **Security and quality**), then **Report a vulnerability**. If that button is missing,
+  open an issue asking for a private contact, with no details of the problem in it.
 - Include what an attacker can do, which containment property it breaks, and a proof of
   concept if you have one.
 
 Please allow a reasonable window to fix and release before any public disclosure. We aim to
-acknowledge a report within a few days.
+acknowledge a report within a few days. A bug in Claude Code itself goes to Anthropic, and
+one in Podman, Docker or the kernel to that project.
+
+A hole in the egress and credential proxy (a box getting past its allowlist or a preset, or
+reaching a credential it holds) belongs to
+[airlock-envoy](https://github.com/appletalk/airlock-envoy/blob/main/SECURITY.md); report it
+there.
 
 ## Threat model in one paragraph
 
@@ -37,6 +43,11 @@ Anything that lets a box exceed its intended authority. For example:
   host-side store it should not (the state dir, another project's data).
 - **Credential exposure:** the OAuth token or an injected secret leaking somewhere it
   should not be (other host users, logs, the process table).
+- **Agent users** ([docs/agents.md](docs/agents.md)): an agent account reaching the
+  operator's or another agent's files, keys, sessions or credentials; getting out of its
+  user-manager sandbox or past its host firewall rule; a web research question carrying a
+  secret leaving without being held, or an answer reaching the agent without passing the
+  gate; `halt` not stopping it; or an agent changing what the audit store records.
 - **Host code trusting box-writable files.** The launcher (and `airlock paste`) runs on the
   host as the box's user, and the box decides what every name in its read-write mounts is:
   a file, a folder, a FIFO, a link to anywhere that user can reach. Host code never opens a
@@ -84,8 +95,10 @@ is very welcome.
 
 ## Supported versions
 
-This is a single-branch project; fixes land on `main`. Rebuild the images after pulling
-with `make install-airlock`:
+This is a single-branch project; fixes land on `main`. After pulling, run `make install`
+from a clean clone that no box mounts (its root steps run code from the clone). It rebuilds
+the images, and updates the agents toolkit and the audit store's binaries where they are set
+up, asking before each step:
 
 - It picks up a new Claude Code release immediately.
 - It refreshes the Debian packages (base tag and `stable-security`) once a week. `make
