@@ -200,17 +200,29 @@ uv_venv_offline() { command -v uv >/dev/null || return 127
                     UV_CACHE_DIR="$t/cache" uv venv --offline -q "$t/v" \
                       && "$t/v/bin/python" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 13))'
                     rc=$?; rm -rf "$t"; return "$rc"; }
+# The firewall rejects fast, so "downloads disabled" and "tried to download, the network
+# said no" both just fail: the check also requires that uv never tried (no download or
+# network error, no URL in its output), so removing UV_PYTHON_DOWNLOADS=never fails it.
 # shellcheck disable=SC2317,SC2329
 uv_no_python_download() { command -v uv >/dev/null || return 127
-                          local t rc; t="$(mktemp -d)" || return 1
-                          UV_CACHE_DIR="$t/cache" timeout 20 uv venv -q --python 3.10 "$t/v"
+                          local t out rc; t="$(mktemp -d)" || return 1
+                          out="$(UV_CACHE_DIR="$t/cache" timeout 20 uv venv -q --python 3.10 "$t/v" 2>&1)"
                           rc=$?; rm -rf "$t"
-                          [ "$rc" -eq 124 ] && return 0   # hung on the network: let the check fail
+                          if [ "$rc" -eq 124 ]; then echo "uv hung on the network"; return 0; fi
+                          # only what an attempt prints (uv's own refusal may mention downloads)
+                          if grep -qiE 'failed to download|error sending request|dns error|tcp connect|connection (refused|reset)|unreachable|timed out|https?://' <<<"$out"; then
+                            echo "uv tried to download a python: $out"; return 0
+                          fi
                           return "$rc"; }
+# shellcheck disable=SC2317,SC2329
+pytest_bad_is_a_test_failure() { python3 -m pytest -q -p no:cacheprovider python/test_bad.py >/dev/null 2>&1
+                                 [ "$?" -ne 1 ]; }   # 1 = a test failed; 2-5 are usage/collection errors
 hdr "python test tooling (pytest, uv)"
 expect_ok   "pytest passes a passing test"     python3 -m pytest -q -p no:cacheprovider python/test_good.py
-expect_fail "pytest fails a failing test"      python3 -m pytest -q -p no:cacheprovider python/test_bad.py
+expect_fail "pytest fails a failing test (exit 1, not a usage error)" pytest_bad_is_a_test_failure
 expect_ok   "uv runs"                          uv --version
+expect_ok   "uvx runs"                         uvx --version
+expect_ok   "UV_PYTHON_DOWNLOADS is never"     test "${UV_PYTHON_DOWNLOADS:-}" = never
 expect_ok   "uv builds a venv offline on the image's python" uv_venv_offline
 expect_fail "uv refuses a python it would download (UV_PYTHON_DOWNLOADS=never)" uv_no_python_download
 

@@ -80,9 +80,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # with minimal egress cannot pip install them (an ad-hoc venv sees them with
 # `python3 -m venv --system-site-packages`). pytest (python3-pytest) is the distro's
 # too, so a project's test suite runs at minimal egress when it needs nothing beyond
-# these. This is for ubiquitous system-level
-# tooling only; project-specific deps still go in the project's own venv (which,
-# being isolated, won't see these unless it needs `airlock egress pypi`).
+# these. This is for ubiquitous system-level tooling only; project-specific deps
+# still go in the project's own venv (which, being isolated, won't see these unless
+# it needs `airlock egress pypi`).
 #
 # ImageMagick and Pillow back `airlock paste`: WSLg offers BMP, the Claude API takes
 # PNG/JPEG/GIF/WebP, so without a converter a paste on that platform fails. They also
