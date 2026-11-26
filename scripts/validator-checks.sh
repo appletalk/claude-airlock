@@ -191,6 +191,29 @@ expect_ok   "requests imports"                 python3 -c 'import requests'
 expect_ok   "openpyxl builds a workbook"       python3 -c 'import lxml.etree, openpyxl; openpyxl.Workbook()'
 expect_ok   "jinja2 renders a template"        python3 -c 'import jinja2, sys; sys.exit(jinja2.Template("{{ x }}").render(x="ok") != "ok")'
 
+# pytest is the distro's; uv is the pinned upstream binary. uv must build a venv on the
+# image's Python offline, and must refuse (fast, not hang on the firewall) a Python it
+# would have to download: UV_PYTHON_DOWNLOADS=never.
+# shellcheck disable=SC2317,SC2329
+uv_venv_offline() { command -v uv >/dev/null || return 127
+                    local t rc; t="$(mktemp -d)" || return 1
+                    UV_CACHE_DIR="$t/cache" uv venv --offline -q "$t/v" \
+                      && "$t/v/bin/python" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 13))'
+                    rc=$?; rm -rf "$t"; return "$rc"; }
+# shellcheck disable=SC2317,SC2329
+uv_no_python_download() { command -v uv >/dev/null || return 127
+                          local t rc; t="$(mktemp -d)" || return 1
+                          UV_CACHE_DIR="$t/cache" timeout 20 uv venv -q --python 3.10 "$t/v"
+                          rc=$?; rm -rf "$t"
+                          [ "$rc" -eq 124 ] && return 0   # hung on the network: let the check fail
+                          return "$rc"; }
+hdr "python test tooling (pytest, uv)"
+expect_ok   "pytest passes a passing test"     python3 -m pytest -q -p no:cacheprovider python/test_good.py
+expect_fail "pytest fails a failing test"      python3 -m pytest -q -p no:cacheprovider python/test_bad.py
+expect_ok   "uv runs"                          uv --version
+expect_ok   "uv builds a venv offline on the image's python" uv_venv_offline
+expect_fail "uv refuses a python it would download (UV_PYTHON_DOWNLOADS=never)" uv_no_python_download
+
 # The infra clients' offline halves (image/dev/Dockerfile, "Infra clients"). Each client
 # is otherwise only useful against an endpoint a project grants, so these are the parts
 # that must work at minimal egress - and, like the validators, must reject bad input.

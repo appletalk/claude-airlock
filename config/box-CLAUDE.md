@@ -39,7 +39,7 @@ guidance.
   connection refused, a 403 from the proxy, a name that won't resolve) is the sandbox by design,
   not an outage: report it plainly, naming the host, and don't retry another way. Only the
   human can widen it, on the host; say what you need and why.
-- **Tools:** Python 3.13, Node 24, PowerShell 7, bash (not zsh); if a project pins another
+- **Tools:** Python 3.13 (with pytest, and uv, which uses it and never downloads another), Node 24, PowerShell 7, bash (not zsh); if a project pins another
   version, flag it rather than force it. Offline linters for config: `promtool check`/`test
   rules`, `terraform fmt -check`, `tflint`, `ansible-lint`, `vector validate --no-environment`,
   `otelcol-contrib validate --config`, `Invoke-ScriptAnalyzer` (for Windows PowerShell 5.1, its

@@ -6,7 +6,7 @@
 | --- | --- |
 | `claude-airlock:base` | Debian + Claude Code + the egress firewall and proxy bridge, and little else: curl, jq and a bare `python3` (no pip or venv). No git, gh or editor; those are in `:dev`. |
 | `claude-airlock:os` | The base without Claude Code (its `os` build stage). Not a box image: `:dev` builds on it and copies Claude Code from `:base` as its last layer. |
-| `claude-airlock:dev` *(default)* | Base + git, gh, make, less, vim, neovim, zsh, ripgrep, xxd, file, tree, sqlite3, moreutils, zstd, shfmt, Python (pip, venv), Node, Go, PowerShell, build tools, PostgreSQL, YAML tooling, ACL tools (`setfacl`, `getfacl`), rsync, infra clients (kubectl, helm, sops, gt, fj, drill; no credentials baked in), and the [offline config validators](#config-validators). |
+| `claude-airlock:dev` *(default)* | Base + git, gh, make, less, vim, neovim, zsh, ripgrep, xxd, file, tree, sqlite3, moreutils, zstd, shfmt, Python (pip, venv, pytest, uv), Node, Go, PowerShell, build tools, PostgreSQL, YAML tooling, ACL tools (`setfacl`, `getfacl`), rsync, infra clients (kubectl, helm, sops, gt, fj, drill; no credentials baked in), and the [offline config validators](#config-validators). |
 | `claude-airlock:playwright` | Dev + headless Chromium + the Playwright MCP. Not built by the install. |
 
 - **Choose an image** with `AIRLOCK_IMAGE` in the host config, or per project with
@@ -38,6 +38,7 @@ provider downloads, no collection resolution, no plugin fetches. Syntax and lint
 | `Invoke-ScriptAnalyzer` (pwsh) | PowerShell lint. Bundles the Windows PowerShell 5.1 **compatibility profiles**, so `PSUseCompatibleSyntax` / `PSUseCompatibleCommands` can catch 7.x-only syntax that would fail on a 5.1 guest. |
 | `shellcheck` | shell lint; also what this repo's `make lint` and pre-commit hook run |
 | `bats` | shell test runner; this repo's `make test` |
+| `pytest` (`python3-pytest`), `uv` / `uvx` | Python test runner and project tool. A suite that needs only the image's Python and distro modules runs offline; `uv sync` / `uv run` with dependencies needs PyPI (`egress =`). `UV_PYTHON_DOWNLOADS=never`: uv uses the image's Python 3.13 and never downloads another |
 | `magick` (ImageMagick), Pillow (`python3-pil`) | image conversion and inspection; backs `airlock paste` where the clipboard offers BMP |
 
 **Deliberately out of scope**, because they need the network and would otherwise degrade to

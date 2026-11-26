@@ -78,7 +78,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # a project to open PyPI just to `import yaml`. cryptography, requests, openpyxl and
 # jinja2 are here for the same reason: ad-hoc scripts reach for them constantly, and a box
 # with minimal egress cannot pip install them (an ad-hoc venv sees them with
-# `python3 -m venv --system-site-packages`). This is for ubiquitous system-level
+# `python3 -m venv --system-site-packages`). pytest (python3-pytest) is the distro's
+# too, so a project's test suite runs at minimal egress when it needs nothing beyond
+# these. This is for ubiquitous system-level
 # tooling only; project-specific deps still go in the project's own venv (which,
 # being isolated, won't see these unless it needs `airlock egress pypi`).
 #
@@ -126,6 +128,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-requests \
       python3-openpyxl \
       python3-jinja2 \
+      python3-pytest \
       build-essential \
       pkg-config \
       imagemagick \
@@ -225,6 +228,33 @@ RUN set -eux; \
     GOTOOLCHAIN=local go version | grep -qF "go${GO_VERSION} linux/${arch}"
 ENV GOTOOLCHAIN=local \
     GOFLAGS=-modcacherw
+
+# uv (and uvx) from the upstream release tarball, pinned by version + sha256 per arch (the
+# checksums are the release's own per-artifact .sha256 files; Debian trixie has no uv
+# package). Python projects that use uv (`uv run`, `uv sync`, `uv venv`) work as
+# they do on a host: a project whose only needs are the distro packages above runs at
+# minimal egress, one with dependencies opens PyPI with `egress =` like pip would.
+#
+# UV_PYTHON_DOWNLOADS=never: uv uses the image's Python and never downloads its own
+# interpreter builds (from GitHub, which a box doesn't reach). A project pinned to
+# another Python version fails with uv's "no interpreter found" message instead of a
+# network error.
+ARG UV_VERSION=0.13.10
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) uarch=x86_64; sha=bf65ac1a0af10f92c522d91ac096c7c0a39657647b155577e7836c2cbbb4526c ;; \
+      arm64) uarch=aarch64; sha=14590f644805a6234ffe071154340669e38137f38e60aa9629690119704107d2 ;; \
+      *) echo "unsupported arch" >&2; exit 1 ;; \
+    esac; \
+    d="uv-${uarch}-unknown-linux-gnu"; \
+    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${d}.tar.gz" -o /tmp/uv.tgz; \
+    echo "${sha}  /tmp/uv.tgz" | sha256sum -c -; \
+    mkdir -p /tmp/uv-x; \
+    tar -xzf /tmp/uv.tgz -C /tmp/uv-x --no-same-owner; \
+    install -m 0555 "/tmp/uv-x/${d}/uv" "/tmp/uv-x/${d}/uvx" /usr/local/bin/; \
+    rm -rf /tmp/uv.tgz /tmp/uv-x; \
+    test "$(uv --version | cut -d' ' -f2)" = "${UV_VERSION}"
+ENV UV_PYTHON_DOWNLOADS=never
 
 # ============================================================================
 # Config validators - SYNTAX AND LINT ONLY, and offline by construction.
